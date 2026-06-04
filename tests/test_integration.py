@@ -74,16 +74,13 @@ async def auto_unload_entries(hass: HomeAssistant):
 
     The integration spawns a 100ms tick loop on setup. Unloading the
     entry sets a stop event that lets the loop exit cleanly within one
-    tick interval, so ``hass.async_block_till_done()`` in the test
-    body returns promptly.
+    tick interval. The next test's ``hass`` fixture is a fresh instance
+    with a fresh event loop, so leftover tasks from this one are GC'd.
     """
     yield
     for entry in list(hass.config_entries.async_entries()):
         if entry.state is ConfigEntryState.LOADED:
             await hass.config_entries.async_unload(entry.entry_id)
-    # Let any remaining task drains complete. This is bounded by the
-    # tick interval (100ms) thanks to the stop-event mechanism.
-    await hass.async_block_till_done()
 
 
 @pytest.fixture
@@ -120,14 +117,12 @@ async def test_integration_loads(hass: HomeAssistant, config_entry: MockConfigEn
     """The integration should load and set up successfully."""
     config_entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(config_entry.entry_id)
-    await hass.async_block_till_done()
 
 
 async def test_services_registered(hass: HomeAssistant, config_entry: MockConfigEntry) -> None:
     """After setup, intentional.fire, intentional.reload, etc. should be registered."""
     config_entry.add_to_hass(hass)
     await hass.config_entries.async_setup(config_entry.entry_id)
-    await hass.async_block_till_done()
 
     # HA stores services in hass.services.async_services()
     services = hass.services.async_services()
@@ -144,7 +139,6 @@ async def test_sensor_entities_created(
     """The integration should create a summary sensor on setup."""
     config_entry.add_to_hass(hass)
     await hass.config_entries.async_setup(config_entry.entry_id)
-    await hass.async_block_till_done()
 
     # The summary sensor should be present
     state = hass.states.get("sensor.intentional_intent_engine_summary")
@@ -160,7 +154,6 @@ async def test_rule_file_loaded(
     """The engine should load the test rule file on setup."""
     config_entry.add_to_hass(hass)
     await hass.config_entries.async_setup(config_entry.entry_id)
-    await hass.async_block_till_done()
 
     engine = hass.data[DOMAIN][config_entry.entry_id]
     assert len(engine._rules) == 1  # noqa: SLF001
@@ -173,7 +166,6 @@ async def test_reload_service_works(
     """Calling intentional.reload should re-read rule files from disk."""
     config_entry.add_to_hass(hass)
     await hass.config_entries.async_setup(config_entry.entry_id)
-    await hass.async_block_till_done()
 
     engine = hass.data[DOMAIN][config_entry.entry_id]
     assert len(engine._rules) == 1  # noqa: SLF001
@@ -199,7 +191,6 @@ async def test_api_health_endpoint(
     """GET /api/intentional/health should return integration status."""
     config_entry.add_to_hass(hass)
     await hass.config_entries.async_setup(config_entry.entry_id)
-    await hass.async_block_till_done()
 
     client = await hass_client()
     # HA's test client doesn't auto-auth; we need a long-lived token
@@ -222,7 +213,6 @@ async def test_api_requires_auth(
     """All API endpoints should require authentication."""
     config_entry.add_to_hass(hass)
     await hass.config_entries.async_setup(config_entry.entry_id)
-    await hass.async_block_till_done()
 
     client = await hass_client()
     # Hit an endpoint without auth
@@ -237,10 +227,8 @@ async def test_integration_unload(hass: HomeAssistant, config_entry: MockConfigE
     """The integration should unload cleanly."""
     config_entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(config_entry.entry_id)
-    await hass.async_block_till_done()
 
     assert await hass.config_entries.async_unload(config_entry.entry_id)
-    await hass.async_block_till_done()
     # Engine should be removed from hass.data
     assert config_entry.entry_id not in hass.data.get(DOMAIN, {})
 
@@ -257,6 +245,5 @@ async def test_missing_rule_dir_is_created(
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
-    await hass.async_block_till_done()
     # The directory should now exist
     assert nonexistent_dir.exists()
