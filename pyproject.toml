@@ -35,9 +35,11 @@ test = [
     "pytest-asyncio>=0.23",
     "aiohttp>=3.9",
 ]
+# pytest-homeassistant-custom-component pins homeassistant strictly,
+# so don't pin it here. The extra installs whatever HA version the
+# test harness requires.
 integration = [
-    "pytest-homeassistant-custom-component==0.13.250",
-    "homeassistant==2025.5.0",
+    "pytest-homeassistant-custom-component>=0.13.250",
 ]
 dev = [
     "ruff>=0.3",

@@ -70,7 +70,8 @@ pip install -e ".[all-tests]"
 pytest tests/test_integration.py -v
 ```
 
-This requires ~500MB of disk space for the HA dependency tree.
+This requires ~500MB of disk space for the HA dependency tree
+(installed transitively via pytest-homeassistant-custom-component).
 Most developers only run unit tests locally and let CI handle
 the integration suite.
 
