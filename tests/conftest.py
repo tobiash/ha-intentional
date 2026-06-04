@@ -42,10 +42,22 @@ CUSTOM_COMPONENTS_DIR = REPO_ROOT / "custom_components"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-# Integration tests: need custom_components/ on sys.path so
-# `from custom_components.intentional.api import ...` works. We APPEND
-# rather than insert at 0 — otherwise `custom_components/intentional/`
-# would shadow the engine `intentional` package and break engine tests.
-# Integration tests use the fully-qualified name, so position doesn't matter.
+# Integration tests need TWO things on sys.path:
+#
+#   1. ``custom_components/`` so ``from custom_components.intentional.X``
+#      resolves correctly (used by test_api.py, test_integration.py).
+#   2. ``custom_components/intentional/`` itself, because some integration
+#      modules use BARE absolute imports (e.g. ``from _engine import ...``)
+#      that need ``_engine`` to be a top-level package. The integration's
+#      own dir must be on sys.path for that to work — that's how HA's
+#      loader sets things up in production too.
+#
+# We use ``append`` (not insert at 0) so neither entry shadows the engine
+# ``intentional`` package. Position doesn't matter for the integration
+# tests because they use the fully-qualified name and bare _engine imports
+# are unambiguous.
 if str(CUSTOM_COMPONENTS_DIR) not in sys.path:
     sys.path.append(str(CUSTOM_COMPONENTS_DIR))
+INTEGRATION_DIR = REPO_ROOT / "custom_components" / "intentional"
+if str(INTEGRATION_DIR) not in sys.path:
+    sys.path.append(str(INTEGRATION_DIR))
