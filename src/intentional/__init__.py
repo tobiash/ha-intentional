@@ -1,0 +1,57 @@
+"""ha-intentional: Declarative intent-based automation for Home Assistant.
+
+This package contains the pure-Python intent engine, which is the core of
+ha-intentional. The Home Assistant integration is in `custom_components/intentional/`
+and uses this engine to load YAML rules, listen to state changes, and apply
+resolved intents to Home Assistant entities.
+
+The engine has no Home Assistant dependencies. It can be used standalone for
+testing, development, or in other contexts.
+"""
+
+from __future__ import annotations
+
+__version__ = "0.1.0"
+
+__all__ = [
+    "Intent",
+    "Authority",
+    "ResolvedIntent",
+    "resolve_intents",
+    "AnimationSpec",
+    "AnimationFrame",
+    "load_rules",
+    "RuleLoadError",
+    "__version__",
+]
+
+
+def __getattr__(name: str):  # type: ignore[no-untyped-def]
+    """Lazily import submodules to avoid forcing all of them to exist at import time.
+
+    This makes test-driven development practical: write tests for one module,
+    run them, without the whole package being assembled.
+    """
+    if name in ("Intent", "Authority"):
+        from intentional.intent import Authority, Intent
+
+        return {"Intent": Intent, "Authority": Authority}[name]
+    if name in ("ResolvedIntent", "resolve_intents"):
+        from intentional.compositor import ResolvedIntent, resolve_intents
+
+        return {
+            "ResolvedIntent": ResolvedIntent,
+            "resolve_intents": resolve_intents,
+        }[name]
+    if name in ("AnimationSpec", "AnimationFrame"):
+        from intentional.animation import AnimationFrame, AnimationSpec
+
+        return {
+            "AnimationSpec": AnimationSpec,
+            "AnimationFrame": AnimationFrame,
+        }[name]
+    if name in ("load_rules", "RuleLoadError"):
+        from intentional.yaml_loader import RuleLoadError, load_rules
+
+        return {"load_rules": load_rules, "RuleLoadError": RuleLoadError}[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
