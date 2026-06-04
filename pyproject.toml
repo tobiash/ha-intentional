@@ -91,6 +91,8 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "B011"]
+"custom_components/*" = ["F401", "E402"]   # F401: HA conventions allow re-exports
+"custom_components/intentional/__init__.py" = ["F401"]
 
 [tool.mypy]
 python_version = "3.11"

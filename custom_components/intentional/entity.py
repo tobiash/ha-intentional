@@ -18,7 +18,7 @@ from typing import Any
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
@@ -27,7 +27,6 @@ from .const import (
     ATTR_REASON,
     ATTR_RULE_ID,
     ATTR_TARGET,
-    ATTR_TICK_INTERVAL_MS,
     ATTR_TTL_REMAINING,
     DEFAULT_NAME,
     DOMAIN,
@@ -55,6 +54,18 @@ async def async_setup_entry(
 
     target_entities = [IntentionalTargetSensor(hass, engine, entry, t) for t in sorted(targets)]
     async_add_entities(target_entities)
+
+    # Listen for refresh events from __init__.py and call async_write_ha_state
+    async def _on_refresh(event) -> None:
+        if event.data.get("entry_id") != entry.entry_id:
+            return
+        for entity in target_entities:
+            entity.async_write_ha_state()
+        summary.async_write_ha_state()
+
+    entry.async_on_unload(
+        hass.bus.async_listen(f"{DOMAIN}_refresh", _on_refresh)
+    )
 
 
 class IntentionalTargetSensor(SensorEntity):

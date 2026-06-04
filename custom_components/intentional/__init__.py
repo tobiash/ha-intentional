@@ -17,16 +17,16 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, State, SupportsResponse
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.directory_watcher import async_watch_directory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.storage import Store
-from homeassistant.helpers.directory_watcher import async_watch_directory
 from homeassistant.helpers.typing import ConfigType
-import voluptuous as vol
 
 from intentional import Engine, RuleLoadError, load_rules
 from intentional.yaml_loader import Rule
@@ -42,7 +42,7 @@ from .const import (
     STORAGE_KEY,
     STORAGE_VERSION,
 )
-from .entity import IntentionalTargetSensor, IntentionalSummarySensor
+from .entity import IntentionalSummarySensor, IntentionalTargetSensor
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -95,8 +95,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         engine.load_rules(new_rules)
         # Re-evaluate to pick up the new rules immediately
         engine.evaluate_all()
-        # Notify entities to refresh
-        await hass.data[DOMAIN]["refresh_callbacks"].__contains__.__class__  # noop
         # Trigger a manual state update so entities refresh
         await _refresh_entities(hass, entry)
 
@@ -182,11 +180,13 @@ def _on_ha_state_change_factory(hass: HomeAssistant, engine: Engine):
 
 
 async def _refresh_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Trigger a state update on all Intentional entities."""
-    # Force the sensor platform to refresh — they pull from the engine
-    # on each state read, so we just need to nudge HA to poll them.
-    for entity_id in hass.states.async_entity_ids(DOMAIN):
-        hass.states.async_set(entity_id, hass.states.get(entity_id).state if hass.states.get(entity_id) else "0")
+    """Force the sensor platform to refresh by dispatching a custom event.
+
+    The sensor entities listen for this event and call async_write_ha_state.
+    This is the standard HA pattern for forcing entity refreshes from
+    non-entity code (see the entity documentation on coordinator pattern).
+    """
+    hass.bus.async_fire(f"{DOMAIN}_refresh", {"entry_id": entry.entry_id})
 
 
 async def _register_services(
