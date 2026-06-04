@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -49,12 +48,9 @@ INTEGRATION_DIR = REPO_ROOT / "custom_components" / "intentional"
 sys.path.insert(0, str(INTEGRATION_DIR))
 
 # These imports MUST come after the importorskip checks
-from homeassistant import setup  # noqa: E402
-from homeassistant.const import CONF_NAME  # noqa: E402
 from homeassistant.core import HomeAssistant  # noqa: E402
 from pytest_homeassistant_custom_component.common import (  # noqa: E402
     MockConfigEntry,
-    mock_config_flow,
 )
 
 from custom_components.intentional.const import (  # noqa: E402

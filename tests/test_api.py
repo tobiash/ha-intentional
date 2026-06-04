@@ -105,8 +105,8 @@ def test_all_views_require_auth() -> None:
         IntentionalExplainView,
         IntentionalHealthView,
         IntentionalReloadView,
-        IntentionalRuleView,
         IntentionalRulesView,
+        IntentionalRuleView,
         IntentionalStateView,
     )
 
@@ -128,7 +128,6 @@ def test_all_views_require_auth() -> None:
 
 def test_error_returns_json_response() -> None:
     from aiohttp import web
-
     from api import _error
 
     resp = _error("test message", "test_code", 400)
@@ -139,7 +138,6 @@ def test_error_returns_json_response() -> None:
 
 
 def test_error_default_status_is_400() -> None:
-    from aiohttp import web
 
     from api import _error
 
@@ -148,7 +146,6 @@ def test_error_default_status_is_400() -> None:
 
 
 def test_error_custom_status() -> None:
-    from aiohttp import web
 
     from api import _error
 
@@ -161,8 +158,8 @@ def test_error_custom_status() -> None:
 
 
 def test_intent_to_dict_basic() -> None:
-    from api import _intent_to_dict
     from _engine.intent import Authority, Intent
+    from api import _intent_to_dict
 
     intent = Intent(
         target="light.x",
@@ -187,8 +184,8 @@ def test_intent_to_dict_basic() -> None:
 
 
 def test_intent_to_dict_with_modifiers() -> None:
-    from api import _intent_to_dict
     from _engine.intent import Authority, Intent
+    from api import _intent_to_dict
 
     intent = Intent(
         target="light.x",
@@ -229,8 +226,8 @@ def test_url_patterns_are_unique() -> None:
         IntentionalExplainView,
         IntentionalHealthView,
         IntentionalReloadView,
-        IntentionalRuleView,
         IntentionalRulesView,
+        IntentionalRuleView,
         IntentionalStateView,
     )
 
@@ -251,8 +248,8 @@ def test_all_urls_under_api_intentional() -> None:
         IntentionalExplainView,
         IntentionalHealthView,
         IntentionalReloadView,
-        IntentionalRuleView,
         IntentionalRulesView,
+        IntentionalRuleView,
         IntentionalStateView,
     )
 

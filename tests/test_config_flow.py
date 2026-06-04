@@ -20,7 +20,6 @@ Covers:
 
 from __future__ import annotations
 
-import os
 import sys
 import textwrap
 from pathlib import Path
@@ -41,7 +40,6 @@ from rule_files import (  # noqa: E402
     _validate_rule_dir,
     _write_rule_file,
 )
-
 
 # ── _is_safe_filename ─────────────────────────────────────────────
 

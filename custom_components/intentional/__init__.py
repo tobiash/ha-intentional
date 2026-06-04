@@ -29,7 +29,6 @@ from homeassistant.helpers.typing import ConfigType
 from ._engine import Engine, RuleLoadError, load_rules
 from ._engine.intent import Authority, Intent
 from ._engine.yaml_loader import Rule
-
 from .const import (
     ATTR_TARGET,
     ATTR_TICK_INTERVAL_MS,
