@@ -134,6 +134,7 @@ def test_all_views_require_auth() -> None:
 
 def test_error_returns_json_response() -> None:
     from aiohttp import web
+
     from custom_components.intentional.api import _error
 
     resp = _error("test message", "test_code", 400)
