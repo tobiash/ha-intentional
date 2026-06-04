@@ -189,6 +189,11 @@ async def test_api_health_endpoint(
     hass: HomeAssistant, config_entry: MockConfigEntry, hass_client
 ) -> None:
     """GET /api/intentional/health should return integration status."""
+    # The hass_client fixture requires the http component to be loaded.
+    # We load it via the standard ``async_setup_component`` entry point.
+    from homeassistant.components.http import async_setup as http_async_setup
+    await http_async_setup(hass, {})
+
     config_entry.add_to_hass(hass)
     await hass.config_entries.async_setup(config_entry.entry_id)
 
@@ -211,6 +216,10 @@ async def test_api_requires_auth(
     hass: HomeAssistant, config_entry: MockConfigEntry, hass_client
 ) -> None:
     """All API endpoints should require authentication."""
+    # See test_api_health_endpoint — hass_client needs http loaded.
+    from homeassistant.components.http import async_setup as http_async_setup
+    await http_async_setup(hass, {})
+
     config_entry.add_to_hass(hass)
     await hass.config_entries.async_setup(config_entry.entry_id)
 
