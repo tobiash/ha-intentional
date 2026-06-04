@@ -20,16 +20,14 @@ from typing import Any
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, ServiceCall, State, SupportsResponse
+from homeassistant.core import HomeAssistant, ServiceCall, State
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
 
-from intentional import Engine, RuleLoadError, load_rules
-from intentional.intent import Authority, Intent
-from intentional.yaml_loader import Rule
+from ._engine import Engine, RuleLoadError, load_rules
+from ._engine.intent import Authority, Intent
+from ._engine.yaml_loader import Rule
 
 from .const import (
     ATTR_TARGET,
