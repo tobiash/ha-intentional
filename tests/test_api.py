@@ -176,7 +176,11 @@ def test_intent_to_dict_basic() -> None:
     assert d["target"] == "light.x"
     assert d["set"] == {"brightness_pct": 50}
     assert d["rule_id"] == "r1"
-    assert d["authority"] == 50
+    # ``authority`` is the enum's string value (e.g. "automation"). The
+    # numeric priority used for comparison lives in ``value_index`` on
+    # the enum; the API exposes the string form because it's stable across
+    # version changes to the priority table and is human-readable.
+    assert d["authority"] == "automation"
     assert d["authority_name"] == "AUTOMATION"
     assert d["confidence"] == 80
     assert d["reason"] == "test reason"

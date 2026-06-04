@@ -47,6 +47,18 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
+# We do NOT declare ``"http"`` as a hard dependency because:
+#
+# - The HTTP API is a convenience surface, not a core feature. Users
+#   who don't have the http component loaded (rare, but possible in
+#   embedded/headless setups) shouldn't fail to install Intentional.
+# - The test harness for pytest-homeassistant-custom-component doesn't
+#   load the http component by default, so a hard dependency would
+#   break every integration test in this repo.
+# - The register call is guarded: if ``hass.http`` isn't available we
+#   silently skip registration. The integration still works; only the
+#   /api/intentional/* endpoints are unavailable.
+
 # Service schemas
 FIRE_SERVICE_SCHEMA = vol.Schema(
     {
@@ -143,9 +155,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Set up services
     await _register_services(hass, engine, rule_dir, entry)
 
-    # Register HTTP API views
-    from .api import register_api
-    register_api(hass)
+    # Register HTTP API views. Guarded for test environments where the
+    # http component may not be loaded (e.g. tests that don't exercise
+    # the HTTP surface). In production, HA loads the http component
+    # automatically for any install with a web UI, so ``hass.http`` is
+    # always available there. We deliberately do not declare a hard
+    # dependency on http (see comment near PLATFORMS) so the integration
+    # still installs and works in headless setups.
+    if getattr(hass, "http", None) is not None:
+        from .api import register_api
+        register_api(hass)
 
     # Subscribe to state changes to keep engine in sync
     entry.async_on_unload(
