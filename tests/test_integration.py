@@ -213,7 +213,7 @@ async def test_api_health_endpoint(
 
 
 async def test_api_requires_auth(
-    hass: HomeAssistant, config_entry: MockConfigEntry, hass_client
+    hass: HomeAssistant, config_entry: MockConfigEntry, hass_client_no_auth
 ) -> None:
     """All API endpoints should require authentication."""
     # See test_api_health_endpoint — hass_client needs http loaded.
@@ -223,7 +223,7 @@ async def test_api_requires_auth(
     config_entry.add_to_hass(hass)
     await hass.config_entries.async_setup(config_entry.entry_id)
 
-    client = await hass_client()
+    client = await hass_client_no_auth()
     # Hit an endpoint without auth
     resp = await client.get("/api/intentional/health")
     # Should NOT be 200 (should be 401 or 403)
