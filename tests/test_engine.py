@@ -16,14 +16,10 @@ the engine emits intents when triggers fire) without depending on HA.
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Optional
-from unittest.mock import MagicMock
-
-import pytest
+from typing import Any
 
 from intentional.engine import Engine
-from intentional.intent import Authority, Intent
+from intentional.intent import Authority
 from intentional.yaml_loader import Rule
 
 

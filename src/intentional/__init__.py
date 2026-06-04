@@ -14,15 +14,15 @@ from __future__ import annotations
 __version__ = "0.1.0"
 
 __all__ = [
-    "Intent",
-    "Authority",
-    "ResolvedIntent",
-    "resolve_intents",
-    "AnimationSpec",
     "AnimationFrame",
-    "load_rules",
+    "AnimationSpec",
+    "Authority",
+    "Intent",
+    "ResolvedIntent",
     "RuleLoadError",
     "__version__",
+    "load_rules",
+    "resolve_intents",
 ]
 
 

@@ -1,0 +1,52 @@
+# 06-blocks-and-time.yaml — suppression and time-of-day
+#
+# Demonstrates: `blocks` to suppress other rules, time_of_day in
+# when-expressions.
+
+- id: focus-mode-suppresses-notifications
+  when: input_boolean.focus_mode == "on"
+  emit:
+    target: light.office_desk
+    set:
+      brightness_pct: 0
+  authority: user
+  reason: "Focus mode active"
+  blocks:
+    - door-open-led-pulse
+    - phone-ringing-color-cycle
+
+- id: phone-ringing-color-cycle
+  when: sensor.phone == "ringing"
+  emit:
+    target: light.office_desk
+    animation:
+      kind: cycle
+      parameter: color_temp_k
+      values: [2200, 6500]
+      period: 3s
+    set:
+      brightness_pct: 80
+  authority: automation
+  reason: "Phone is ringing"
+
+- id: morning-fade
+  when: time_of_day == "morning"
+  emit:
+    target: light.bedroom
+    floor:
+      brightness_pct: 5
+    multiply:
+      color_temp_k: 1.1       # gradually warm the color
+  authority: automation
+  confidence: 0.4
+  reason: "Morning fade-in"
+
+- id: evening-bathroom-dim
+  when: time_of_day == "evening" or time_of_day == "night"
+  emit:
+    target: light.bathroom
+    cap:
+      brightness_pct: 50
+  authority: automation
+  confidence: 0.5
+  reason: "Evening/night — gentler bathroom lights"

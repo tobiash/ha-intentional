@@ -1,0 +1,17 @@
+# 02-tv-scene.yaml — the classic "TV turns on, lights dim" scenario
+#
+# Demonstrates: cap (respects user, just clamps), transition, easing.
+
+- id: dim-when-tv
+  when: media_player.living_room_tv.state == "on"
+  emit:
+    target: light.living_room
+    cap:
+      brightness_pct: 40      # respects user manual override, just caps
+    set:
+      color_temp_k: 2700      # warm white for movie viewing
+    transition: 1.5s
+    easing: ease-in-out
+  authority: automation
+  confidence: 0.9
+  reason: "TV on — dim lights for viewing"

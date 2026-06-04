@@ -1,0 +1,48 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Intentional",
+        "description": "Configure the Intentional intent engine.",
+        "data": {
+          "rule_dir": "/config/intentional/rules"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Intentional is already configured."
+    }
+  },
+  "services": {
+    "fire": {
+      "name": "Fire intent",
+      "description": "Manually fire a user intent for a target entity.",
+      "fields": {
+        "target": {
+          "name": "Target",
+          "description": "The entity_id to apply the intent to (e.g. light.living_room).",
+          "required": true,
+          "selector": { "entity": {} }
+        },
+        "brightness_pct": {
+          "name": "Brightness (%)",
+          "description": "Optional brightness percentage to set.",
+          "required": false,
+          "selector": { "number": { "min": 0, "max": 100, "unit_of_measurement": "%" } }
+        },
+        "ttl": {
+          "name": "TTL (seconds)",
+          "description": "How long the manual intent should be active. Default: 7200 (2 hours).",
+          "required": false,
+          "default": 7200,
+          "selector": { "number": { "min": 0, "max": 86400, "unit_of_measurement": "s" } }
+        }
+      }
+    },
+    "reload": {
+      "name": "Reload rules",
+      "description": "Re-read rule files from disk without restarting the integration.",
+      "fields": {}
+    }
+  }
+}

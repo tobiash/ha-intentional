@@ -18,13 +18,11 @@ from pathlib import Path
 import pytest
 
 from intentional.yaml_loader import (
-    Rule,
     RuleLoadError,
     load_rules,
     load_rules_from_string,
     parse_duration,
 )
-
 
 # ── Duration parsing ─────────────────────────────────────────────────
 

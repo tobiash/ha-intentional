@@ -1,0 +1,23 @@
+# 03-doorbell-notification.yaml — flash the monitor LED when door opens
+#
+# Demonstrates: pulse animation, transition for the static color,
+# TTL so the animation self-cleans.
+
+- id: door-open-led-pulse
+  when: binary_sensor.front_door.state == "on"
+  emit:
+    target: light.monitor_back_led
+    animation:
+      kind: pulse
+      parameter: brightness_pct
+      values: [0, 100, 0]
+      duration: 2s
+      repeat: 4
+      easing: sine
+    set:
+      color: warm_white
+      color_temp_k: 2700
+    transition: 0.3s           # color fades in over 300ms
+    ttl: 20s                   # animation is ~16s, give a 4s buffer
+  authority: automation
+  reason: "Front door opened"

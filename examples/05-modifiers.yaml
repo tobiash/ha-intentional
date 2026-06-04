@@ -1,0 +1,38 @@
+# 05-modifiers.yaml — cap/floor/offset/multiply composition
+#
+# Demonstrates: pure modifier rules (no set block) that compose with
+# other rules' set values. Multiple cap rules take the smallest cap.
+# Multiple floor rules take the largest floor. Multipliers stack
+# once each (not compounded).
+
+- id: peak-tariff-energy-cap
+  when: binary_sensor.peak_energy_tariff == "on"
+  emit:
+    target: light.living_room
+    cap:
+      brightness_pct: 60
+  authority: automation
+  confidence: 0.8
+  reason: "Peak tariff — cap brightness to save energy"
+
+- id: hallway-night-base
+  when: sun.sun == "below_horizon"
+  emit:
+    target: light.hallway
+    floor:
+      brightness_pct: 3       # always a faint glow at night
+  authority: automation
+  confidence: 0.5
+  reason: "Hallway base glow at night"
+
+- id: hallway-bright-on-motion
+  when: binary_sensor.hallway_motion == "on"
+  emit:
+    target: light.hallway
+    set:
+      brightness_pct: 80
+    transition: 0.5s
+    ttl: 2m                    # motion intent expires, base glow returns
+  authority: automation
+  confidence: 0.6
+  reason: "Motion in hallway"

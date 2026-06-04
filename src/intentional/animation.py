@@ -20,12 +20,13 @@ Each kind has kind-specific timing parameters:
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, NamedTuple, Optional, Sequence, Union
+from enum import StrEnum
+from typing import Any, NamedTuple
 
 
-class AnimationKind(str, Enum):
+class AnimationKind(StrEnum):
     PULSE = "pulse"
     BREATH = "breath"
     CYCLE = "cycle"
@@ -96,13 +97,13 @@ class AnimationSpec:
     kind: str
     parameter: str
     values: Sequence[Any] = field(default_factory=list)
-    min: Optional[float] = None
-    max: Optional[float] = None
-    peak: Optional[float] = None
+    min: float | None = None
+    max: float | None = None
+    peak: float | None = None
     duration_ms: int = 0
     period_ms: int = 0
     decay_ms: int = 0
-    repeat: Union[int, str] = 1
+    repeat: int | str = 1
     easing: str = "linear"
 
     def __post_init__(self) -> None:
@@ -264,5 +265,5 @@ def _interpolate(a: Any, b: Any, t: float) -> Any:
     if isinstance(a, (int, float)) and isinstance(b, (int, float)):
         return a + (b - a) * t
     if isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
-        return [_interpolate(ax, bx, t) for ax, bx in zip(a, b)]
+        return [_interpolate(ax, bx, t) for ax, bx in zip(a, b, strict=False)]
     return a if t == 0 else b

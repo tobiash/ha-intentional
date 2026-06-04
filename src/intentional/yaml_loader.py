@@ -45,13 +45,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any
 
 import yaml
 
 from intentional.animation import AnimationSpec
 from intentional.intent import Authority
-
 
 # ── Errors ───────────────────────────────────────────────────────────
 
@@ -66,8 +65,8 @@ class RuleLoadError(Exception):
         self,
         message: str,
         *,
-        file: Optional[Path] = None,
-        line: Optional[int] = None,
+        file: Path | None = None,
+        line: int | None = None,
     ) -> None:
         parts = []
         if file is not None:
@@ -170,14 +169,14 @@ class Rule:
     merge: bool = False
     transition_ms: int = 0
     easing: str = "linear"
-    ttl_ms: Optional[int] = None
+    ttl_ms: int | None = None
     authority: Authority = Authority.AUTOMATION
     confidence: float = 1.0
     reason: str = ""
     blocks: tuple[str, ...] = field(default_factory=tuple)
-    animation: Optional[AnimationSpec] = None
-    source_file: Optional[Path] = None
-    source_line: Optional[int] = None
+    animation: AnimationSpec | None = None
+    source_file: Path | None = None
+    source_line: int | None = None
 
 
 # ── Schema validation ────────────────────────────────────────────────
@@ -204,8 +203,8 @@ _VALID_EASINGS = {"linear", "ease-in", "ease-out", "ease-in-out", "sine"}
 def _validate_rule(
     raw: dict[str, Any],
     *,
-    file: Optional[Path] = None,
-    line: Optional[int] = None,
+    file: Path | None = None,
+    line: int | None = None,
 ) -> Rule:
     """Validate a single rule dict and return a Rule object.
 
@@ -332,8 +331,8 @@ def _validate_rule(
 def _parse_optional_duration(
     value: Any,
     label: str,
-    file: Optional[Path],
-    line: Optional[int],
+    file: Path | None,
+    line: int | None,
 ) -> int:
     """Parse an optional duration field. Accepts int (ms) or string ('2s')."""
     if value is None:
@@ -356,9 +355,9 @@ def _parse_optional_duration(
 def _parse_animation(
     raw: Any,
     rule_id: str,
-    file: Optional[Path],
-    line: Optional[int],
-) -> Optional[AnimationSpec]:
+    file: Path | None,
+    line: int | None,
+) -> AnimationSpec | None:
     if raw is None:
         return None
     if not isinstance(raw, dict):
@@ -421,7 +420,7 @@ def _parse_animation(
 # ── Public API ───────────────────────────────────────────────────────
 
 
-def load_rules_from_string(text: str, *, file: Optional[Path] = None) -> list[Rule]:
+def load_rules_from_string(text: str, *, file: Path | None = None) -> list[Rule]:
     """Parse a YAML string into a list of validated Rule objects.
 
     Raises RuleLoadError on any parse or schema error.
@@ -462,7 +461,7 @@ def load_rules_from_string(text: str, *, file: Optional[Path] = None) -> list[Ru
     return rules
 
 
-def load_rules(directory: Union[str, Path]) -> list[Rule]:
+def load_rules(directory: str | Path) -> list[Rule]:
     """Load all rule files from a directory, in alphabetical order.
 
     Files must end in .yaml or .yml. Other files (README, .md) are ignored.

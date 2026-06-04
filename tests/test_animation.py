@@ -16,11 +16,9 @@ end-of-animation signaling.
 
 from __future__ import annotations
 
-import math
 import pytest
 
-from intentional.animation import AnimationSpec, AnimationFrame
-
+from intentional.animation import AnimationFrame, AnimationSpec
 
 # ── AnimationSpec construction and validation ────────────────────────
 

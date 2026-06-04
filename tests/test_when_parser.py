@@ -25,16 +25,12 @@ from __future__ import annotations
 import pytest
 
 from intentional.when_parser import (
-    parse_when,
-    evaluate_when,
-    WhenSyntaxError,
     Comparison,
     LogicalOp,
-    EntityRef,
-    Literal,
-    WhenAST,
+    WhenSyntaxError,
+    evaluate_when,
+    parse_when,
 )
-
 
 # ── Parsing ──────────────────────────────────────────────────────────
 

@@ -36,14 +36,14 @@ integration layer sets it to the real current time on startup.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Union
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 from intentional.compositor import ResolvedIntent, resolve_intents
 from intentional.intent import Authority, Intent
 from intentional.when_parser import WhenAST, evaluate_when, parse_when
 from intentional.yaml_loader import Rule
-
 
 StateChangeCallback = Callable[[str, Any], None]
 
@@ -64,11 +64,11 @@ class Engine:
     for any target.
     """
 
-    def __init__(self, *, clock_fn: Optional[Callable[[], int]] = None) -> None:
+    def __init__(self, *, clock_fn: Callable[[], int] | None = None) -> None:
         self._rules: dict[str, _ParsedRule] = {}
         self.state: dict[str, Any] = {}
         self._active_intents: list[Intent] = []
-        self._time_of_day: Optional[str] = None
+        self._time_of_day: str | None = None
         self._clock_fn = clock_fn or (lambda: int(time.time() * 1000))
         self._clock_offset_ms: int = 0  # for tests: advance_clock adds to this
         self._animation_started_at: dict[str, int] = {}  # rule_id → ms
@@ -138,11 +138,11 @@ class Engine:
     def emit_user_intent(
         self,
         target: str,
-        set: Optional[dict[str, Any]] = None,
+        set: dict[str, Any] | None = None,
         *,
-        cap: Optional[dict[str, Any]] = None,
-        floor: Optional[dict[str, Any]] = None,
-        ttl_ms: Optional[int] = None,
+        cap: dict[str, Any] | None = None,
+        floor: dict[str, Any] | None = None,
+        ttl_ms: int | None = None,
         reason: str = "Manual user action",
     ) -> Intent:
         """Inject a user-authority intent. Used for manual overrides."""
@@ -199,7 +199,7 @@ class Engine:
 
         # Add new intents for rules that just started firing
         existing_rule_ids = {i.rule_id for i in new_active if i.rule_id}
-        for rule_id, target in firing.items():
+        for rule_id, _target in firing.items():
             if rule_id not in existing_rule_ids:
                 parsed = self._rules[rule_id]
                 intent = self._spawn_intent_from_rule(parsed.rule, now)
@@ -240,7 +240,7 @@ class Engine:
             if i.target == target and not i.is_expired(into_the_future_ms=now)
         ]
 
-    def resolve(self, target: str) -> Optional[ResolvedIntent]:
+    def resolve(self, target: str) -> ResolvedIntent | None:
         """Resolve the active intents for a target into a final value."""
         intents = self.list_active_intents(target)
         if not intents:

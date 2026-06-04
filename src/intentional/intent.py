@@ -17,7 +17,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from intentional.animation import AnimationSpec
@@ -28,7 +28,7 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _copy_field_dict(value: Optional[dict[str, Any]]) -> dict[str, Any]:
+def _copy_field_dict(value: dict[str, Any] | None) -> dict[str, Any]:
     """Defensive copy of a per-field modifier dict, handling None."""
     return dict(value) if value is not None else {}
 
@@ -55,22 +55,22 @@ class Authority(Enum):
         order = {"sensor": 10, "automation": 50, "user": 100}
         return order[self.value]
 
-    def __lt__(self, other: "Authority") -> bool:
+    def __lt__(self, other: Authority) -> bool:
         if not isinstance(other, Authority):
             return NotImplemented
         return self.value_index < other.value_index
 
-    def __le__(self, other: "Authority") -> bool:
+    def __le__(self, other: Authority) -> bool:
         if not isinstance(other, Authority):
             return NotImplemented
         return self.value_index <= other.value_index
 
-    def __gt__(self, other: "Authority") -> bool:
+    def __gt__(self, other: Authority) -> bool:
         if not isinstance(other, Authority):
             return NotImplemented
         return self.value_index > other.value_index
 
-    def __ge__(self, other: "Authority") -> bool:
+    def __ge__(self, other: Authority) -> bool:
         if not isinstance(other, Authority):
             return NotImplemented
         return self.value_index >= other.value_index
@@ -132,11 +132,11 @@ class Intent:
     easing: str = "linear"
     authority: Authority = Authority.AUTOMATION
     confidence: float = 1.0
-    ttl_ms: Optional[int] = None
+    ttl_ms: int | None = None
     reason: str = ""
     rule_id: str = ""
     created_at_ms: int = field(default_factory=_now_ms)
-    animation: Optional["AnimationSpec"] = None
+    animation: AnimationSpec | None = None
 
     def __post_init__(self) -> None:
         """Defensive copy of mutable defaults to honor the frozen contract."""
@@ -167,27 +167,27 @@ class Intent:
         """
         return (self.authority.value_index, self.confidence, self.created_at_ms, id(self))
 
-    def __lt__(self, other: "Intent") -> bool:
+    def __lt__(self, other: Intent) -> bool:
         return self.priority < other.priority
 
-    def __le__(self, other: "Intent") -> bool:
+    def __le__(self, other: Intent) -> bool:
         return self.priority <= other.priority
 
-    def __gt__(self, other: "Intent") -> bool:
+    def __gt__(self, other: Intent) -> bool:
         return self.priority > other.priority
 
-    def __ge__(self, other: "Intent") -> bool:
+    def __ge__(self, other: Intent) -> bool:
         return self.priority >= other.priority
 
     # ── Expiration ───────────────────────────────────────────────────
 
-    def expires_at_ms(self) -> Optional[int]:
+    def expires_at_ms(self) -> int | None:
         """Return the absolute timestamp at which this intent expires, or None."""
         if self.ttl_ms is None:
             return None
         return self.created_at_ms + self.ttl_ms
 
-    def is_expired(self, *, into_the_future_ms: Optional[int] = None) -> bool:
+    def is_expired(self, *, into_the_future_ms: int | None = None) -> bool:
         """Return True if this intent has expired.
 
         Parameters

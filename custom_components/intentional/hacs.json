@@ -1,0 +1,5 @@
+{
+  "name": "Intentional",
+  "country": ["DE", "AT", "CH", "US", "GB"],
+  "render_readme": true
+}

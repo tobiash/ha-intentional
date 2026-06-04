@@ -1,0 +1,19 @@
+# 04-movie-scene.yaml — manual scene with graceful auto-release
+#
+# Demonstrates: user authority, TTL-based auto-release, transition.
+# To activate: call the intentional.fire service from a script/automation:
+#   intentional.fire target=light.living_room brightness_pct=15
+# Or wrap this in a `trigger: state` automation on a button entity.
+
+- id: movie-scene
+  when: input_boolean.movie_scene == "on"
+  emit:
+    target: light.living_room
+    set:
+      brightness_pct: 15
+      color_temp_k: 2200
+    transition: 3s
+    easing: ease-in
+    ttl: 2h                    # auto-release after 2 hours
+  authority: user
+  reason: "Movie scene"

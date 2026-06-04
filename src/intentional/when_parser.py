@@ -33,9 +33,9 @@ Grammar (informal):
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Any, Optional, Union
-
+from typing import Any
 
 # ── AST nodes ────────────────────────────────────────────────────────
 
@@ -55,7 +55,7 @@ class EntityRef:
 class Literal:
     """A literal value: string, number, or boolean."""
 
-    value: Union[str, int, float, bool]
+    value: str | int | float | bool
 
     def __str__(self) -> str:
         return repr(self.value)
@@ -65,9 +65,9 @@ class Literal:
 class Comparison:
     """A comparison between two values, e.g. x == 'on'."""
 
-    left: Union[EntityRef, Literal]
+    left: EntityRef | Literal
     op: str
-    right: Optional[Union[EntityRef, Literal]] = None
+    right: EntityRef | Literal | None = None
 
     def __str__(self) -> str:
         if self.right is None:
@@ -90,7 +90,7 @@ class LogicalOp:
         return f"({self.left} {self.op} {self.right})"
 
 
-WhenAST = Union[Comparison, LogicalOp, EntityRef, Literal]
+WhenAST = Comparison | LogicalOp | EntityRef | Literal
 
 
 # ── Errors ───────────────────────────────────────────────────────────
@@ -130,8 +130,6 @@ _TOKEN_SPEC = [
     ("UNKNOWN", r"."),
 ]
 
-import re
-
 _TOKEN_RE = re.compile("|".join(f"(?P<{name}>{pat})" for name, pat in _TOKEN_SPEC))
 
 
@@ -162,7 +160,7 @@ class _Parser:
         self.tokens = tokens
         self.pos = 0
 
-    def peek(self) -> Optional[tuple[str, str, int]]:
+    def peek(self) -> tuple[str, str, int] | None:
         return self.tokens[self.pos] if self.pos < len(self.tokens) else None
 
     def advance(self) -> tuple[str, str, int]:
@@ -230,7 +228,7 @@ class _Parser:
             return Comparison(left=left, op="==", right=Literal("on"))
         return Comparison(left=left, op="==", right=None)  # bare literal
 
-    def _parse_value(self) -> Union[EntityRef, Literal]:
+    def _parse_value(self) -> EntityRef | Literal:
         tok = self.peek()
         if tok is None:
             raise WhenSyntaxError("expected a value")
@@ -265,13 +263,13 @@ class _Parser:
         state dict uses key 'sensor.x.state' even when the rule says
         'sensor.x' — the engine injects the '.state' suffix.
         """
-        kind, value, pos = self.expect("IDENT")
+        kind, value, _pos = self.expect("IDENT")
         parts = [value]
         # Consume .field.field.field — the last component is the field,
         # everything before is the entity_id.
         while self.peek() and self.peek()[0] == "DOT":
             self.advance()
-            f_kind, f_value, _ = self.expect("IDENT")
+            _f_kind, f_value, _ = self.expect("IDENT")
             parts.append(f_value)
 
         if len(parts) == 1:
@@ -314,7 +312,7 @@ def evaluate_when(
     ast: WhenAST,
     state: dict[str, Any],
     *,
-    time_of_day: Optional[str] = None,
+    time_of_day: str | None = None,
 ) -> bool:
     """Evaluate a parsed when-AST against the given state.
 
@@ -344,7 +342,7 @@ def evaluate_when(
 def _eval_logical(
     op: LogicalOp,
     state: dict[str, Any],
-    time_of_day: Optional[str],
+    time_of_day: str | None,
 ) -> bool:
     if op.op == "not":
         return not evaluate_when(op.left, state, time_of_day=time_of_day)
@@ -364,7 +362,7 @@ def _eval_logical(
 def _eval_comparison(
     comp: Comparison,
     state: dict[str, Any],
-    time_of_day: Optional[str],
+    time_of_day: str | None,
 ) -> bool:
     left = _resolve(comp.left, state, time_of_day) if isinstance(comp.left, EntityRef) else comp.left.value
     if comp.right is None:
@@ -393,7 +391,7 @@ def _eval_comparison(
 def _resolve(
     ref: EntityRef,
     state: dict[str, Any],
-    time_of_day: Optional[str],
+    time_of_day: str | None,
 ) -> Any:
     """Resolve an entity reference to its current value."""
     if ref.entity_id == "__time__":

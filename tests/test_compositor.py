@@ -23,15 +23,10 @@ These tests cover the resolution rules:
 
 from __future__ import annotations
 
-import pytest
-
 from intentional.compositor import (
-    DEVICE_BOUNDS,
-    ResolvedIntent,
     resolve_intents,
 )
 from intentional.intent import Authority, Intent
-
 
 # ── Empty / single-intent cases ──────────────────────────────────────
 
@@ -336,13 +331,6 @@ class TestTVScenario:
             set={"brightness_pct": 100},
             authority=Authority.USER,
         )
-        tv = Intent(
-            target="light.living_room",
-            cap={"brightness_pct": 40},
-            set={"color_temp_k": 2700},
-            authority=Authority.AUTOMATION,
-        )
-        # TV has expired
         tv_expired = Intent(
             target="light.living_room",
             cap={"brightness_pct": 40},

@@ -1,0 +1,3 @@
+# Disable strict checks for files that integrate with HA's framework
+__pycache__/
+*.py[cod]

@@ -1,0 +1,16 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Intentional",
+        "description": "Configure the Intentional intent engine.",
+        "data": {
+          "rule_dir": "/config/intentional/rules"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Intentional is already configured."
+    }
+  }
+}

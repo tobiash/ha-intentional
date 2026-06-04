@@ -1,0 +1,27 @@
+# 01-ambient.yaml — sensor-driven baseline rules
+#
+# These rules set light levels based on environmental sensors.
+# They form the foundation that other rules layer on top of.
+
+- id: brighten-when-dark
+  when: sensor.outdoor_light.illuminance < 50
+  emit:
+    target: light.living_room
+    set:
+      brightness_pct: 80
+      color_temp_k: 3000
+    transition: 3s
+    easing: ease-in-out
+  authority: automation
+  confidence: 0.7
+  reason: "Dark outside"
+
+- id: dim-when-bright-sun
+  when: sensor.outdoor_light.illuminance > 5000
+  emit:
+    target: light.living_room
+    set:
+      brightness_pct: 30
+  authority: automation
+  confidence: 0.7
+  reason: "Bright sunlight — let the natural light in"

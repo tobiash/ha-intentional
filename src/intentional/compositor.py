@@ -39,11 +39,10 @@ be dimmed by 20" without overriding each other.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 from intentional.animation import AnimationSpec
 from intentional.intent import Intent
-
 
 # Device-specific physical bounds applied after modifiers.
 # Fields not in this table pass through unclamped.
@@ -83,11 +82,11 @@ class ResolvedIntent:
 
     target: str
     value: dict[str, Any]
-    winning_intent: Optional[Intent]
+    winning_intent: Intent | None
     transition_ms: int = 0
     easing: str = "linear"
-    animation: Optional[AnimationSpec] = None
-    ttl_remaining_ms: Optional[int] = None
+    animation: AnimationSpec | None = None
+    ttl_remaining_ms: int | None = None
     all_active_intents: tuple[Intent, ...] = field(default_factory=tuple)
 
 
@@ -95,8 +94,8 @@ def resolve_intents(
     target: str,
     intents: list[Intent],
     *,
-    into_the_future_ms: Optional[int] = None,
-) -> Optional[ResolvedIntent]:
+    into_the_future_ms: int | None = None,
+) -> ResolvedIntent | None:
     """Resolve a set of active intents for a target into a ResolvedIntent.
 
     Returns None if there are no live intents for this target.
@@ -198,7 +197,7 @@ def resolve_intents(
                 result[field_name] = _max_clamp(result[field_name], floor_value)
 
     # Compute TTL remaining for the winning intent
-    ttl_remaining_ms: Optional[int] = None
+    ttl_remaining_ms: int | None = None
     if winner.ttl_ms is not None:
         now = into_the_future_ms if into_the_future_ms is not None else _now_ms()
         expires_at = winner.created_at_ms + winner.ttl_ms
@@ -230,7 +229,7 @@ def _min_clamp(current: Any, ceiling: Any) -> Any:
     if isinstance(current, (int, float)) and isinstance(ceiling, (int, float)):
         return min(current, ceiling)
     if isinstance(current, list) and isinstance(ceiling, list):
-        return [_min_clamp(c, k) for c, k in zip(current, ceiling)]
+        return [_min_clamp(c, k) for c, k in zip(current, ceiling, strict=False)]
     return min(current, ceiling) if current <= ceiling else current
 
 
@@ -239,7 +238,7 @@ def _max_clamp(current: Any, floor: Any) -> Any:
     if isinstance(current, (int, float)) and isinstance(floor, (int, float)):
         return max(current, floor)
     if isinstance(current, list) and isinstance(floor, list):
-        return [_max_clamp(c, f) for c, f in zip(current, floor)]
+        return [_max_clamp(c, f) for c, f in zip(current, floor, strict=False)]
     return max(current, floor) if current >= floor else current
 
 
@@ -257,7 +256,7 @@ def _add(current: Any, delta: Any) -> Any:
     if isinstance(current, (int, float)) and isinstance(delta, (int, float)):
         return current + delta
     if isinstance(current, list) and isinstance(delta, list):
-        return [_add(c, d) for c, d in zip(current, delta)]
+        return [_add(c, d) for c, d in zip(current, delta, strict=False)]
     return current
 
 
@@ -266,5 +265,5 @@ def _multiply(value: Any, factor: Any) -> Any:
     if isinstance(value, (int, float)) and isinstance(factor, (int, float)):
         return value * factor
     if isinstance(value, list) and isinstance(factor, list):
-        return [_multiply(v, f) for v, f in zip(value, factor)]
+        return [_multiply(v, f) for v, f in zip(value, factor, strict=False)]
     return value

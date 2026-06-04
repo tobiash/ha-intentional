@@ -14,7 +14,6 @@ import pytest
 
 from intentional.intent import Authority, Intent
 
-
 # ── Authority enum ────────────────────────────────────────────────────
 
 
