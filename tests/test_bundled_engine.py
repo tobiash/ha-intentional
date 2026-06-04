@@ -23,8 +23,14 @@ These tests:
 from __future__ import annotations
 
 import importlib
-import sys
 from pathlib import Path
+
+import pytest
+
+# Loading ``custom_components.intentional._engine`` triggers the
+# integration's __init__.py, which imports homeassistant. Skip the
+# module if HA isn't installed (CI has it; local dev typically doesn't).
+pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
 REPO_ROOT = Path(__file__).parent.parent
 BUNDLED_DIR = REPO_ROOT / "custom_components" / "intentional" / "_engine"

@@ -20,11 +20,15 @@ Covers:
 
 from __future__ import annotations
 
-import sys
 import textwrap
 from pathlib import Path
 
 import pytest
+
+# Loading ``custom_components.intentional`` triggers the integration's
+# __init__.py, which imports homeassistant. Skip the module if HA isn't
+# installed (CI has it; local dev typically doesn't).
+pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
 # Make the integration importable as `custom_components.intentional.*`
 # (conftest.py already handles sys.path; this is here for clarity

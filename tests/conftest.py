@@ -35,12 +35,17 @@ CUSTOM_COMPONENTS_DIR = REPO_ROOT / "custom_components"
 # subpackage (from custom_components/).
 
 # Engine tests: need src/ on sys.path so `from intentional.X import Y` works.
-# In CI this is also covered by PYTHONPATH=src in the workflow, but we set
-# it here so the tests work without the env var.
+# Insert at position 0 so the bare name `intentional` resolves to the engine
+# source, not the HA integration (which lives at custom_components/intentional/).
+# In CI this is also covered by the editable install in the workflow, but we
+# set it here so the tests work without an install.
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 # Integration tests: need custom_components/ on sys.path so
-# `from custom_components.intentional.api import ...` works.
+# `from custom_components.intentional.api import ...` works. We APPEND
+# rather than insert at 0 — otherwise `custom_components/intentional/`
+# would shadow the engine `intentional` package and break engine tests.
+# Integration tests use the fully-qualified name, so position doesn't matter.
 if str(CUSTOM_COMPONENTS_DIR) not in sys.path:
-    sys.path.insert(0, str(CUSTOM_COMPONENTS_DIR))
+    sys.path.append(str(CUSTOM_COMPONENTS_DIR))
