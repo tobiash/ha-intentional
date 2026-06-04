@@ -27,11 +27,10 @@ from pathlib import Path
 import pytest
 
 # Make the integration importable as `custom_components.intentional.*`
-# (matches how HACS loads the integration in production).
+# (conftest.py already handles sys.path; this is here for clarity
+# in case this test is run in isolation).
 REPO_ROOT = Path(__file__).parent.parent
-CUSTOM_COMPONENTS_DIR = REPO_ROOT / "custom_components"
 INTEGRATION_DIR = REPO_ROOT / "custom_components" / "intentional"
-sys.path.insert(0, str(CUSTOM_COMPONENTS_DIR))
 
 from custom_components.intentional.rule_files import (  # noqa: E402
     _delete_rule_file,

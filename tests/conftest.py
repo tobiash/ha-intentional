@@ -14,28 +14,33 @@ REPO_ROOT = Path(__file__).parent.parent
 SRC_DIR = REPO_ROOT / "src"
 CUSTOM_COMPONENTS_DIR = REPO_ROOT / "custom_components"
 
-# The integration (``custom_components/intentional/``) bundles its own
-# copy of the engine as ``custom_components/intentional/_engine/`` so
-# HACS installs it. The source repo also has ``src/intentional/`` for
-# development. These are *two separate copies* of the same package:
+# Two layouts live in this repo:
 #
-#   - src/intentional/                → top-level package, used by tests
-#   - custom_components/intentional/_engine/ → bundled subpackage
+#   - src/intentional/                → engine source (top-level package)
+#   - custom_components/intentional/  → HA integration (bundles _engine/)
 #
-# Putting BOTH on sys.path would create a name collision (two
-# ``intentional`` packages). The convention is:
+# Engine tests (test_intent.py, test_compositor.py, test_engine.py, ...)
+# import via ``from intentional.intent import Intent`` (top-level).
+# They need ``src/`` on sys.path.
 #
-#   - Tests that exercise the engine (test_intent.py, test_compositor.py,
-#     test_engine.py, etc.) use ``src/intentional/`` via
-#     ``PYTHONPATH=src`` — see pyproject.toml pytest config.
-#   - Tests that exercise the integration (test_api.py,
-#     test_integration.py, test_config_flow.py) need
-#     ``custom_components.intentional`` to be importable so that the
-#     integration's relative imports (``from .const import ...``)
-#     resolve correctly. This is how HACS loads it in production.
+# Integration tests (test_api.py, test_integration.py, test_config_flow.py)
+# import via ``from custom_components.intentional.api import ...``. They
+# need ``custom_components/`` on sys.path so the integration's relative
+# imports (``from .const import ...``) resolve correctly. This mirrors
+# how HACS loads the integration in production.
 #
-# We therefore add only ``custom_components/`` to sys.path here. The
-# engine tests use the source layout, the integration tests use the
-# bundled layout, and the two never collide.
+# Adding BOTH to sys.path is fine because they live at different
+# positions in the package hierarchy — ``intentional`` is a top-level
+# package (from src/), and ``custom_components.intentional`` is a
+# subpackage (from custom_components/).
 
-sys.path.insert(0, str(CUSTOM_COMPONENTS_DIR))
+# Engine tests: need src/ on sys.path so `from intentional.X import Y` works.
+# In CI this is also covered by PYTHONPATH=src in the workflow, but we set
+# it here so the tests work without the env var.
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+# Integration tests: need custom_components/ on sys.path so
+# `from custom_components.intentional.api import ...` works.
+if str(CUSTOM_COMPONENTS_DIR) not in sys.path:
+    sys.path.insert(0, str(CUSTOM_COMPONENTS_DIR))

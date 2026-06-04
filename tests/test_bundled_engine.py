@@ -31,8 +31,9 @@ BUNDLED_DIR = REPO_ROOT / "custom_components" / "intentional" / "_engine"
 SOURCE_DIR = REPO_ROOT / "src" / "intentional"
 INTEGRATION_DIR = REPO_ROOT / "custom_components" / "intentional"
 
-# Make the bundled engine importable as a subpackage for the smoke tests
-sys.path.insert(0, str(INTEGRATION_DIR))
+# conftest.py handles sys.path setup. This is here for documentation
+# only — if you run this test in isolation (without conftest), the
+# imports below will fail.
 
 
 def test_bundled_engine_directory_exists() -> None:

@@ -38,16 +38,11 @@ from pathlib import Path
 
 import pytest
 
-# Make the integration importable as `custom_components.intentional.api`.
-# This mirrors how HACS loads the integration in production, which
-# means relative imports inside api.py (`from .const import ...`)
-# work correctly. If we instead put the integration dir on sys.path
-# directly, `api` would load as a top-level module and the relative
-# imports would fail with "attempted relative import with no known
-# parent package".
+# conftest.py handles sys.path setup (adds both src/ and custom_components/).
+# This is here for documentation only — if you run this test in isolation
+# (without conftest), the imports below will fail.
 REPO_ROOT = Path(__file__).parent.parent
-CUSTOM_COMPONENTS_DIR = REPO_ROOT / "custom_components"
-sys.path.insert(0, str(CUSTOM_COMPONENTS_DIR))
+INTEGRATION_DIR = REPO_ROOT / "custom_components" / "intentional"
 
 # The api module imports homeassistant, which is a heavy dep. Skip
 # the API unit tests if it's not available; the integration tests
