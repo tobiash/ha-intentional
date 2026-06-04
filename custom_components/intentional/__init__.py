@@ -133,11 +133,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # firing scene.turn_on on every tick. Cleared when a scene rule stops
     # firing, so the next activation re-fires.
     _active_scenes: set[str] = set()
+    # Event used to signal the tick loop to stop. We use an event rather
+    # than ``while True:`` + ``task.cancel()`` because cancellation only
+    # takes effect at the next ``await``; if a slow ``_refresh_entities``
+    # is in progress, cancellation can be delayed indefinitely and
+    # ``hass.async_block_till_done()`` would hang waiting for it. An
+    # event lets the loop exit cleanly on the next tick.
+    stop_event = asyncio.Event()
 
     async def _tick_loop() -> None:
         nonlocal _active_scenes
-        while True:
-            await asyncio.sleep(tick_interval_ms / 1000)
+        while not stop_event.is_set():
+            # Sleep with a timeout so we can react to stop_event promptly.
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=tick_interval_ms / 1000)
+                # If wait() returned normally, stop was requested.
+                break
+            except TimeoutError:
+                pass  # normal tick interval
             # Drive the engine's evaluation cycle
             _sync_state_into_engine(hass, engine)
             engine.evaluate_all()
@@ -149,8 +162,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Push resolved values to entities
             await _refresh_entities(hass, entry)
 
-    tick_task = hass.async_create_task(_tick_loop(), name=f"{DOMAIN}_tick")
-    entry.async_on_unload(tick_task.cancel)
+    hass.async_create_task(_tick_loop(), name=f"{DOMAIN}_tick")
+
+    def _stop_tick_loop() -> None:
+        """Signal the tick loop to stop on entry unload."""
+        stop_event.set()
+
+    entry.async_on_unload(_stop_tick_loop)
 
     # Set up services
     await _register_services(hass, engine, rule_dir, entry)

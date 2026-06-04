@@ -70,20 +70,19 @@ def auto_enable_custom_integrations(enable_custom_integrations):
 
 @pytest.fixture(autouse=True)
 async def auto_unload_entries(hass: HomeAssistant):
-    """Unload any config entries after each test so background tasks
-    (the tick loop) are cancelled before the next test starts.
+    """Unload any config entries after each test.
 
-    Without this, the tick loop started in async_setup_entry (a
-    ``while True:`` asyncio task at 100ms intervals) keeps running
-    between tests, and ``hass.async_block_till_done()`` will block
-    forever waiting for it to settle.
+    The integration spawns a 100ms tick loop on setup. Unloading the
+    entry sets a stop event that lets the loop exit cleanly within one
+    tick interval, so ``hass.async_block_till_done()`` in the test
+    body returns promptly.
     """
     yield
-    # Unload any loaded config entries so the integration's background
-    # tasks (the tick loop) are cancelled before the next test starts.
     for entry in list(hass.config_entries.async_entries()):
         if entry.state is ConfigEntryState.LOADED:
             await hass.config_entries.async_unload(entry.entry_id)
+    # Let any remaining task drains complete. This is bounded by the
+    # tick interval (100ms) thanks to the stop-event mechanism.
     await hass.async_block_till_done()
 
 
