@@ -113,13 +113,13 @@ def test_bundled_engine_importable() -> None:
 
 def test_bundled_engine_public_api() -> None:
     """Public symbols from the source should still be accessible via the bundle."""
-    from _engine import (
+    from custom_components.intentional._engine import (
         Engine,
         RuleLoadError,
         load_rules,
     )
-    from _engine.intent import Authority, Intent
-    from _engine.yaml_loader import Rule
+    from custom_components.intentional._engine.intent import Authority, Intent
+    from custom_components.intentional._engine.yaml_loader import Rule
 
     # Smoke: build an engine and emit an intent
     engine = Engine()

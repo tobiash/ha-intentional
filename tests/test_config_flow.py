@@ -26,12 +26,14 @@ from pathlib import Path
 
 import pytest
 
-# Make the integration importable for these tests
+# Make the integration importable as `custom_components.intentional.*`
+# (matches how HACS loads the integration in production).
 REPO_ROOT = Path(__file__).parent.parent
+CUSTOM_COMPONENTS_DIR = REPO_ROOT / "custom_components"
 INTEGRATION_DIR = REPO_ROOT / "custom_components" / "intentional"
-sys.path.insert(0, str(INTEGRATION_DIR))
+sys.path.insert(0, str(CUSTOM_COMPONENTS_DIR))
 
-from rule_files import (  # noqa: E402
+from custom_components.intentional.rule_files import (  # noqa: E402
     _delete_rule_file,
     _is_safe_filename,
     _list_rule_files,
@@ -205,7 +207,7 @@ def test_validate_rule_dir_rejects_empty() -> None:
 
 def test_starter_template_is_valid_yaml() -> None:
     """The starter template should parse cleanly as a rule list."""
-    from _engine.yaml_loader import load_rules_from_string
+    from custom_components.intentional._engine.yaml_loader import load_rules_from_string
 
     template = _starter_template()
     rules = load_rules_from_string(template)
@@ -235,7 +237,7 @@ def test_starter_rules_directory_exists() -> None:
 
 def test_starter_rule_files_are_valid() -> None:
     """Every starter rule should parse cleanly."""
-    from _engine.yaml_loader import load_rules_from_string
+    from custom_components.intentional._engine.yaml_loader import load_rules_from_string
 
     for yaml_file in (INTEGRATION_DIR / "starter_rules").glob("*.yaml"):
         text = yaml_file.read_text()

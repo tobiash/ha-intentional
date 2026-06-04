@@ -38,10 +38,16 @@ from pathlib import Path
 
 import pytest
 
-# Make the integration importable
+# Make the integration importable as `custom_components.intentional.api`.
+# This mirrors how HACS loads the integration in production, which
+# means relative imports inside api.py (`from .const import ...`)
+# work correctly. If we instead put the integration dir on sys.path
+# directly, `api` would load as a top-level module and the relative
+# imports would fail with "attempted relative import with no known
+# parent package".
 REPO_ROOT = Path(__file__).parent.parent
-INTEGRATION_DIR = REPO_ROOT / "custom_components" / "intentional"
-sys.path.insert(0, str(INTEGRATION_DIR))
+CUSTOM_COMPONENTS_DIR = REPO_ROOT / "custom_components"
+sys.path.insert(0, str(CUSTOM_COMPONENTS_DIR))
 
 # The api module imports homeassistant, which is a heavy dep. Skip
 # the API unit tests if it's not available; the integration tests
@@ -54,7 +60,7 @@ pytest.importorskip("aiohttp", reason="aiohttp not installed")
 
 
 def test_health_view_has_correct_url() -> None:
-    from api import IntentionalHealthView
+    from custom_components.intentional.api import IntentionalHealthView
 
     assert IntentionalHealthView.url == "/api/intentional/health"
     assert IntentionalHealthView.requires_auth is True
@@ -62,7 +68,7 @@ def test_health_view_has_correct_url() -> None:
 
 
 def test_rules_view_has_correct_url() -> None:
-    from api import IntentionalRulesView
+    from custom_components.intentional.api import IntentionalRulesView
 
     assert IntentionalRulesView.url == "/api/intentional/rules"
     assert IntentionalRulesView.requires_auth is True
@@ -70,7 +76,7 @@ def test_rules_view_has_correct_url() -> None:
 
 def test_rule_view_supports_get_put_delete() -> None:
     """The /rules/{filename} endpoint should support GET, PUT, DELETE."""
-    from api import IntentionalRuleView
+    from custom_components.intentional.api import IntentionalRuleView
 
     assert hasattr(IntentionalRuleView, "get")
     assert hasattr(IntentionalRuleView, "put")
@@ -78,21 +84,21 @@ def test_rule_view_supports_get_put_delete() -> None:
 
 
 def test_reload_view_accepts_post() -> None:
-    from api import IntentionalReloadView
+    from custom_components.intentional.api import IntentionalReloadView
 
     assert IntentionalReloadView.url == "/api/intentional/reload"
     assert hasattr(IntentionalReloadView, "post")
 
 
 def test_state_view_exposes_state() -> None:
-    from api import IntentionalStateView
+    from custom_components.intentional.api import IntentionalStateView
 
     assert IntentionalStateView.url == "/api/intentional/state"
     assert hasattr(IntentionalStateView, "get")
 
 
 def test_explain_view_supports_target_param() -> None:
-    from api import IntentionalExplainView
+    from custom_components.intentional.api import IntentionalExplainView
 
     # URL pattern with a parameter
     assert "{target" in IntentionalExplainView.url
@@ -101,7 +107,7 @@ def test_explain_view_supports_target_param() -> None:
 
 def test_all_views_require_auth() -> None:
     """All API views must require authentication."""
-    from api import (
+    from custom_components.intentional.api import (
         IntentionalExplainView,
         IntentionalHealthView,
         IntentionalReloadView,
@@ -128,7 +134,7 @@ def test_all_views_require_auth() -> None:
 
 def test_error_returns_json_response() -> None:
     from aiohttp import web
-    from api import _error
+    from custom_components.intentional.api import _error
 
     resp = _error("test message", "test_code", 400)
     assert isinstance(resp, web.Response)
@@ -139,7 +145,7 @@ def test_error_returns_json_response() -> None:
 
 def test_error_default_status_is_400() -> None:
 
-    from api import _error
+    from custom_components.intentional.api import _error
 
     resp = _error("test", "test_code")
     assert resp.status == 400
@@ -147,7 +153,7 @@ def test_error_default_status_is_400() -> None:
 
 def test_error_custom_status() -> None:
 
-    from api import _error
+    from custom_components.intentional.api import _error
 
     for status in [400, 404, 500, 503]:
         resp = _error("test", "test_code", status)
@@ -158,8 +164,8 @@ def test_error_custom_status() -> None:
 
 
 def test_intent_to_dict_basic() -> None:
-    from _engine.intent import Authority, Intent
-    from api import _intent_to_dict
+    from custom_components.intentional._engine.intent import Authority, Intent
+    from custom_components.intentional.api import _intent_to_dict
 
     intent = Intent(
         target="light.x",
@@ -184,8 +190,8 @@ def test_intent_to_dict_basic() -> None:
 
 
 def test_intent_to_dict_with_modifiers() -> None:
-    from _engine.intent import Authority, Intent
-    from api import _intent_to_dict
+    from custom_components.intentional._engine.intent import Authority, Intent
+    from custom_components.intentional.api import _intent_to_dict
 
     intent = Intent(
         target="light.x",
@@ -212,7 +218,7 @@ def test_intent_to_dict_with_modifiers() -> None:
 
 def test_register_api_is_callable() -> None:
     """register_api should be a callable that takes a hass instance."""
-    from api import register_api
+    from custom_components.intentional.api import register_api
 
     assert callable(register_api)
 
@@ -222,7 +228,7 @@ def test_register_api_is_callable() -> None:
 
 def test_url_patterns_are_unique() -> None:
     """No two views should register the same URL."""
-    from api import (
+    from custom_components.intentional.api import (
         IntentionalExplainView,
         IntentionalHealthView,
         IntentionalReloadView,
@@ -244,7 +250,7 @@ def test_url_patterns_are_unique() -> None:
 
 def test_all_urls_under_api_intentional() -> None:
     """All API endpoints should be namespaced under /api/intentional/."""
-    from api import (
+    from custom_components.intentional.api import (
         IntentionalExplainView,
         IntentionalHealthView,
         IntentionalReloadView,

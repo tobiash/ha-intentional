@@ -59,8 +59,8 @@ from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_RULE_DIR, DEFAULT_RULE_DIR, DOMAIN
-from .rule_files import (
+from .const import CONF_RULE_DIR, DEFAULT_RULE_DIR, DOMAIN  # noqa: TID252
+from .rule_files import (  # noqa: TID252
     _delete_rule_file,
     _is_safe_filename,
     _list_rule_files,
