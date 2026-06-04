@@ -47,17 +47,12 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
-# We do NOT declare ``"http"`` as a hard dependency because:
-#
-# - The HTTP API is a convenience surface, not a core feature. Users
-#   who don't have the http component loaded (rare, but possible in
-#   embedded/headless setups) shouldn't fail to install Intentional.
-# - The test harness for pytest-homeassistant-custom-component doesn't
-#   load the http component by default, so a hard dependency would
-#   break every integration test in this repo.
-# - The register call is guarded: if ``hass.http`` isn't available we
-#   silently skip registration. The integration still works; only the
-#   /api/intentional/* endpoints are unavailable.
+# Declaring http as a dependency tells HA to ensure hass.http is
+# available before this integration's setup runs. This is the
+# official HA pattern for integrations that register HTTP views.
+# The register_api call is additionally guarded so the integration
+# still works in headless setups where http might not be loaded.
+DEPENDENCIES = ["http"]
 
 # Service schemas
 FIRE_SERVICE_SCHEMA = vol.Schema(
