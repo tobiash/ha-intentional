@@ -48,6 +48,7 @@ INTEGRATION_DIR = REPO_ROOT / "custom_components" / "intentional"
 sys.path.insert(0, str(INTEGRATION_DIR))
 
 # These imports MUST come after the importorskip checks
+from homeassistant.config_entries import ConfigEntryState  # noqa: E402
 from homeassistant.core import HomeAssistant  # noqa: E402
 from pytest_homeassistant_custom_component.common import (  # noqa: E402
     MockConfigEntry,
@@ -65,6 +66,25 @@ from custom_components.intentional.const import (  # noqa: E402
 def auto_enable_custom_integrations(enable_custom_integrations):
     """Enable loading custom integrations from the test integration dir."""
     yield
+
+
+@pytest.fixture(autouse=True)
+async def auto_unload_entries(hass: HomeAssistant):
+    """Unload any config entries after each test so background tasks
+    (the tick loop) are cancelled before the next test starts.
+
+    Without this, the tick loop started in async_setup_entry (a
+    ``while True:`` asyncio task at 100ms intervals) keeps running
+    between tests, and ``hass.async_block_till_done()`` will block
+    forever waiting for it to settle.
+    """
+    yield
+    # Unload any loaded config entries so the integration's background
+    # tasks (the tick loop) are cancelled before the next test starts.
+    for entry in list(hass.config_entries.async_entries()):
+        if entry.state is ConfigEntryState.LOADED:
+            await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
 
 
 @pytest.fixture
