@@ -51,7 +51,19 @@ def __getattr__(name: str):  # type: ignore[no-untyped-def]
             "AnimationFrame": AnimationFrame,
         }[name]
     if name in ("load_rules", "RuleLoadError"):
-        from intentional.yaml_loader import RuleLoadError, load_rules
+        from intentional.yaml_loader import Rule, RuleLoadError, load_rules
 
-        return {"load_rules": load_rules, "RuleLoadError": RuleLoadError}[name]
+        return {
+            "load_rules": load_rules,
+            "RuleLoadError": RuleLoadError,
+            "Rule": Rule,
+        }[name]
+    if name in ("parse_when", "WhenSyntaxError"):
+        from intentional.when_parser import WhenSyntaxError, parse_when
+
+        return {"parse_when": parse_when, "WhenSyntaxError": WhenSyntaxError}[name]
+    if name == "Engine":
+        from intentional.engine import Engine
+
+        return Engine
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
