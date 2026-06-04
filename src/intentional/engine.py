@@ -212,8 +212,11 @@ class Engine:
         return evaluate_when(ast, self.state, time_of_day=self._time_of_day)
 
     def _spawn_intent_from_rule(self, rule: Rule, now: int) -> Intent:
+        # Scene rules: target is empty, intent carries scene reference.
+        # The integration layer discovers these via list_active_scene_intents()
+        # and fires scene.turn_on instead of resolving a value.
         return Intent(
-            target=rule.target,
+            target=rule.target or "",  # "" for scene rules, entity_id otherwise
             set=dict(rule.set),
             cap=dict(rule.cap),
             floor=dict(rule.floor),
@@ -233,11 +236,46 @@ class Engine:
     # ── Resolution ─────────────────────────────────────────────────
 
     def list_active_intents(self, target: str) -> list[Intent]:
-        """Return a copy of the active intents for a target."""
+        """Return a copy of the active intents for a target.
+
+        Excludes scene-rule intents (those have no target).
+        """
         now = self.now_ms()
         return [
             i for i in self._active_intents
             if i.target == target and not i.is_expired(into_the_future_ms=now)
+        ]
+
+    def list_active_scene_intents(
+        self, return_intents: bool = False
+    ):
+        """Return the scene IDs of currently-active scene rules.
+
+        By default returns a list of scene entity_id strings (the
+        convenient form for the integration layer). If
+        `return_intents=True`, returns a list of (Intent, scene_id) tuples
+        for diagnostics.
+
+        Scene rules have no `target`; they're identified by the rule's
+        `scene` attribute. The intent is created with `target=""` to
+        distinguish it from target rules in `_active_intents`.
+        """
+        now = self.now_ms()
+        active_scene_intents = [
+            i for i in self._active_intents
+            if not i.target  # scene rules have empty target
+            and not i.is_expired(into_the_future_ms=now)
+        ]
+        if return_intents:
+            return [
+                (i, self._rules[i.rule_id].rule.scene)
+                for i in active_scene_intents
+                if i.rule_id in self._rules
+            ]
+        return [
+            self._rules[i.rule_id].rule.scene
+            for i in active_scene_intents
+            if i.rule_id in self._rules
         ]
 
     def resolve(self, target: str) -> ResolvedIntent | None:
@@ -285,3 +323,23 @@ class Engine:
     def log(self) -> list[str]:
         """Last few log lines for diagnostics."""
         return list(self._log)
+
+    def explain_scenes(self) -> str:
+        """Return a human-readable explanation of currently-active scene rules.
+
+        Used by the integration layer's diagnostics surface. Mirrors the
+        shape of `explain()` but for the scene-rule path.
+        """
+        scenes = self.list_active_scene_intents(return_intents=True)
+        if not scenes:
+            return "no active scene rules"
+        lines = [f"{len(scenes)} active scene(s):"]
+        for intent, scene_id in scenes:
+            ttl_info = ""
+            if intent.ttl_ms is not None:
+                ttl_info = f" (ttl: {intent.ttl_ms}ms)"
+            lines.append(
+                f"  - {scene_id}: rule={intent.rule_id!r} "
+                f"authority={intent.authority.value}{ttl_info} — {intent.reason}"
+            )
+        return "\n".join(lines)

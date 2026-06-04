@@ -29,6 +29,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
 
 from intentional import Engine, RuleLoadError, load_rules
+from intentional.intent import Authority, Intent
 from intentional.yaml_loader import Rule
 
 from .const import (
@@ -37,6 +38,7 @@ from .const import (
     CONF_RULE_DIR,
     DEFAULT_RULE_DIR,
     DOMAIN,
+    SERVICE_ACTIVATE_SCENE,
     SERVICE_FIRE,
     SERVICE_RELOAD,
     STORAGE_KEY,
@@ -53,6 +55,13 @@ FIRE_SERVICE_SCHEMA = vol.Schema(
     {
         vol.Required(ATTR_TARGET): cv.entity_id,
         vol.Optional("brightness_pct"): vol.All(int, vol.Range(min=0, max=100)),
+        vol.Optional("ttl"): vol.All(int, vol.Range(min=0, max=86400)),
+    }
+)
+
+ACTIVATE_SCENE_SCHEMA = vol.Schema(
+    {
+        vol.Required("rule_id"): cv.string,
         vol.Optional("ttl"): vol.All(int, vol.Range(min=0, max=86400)),
     }
 )
@@ -118,14 +127,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Set up tick loop — runs every 100ms, drives animations + TTL expiry
     tick_interval_ms = 100
+    # Track which scenes we've already activated in this session, to avoid
+    # firing scene.turn_on on every tick. Cleared when a scene rule stops
+    # firing, so the next activation re-fires.
+    _active_scenes: set[str] = set()
 
     async def _tick_loop() -> None:
+        nonlocal _active_scenes
         while True:
             await asyncio.sleep(tick_interval_ms / 1000)
             # Drive the engine's evaluation cycle
             _sync_state_into_engine(hass, engine)
             engine.evaluate_all()
             engine.tick(tick_interval_ms)
+            # Activate any newly-firing scene rules
+            _active_scenes = await _activate_scene_rules(
+                hass, engine, _active_scenes
+            )
             # Push resolved values to entities
             await _refresh_entities(hass, entry)
 
@@ -179,6 +197,69 @@ def _on_ha_state_change_factory(hass: HomeAssistant, engine: Engine):
     return _listener
 
 
+async def _activate_scene_rules(
+    hass: HomeAssistant,
+    engine: Engine,
+    already_activated: set[str],
+) -> set[str]:
+    """Fire scene.turn_on for any newly-active scene rules.
+
+    Returns the updated set of activated scenes. Scenes that have stopped
+    firing (e.g. the trigger condition is no longer met) are removed
+    from the set so they can be re-activated next time the rule fires.
+
+    We track already-activated scenes to avoid firing scene.turn_on on
+    every 100ms tick. A scene is idempotent in HA, but this is cleaner
+    and shows up nicely in the log when the user is debugging.
+
+    Transition from the rule is passed through to scene.turn_on as
+    `transition`, which HA's scene service accepts.
+    """
+    active = set(engine.list_active_scene_intents())
+    new_or_changed = active - already_activated
+    no_longer_active = already_activated - active
+
+    if not new_or_changed and not no_longer_active:
+        # No change — return the same set (no-op for the caller)
+        return already_activated
+
+    # Build a lookup of (scene_id → intent) so we can pull transition/easing
+    scene_intent_map = {
+        scene: intent
+        for intent, scene in engine.list_active_scene_intents(return_intents=True)
+    }
+
+    for scene_id in new_or_changed:
+        intent = scene_intent_map.get(scene_id)
+        if intent is None:
+            continue
+        # Transition is in ms; HA's scene.turn_on expects seconds
+        transition_s = intent.transition_ms / 1000.0 if intent.transition_ms else None
+        service_data: dict[str, Any] = {"entity_id": scene_id}
+        if transition_s:
+            service_data["transition"] = transition_s
+        _LOGGER.info(
+            "Activating scene %s (rule=%s, transition=%ss)",
+            scene_id, intent.rule_id, transition_s,
+        )
+        try:
+            await hass.services.async_call(
+                "scene", "turn_on",
+                service_data,
+                blocking=False,
+            )
+        except Exception as err:  # noqa: BLE001 — log and continue
+            _LOGGER.warning("Failed to activate scene %s: %s", scene_id, err)
+
+    if no_longer_active:
+        _LOGGER.info(
+            "Scene rules deactivated: %s (will re-activate on next trigger)",
+            sorted(no_longer_active),
+        )
+
+    return active
+
+
 async def _refresh_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Force the sensor platform to refresh by dispatching a custom event.
 
@@ -221,6 +302,46 @@ async def _register_services(
         engine.evaluate_all()
         await _refresh_entities(hass, entry)
 
+    async def _activate_scene_service(call: ServiceCall) -> None:
+        """Handle the `intentional.activate_scene` service call.
+
+        Looks up a scene rule by ID and forces it to fire, regardless of
+        its `when` condition. Honors the rule's transition and TTL.
+        """
+        rule_id = call.data["rule_id"]
+        ttl_override = call.data.get("ttl", 0)
+
+        parsed = engine._rules.get(rule_id)  # noqa: SLF001 (intentional access)
+        if parsed is None:
+            _LOGGER.error("No rule found with id %r", rule_id)
+            return
+        if parsed.rule.scene is None:
+            _LOGGER.error(
+                "Rule %r is not a scene rule (no `scene:` in emit)",
+                rule_id,
+            )
+            return
+
+        # Emit a user intent for this scene with the configured TTL
+        ttl_ms = ttl_override * 1000 if ttl_override else parsed.rule.ttl_ms
+        # Build an intent and append it directly (bypasses when evaluation)
+        intent = Intent(
+            target="",  # marks this as a scene intent
+            ttl_ms=ttl_ms,
+            authority=Authority.USER,
+            rule_id=rule_id,
+            reason="Manual activate_scene service",
+            created_at_ms=engine.now_ms(),
+        )
+        engine._active_intents.append(intent)  # noqa: SLF001 (intentional access)
+        # Re-evaluate so the activation path picks it up
+        engine.evaluate_all()
+        await _refresh_entities(hass, entry)
+        _LOGGER.info(
+            "Scene rule %r activated manually (scene=%s, ttl=%sms)",
+            rule_id, parsed.rule.scene, ttl_ms,
+        )
+
     async def _reload_service(_call: ServiceCall) -> None:
         """Handle the `intentional.reload` service call.
 
@@ -237,4 +358,5 @@ async def _register_services(
         await _refresh_entities(hass, entry)
 
     hass.services.async_register(DOMAIN, SERVICE_FIRE, _fire_service, schema=FIRE_SERVICE_SCHEMA)
+    hass.services.async_register(DOMAIN, SERVICE_ACTIVATE_SCENE, _activate_scene_service, schema=ACTIVATE_SCENE_SCHEMA)
     hass.services.async_register(DOMAIN, SERVICE_RELOAD, _reload_service)

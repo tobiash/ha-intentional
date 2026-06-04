@@ -44,11 +44,12 @@ rule files demonstrating each pattern.
 ## Emit fields
 
 The `emit` block describes what the rule claims. All sub-fields are optional
-except `target`.
+except `target` OR `scene` (exactly one is required).
 
 | Field        | Default | Description                                         |
 |--------------|---------|-----------------------------------------------------|
-| `target`     | —       | entity_id (required)                                 |
+| `target`     | —       | entity_id (required unless `scene` is set)           |
+| `scene`      | —       | HA scene entity_id (required unless `target` is set) |
 | `set`        | `{}`    | absolute values; per-field priority wins             |
 | `cap`        | `{}`    | smallest cap wins; clamps from above                 |
 | `floor`      | `{}`    | largest floor wins; clamps from below                |
@@ -59,6 +60,11 @@ except `target`.
 | `easing`     | `linear`| `linear`, `ease-in`, `ease-out`, `ease-in-out`, `sine`|
 | `ttl`        | `None`  | time-to-live; auto-releases the intent                 |
 | `animation`  | `null`  | time-varying value spec, see below                    |
+
+**`target` and `scene` are mutually exclusive.** A rule either claims an
+intent for a specific entity (operates through the compositor), or it
+references a HA scene (the integration calls `scene.turn_on`). See the
+[Scenes](#scenes) section below.
 
 ## Duration shorthand
 
@@ -181,6 +187,75 @@ data:
 This creates a USER-authority intent with a 2-hour TTL. The compositor
 will resolve conflicts with automation rules the same way it resolves
 two automation rules — user wins, but modifiers compose.
+
+To manually activate a scene rule (e.g. from a button or voice command),
+use `intentional.activate_scene` instead of calling `scene.turn_on`
+directly — that way the rule's transition and TTL are honored:
+
+```yaml
+action: intentional.activate_scene
+data:
+  rule_id: movie-scene-from-button
+  ttl: 0                    # 0 = use the rule's default TTL
+```
+
+## Scenes
+
+HA scenes bundle multiple entity states into one atomic activation:
+
+```yaml
+# scenes.yaml
+scene:
+  - name: Movie
+    entities:
+      light.living_room: { state: on, brightness: 30, color_temp: 400 }
+      media_player.tv: { state: on, source: "HDMI 2" }
+      cover.blinds: { state: closed }
+```
+
+ha-intentional rules can reference a scene by entity_id instead of
+operating through the compositor:
+
+```yaml
+- id: movie-scene-from-button
+  when: input_button.movie_button == "pressed"
+  emit:
+    scene: scene.movie         # NOT a target — references a HA scene
+    transition: 3s
+  authority: user
+```
+
+**What happens when the rule fires:**
+1. The engine sees the rule's `when` is now true
+2. The integration layer calls `scene.turn_on entity_id=scene.movie transition=3`
+3. HA applies all the scene's entity states atomically
+4. When `input_button.movie_button` goes back to "not pressed" (or the
+   TTL expires), the rule stops firing — the integration tracks this
+   so the next press re-activates the scene cleanly
+
+**Scenes don't go through the compositor** — they bypass the priority
+system entirely. If you want a rule's cap/floor to apply to a light that
+a scene controls, write a *separate* rule targeting that light:
+
+```yaml
+# Scene: sets brightness to whatever the scene defines
+- id: movie-scene-from-button
+  when: input_button.movie_button == "pressed"
+  emit:
+    scene: scene.movie
+  authority: user
+
+# Modifier: caps that light's brightness, regardless of source
+- id: movie-energy-cap
+  when: input_button.movie_button == "pressed"
+  emit:
+    target: light.living_room
+    cap: { brightness_pct: 50 }
+  authority: automation
+```
+
+The two rules fire from the same `when`. The scene sets the light, the
+cap rule clamps it on the next tick. They never conflict.
 
 ## Hot reload
 

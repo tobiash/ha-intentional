@@ -1,0 +1,58 @@
+# 07-scenes.yaml — referencing HA scenes by entity_id
+#
+# Demonstrates: `scene:` in emit. The rule does NOT have a `target:` —
+# instead, it references a HA scene by entity_id. When the rule fires,
+# the integration layer calls scene.turn_on with that scene.
+#
+# HA scenes are defined in scenes.yaml or via the UI. They bundle multiple
+# entity states into one atomic activation:
+#
+#   scene:
+#     - name: Movie
+#       entities:
+#         light.living_room:
+#           state: on
+#           brightness: 30
+#           color_temp: 400
+#         media_player.tv:
+#           state: on
+#           source: HDMI 2
+#         cover.blinds:
+#           state: closed
+#
+# Use ha-intentional rules to decide WHEN to activate a scene, and HA
+# scenes to define WHAT each scene sets.
+
+- id: movie-scene-from-button
+  when: input_button.movie_button == "pressed"
+  emit:
+    scene: scene.movie
+    transition: 3s
+  authority: user
+  reason: "Movie button pressed"
+
+- id: bedtime-scene
+  when: input_boolean.bedtime == "on"
+  emit:
+    scene: scene.bedtime
+    ttl: 12h                      # automatically release in the morning
+  authority: user
+  reason: "Bedtime toggle on"
+
+- id: focus-scene
+  when: input_boolean.focus_mode == "on"
+  emit:
+    scene: scene.focus
+  authority: user
+  reason: "Focus mode active"
+
+# A scene rule can also be paired with a modifier rule for the same
+# trigger. The scene sets the values; the modifier rule caps them.
+# Both fire from the same `when`, neither conflicts with the other.
+- id: movie-energy-cap
+  when: input_boolean.movie_button == "pressed"
+  emit:
+    target: light.living_room
+    cap: { brightness_pct: 50 }   # cap the brightness the scene sets
+  authority: automation
+  reason: "Cap movie-scene brightness for energy"

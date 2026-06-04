@@ -13,7 +13,7 @@
       "already_configured": "Intentional is already configured."
     }
   },
-  "services": {
+    "services": {
     "fire": {
       "name": "Fire intent",
       "description": "Manually fire a user intent for a target entity.",
@@ -35,6 +35,25 @@
           "description": "How long the manual intent should be active. Default: 7200 (2 hours).",
           "required": false,
           "default": 7200,
+          "selector": { "number": { "min": 0, "max": 86400, "unit_of_measurement": "s" } }
+        }
+      }
+    },
+    "activate_scene": {
+      "name": "Activate scene",
+      "description": "Manually activate a HA scene via a ha-intentional scene rule. Use this instead of scene.turn_on directly so the rule's transition and TTL are honored.",
+      "fields": {
+        "rule_id": {
+          "name": "Rule ID",
+          "description": "The id of a scene rule to activate. Must be a rule that references a HA scene.",
+          "required": true,
+          "selector": { "text": {} }
+        },
+        "ttl": {
+          "name": "TTL (seconds)",
+          "description": "Override the rule's default TTL. 0 means use the rule's value.",
+          "required": false,
+          "default": 0,
           "selector": { "number": { "min": 0, "max": 86400, "unit_of_measurement": "s" } }
         }
       }

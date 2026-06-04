@@ -124,13 +124,18 @@ class Rule:
 
     Attributes
     ----------
-    id
+    rule_id
         Unique identifier. Used for `blocks:` references and event attribution.
     when
         The trigger expression as a string. Engine evaluates this against
         the current state of referenced entities.
     target
-        The entity_id this rule's intents apply to.
+        The entity_id this rule's intents apply to. Empty string when the
+        rule references a scene instead.
+    scene
+        Optional HA scene entity_id (e.g. "scene.movie"). When set, the
+        rule activates this scene instead of operating through the compositor.
+        Mutually exclusive with `target`.
     set, cap, floor, offset, multiply
         Per-field modifiers, all dicts.
     merge
@@ -160,7 +165,8 @@ class Rule:
 
     id: str
     when: str
-    target: str
+    target: str = ""
+    scene: str | None = None
     set: dict[str, Any] = field(default_factory=dict)
     cap: dict[str, Any] = field(default_factory=dict)
     floor: dict[str, Any] = field(default_factory=dict)
@@ -188,7 +194,7 @@ _RULE_TOP_LEVEL = {
 }
 # Recognized fields in the emit block
 _EMIT_FIELDS = {
-    "target", "set", "cap", "floor", "offset", "multiply", "merge",
+    "target", "scene", "set", "cap", "floor", "offset", "multiply", "merge",
     "transition", "easing", "ttl", "animation",
 }
 # Recognized animation fields
@@ -248,11 +254,32 @@ def _validate_rule(
             file=file, line=line,
         )
 
-    # target
+    # target OR scene — mutually exclusive. A rule activates a HA scene
+    # OR claims an intent for a specific target entity. The two paths are
+    # different at the integration layer (scene.turn_on vs light.turn_on
+    # with a resolved value).
     target = emit.get("target")
-    if not target or not isinstance(target, str):
+    scene = emit.get("scene")
+    has_target = bool(target) and isinstance(target, str)
+    has_scene = bool(scene) and isinstance(scene, str)
+
+    if has_target and has_scene:
         raise RuleLoadError(
-            f"Rule {rule_id!r}: missing or invalid `target` in `emit` (must be a non-empty entity_id)",
+            f"Rule {rule_id!r}: `emit` has both `target` and `scene`. "
+            f"They are mutually exclusive — use one or the other.",
+            file=file, line=line,
+        )
+    if not has_target and not has_scene:
+        raise RuleLoadError(
+            f"Rule {rule_id!r}: `emit` must have either `target` (entity_id) "
+            f"or `scene` (HA scene entity_id). One is required.",
+            file=file, line=line,
+        )
+
+    if has_scene and not isinstance(scene, str):
+        raise RuleLoadError(
+            f"Rule {rule_id!r}: `scene` must be a string (HA scene entity_id), "
+            f"got {type(scene).__name__}",
             file=file, line=line,
         )
 
@@ -308,7 +335,8 @@ def _validate_rule(
     return Rule(
         id=rule_id,
         when=when,
-        target=target,
+        target=target or "",
+        scene=scene,
         set=dict(emit.get("set", {})),
         cap=dict(emit.get("cap", {})),
         floor=dict(emit.get("floor", {})),
