@@ -6,7 +6,7 @@ for manual control.
 
 Architecture:
 - IntentionalEngine: wraps the pure-Python Engine, bridges HA ↔ intents
-- IntentionalEntity: sensor entities (one per target, plus summary)
+- IntentionalSummarySensor / IntentionalTargetSensor (sensor.py)
 - Service handlers: fire, reload
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +42,7 @@ from .const import (
     STORAGE_KEY,
     STORAGE_VERSION,
 )
-from .entity import IntentionalSummarySensor, IntentionalTargetSensor
+from .sensor import IntentionalSummarySensor, IntentionalTargetSensor
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -76,6 +77,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     engine = Engine()
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = engine
 
+    # Make sure the rule directory exists before we try to load from it.
+    # On first install, /config/intentional/rules doesn't exist yet —
+    # we'd rather create it and start with zero rules than log an error
+    # every restart.
+    rule_path = Path(rule_dir)
+    if not rule_path.exists():
+        try:
+            rule_path.mkdir(parents=True, exist_ok=True)
+            _LOGGER.info("Created rule directory %s", rule_dir)
+        except OSError as err:
+            _LOGGER.warning("Could not create rule directory %s: %s", rule_dir, err)
+
     # Initial rule load
     try:
         initial_rules = await hass.async_add_executor_job(load_rules, rule_dir)
@@ -90,15 +103,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     engine.load_rules(initial_rules)
     _LOGGER.info("Loaded %d rules from %s", len(initial_rules), rule_dir)
 
-    # Make sure the rule directory exists. (We don't watch it for
-    # changes — that's a v0.2 polish. The `intentional.reload` service
-    # is the supported way to pick up rule edits for now.)
-    rule_path = Path(rule_dir)
-    if not rule_path.exists():
-        try:
-            rule_path.mkdir(parents=True, exist_ok=True)
-        except OSError as err:
-            _LOGGER.warning("Could not create rule directory %s: %s", rule_dir, err)
+    # Copy the starter rule pack on first install (zero rules loaded).
+    # This makes the integration useful out of the box — the user sees
+    # the summary sensor flip to >0 intents the moment setup completes.
+    if not initial_rules:
+        await _maybe_install_starter_rules(hass, rule_dir)
+
+    # We don't watch the rule directory for changes — that's a v0.2
+    # polish. The `intentional.reload` service is the supported way to
+    # pick up rule edits for now.
 
     # Set up platforms (sensors)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -145,6 +158,54 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id, None)
     return unload_ok
+
+
+async def _maybe_install_starter_rules(hass: HomeAssistant, rule_dir: str) -> None:
+    """Copy the starter rule pack to ``rule_dir`` on first install.
+
+    Looks for ``starter_rules/welcome.yaml`` packaged alongside this
+    integration and copies it to the user's rule directory. This makes
+    the integration useful out of the box — without this, a user who
+    just installed via HACS would see an empty engine until they wrote
+    a rule file by hand.
+
+    The starter rules are intentionally conservative:
+    - They don't override manual actions (authority: automation, low confidence)
+    - They target entities that exist on most HA installs (lights)
+    - They include detailed comments explaining the schema
+
+    Only runs on first install (when the rule directory is empty).
+    On subsequent runs, we don't touch the user's rules.
+    """
+    # Locate the bundled starter pack
+    integration_dir = Path(__file__).parent
+    starter_source = integration_dir / "starter_rules"
+    if not starter_source.exists():
+        _LOGGER.debug("No starter rule pack found at %s", starter_source)
+        return
+
+    rule_path = Path(rule_dir)
+    try:
+        copied = 0
+        for starter_file in starter_source.glob("*.yaml"):
+            dest = rule_path / starter_file.name
+            if dest.exists():
+                # Don't clobber — user may have edited it
+                continue
+            await hass.async_add_executor_job(
+                shutil.copy2, starter_file, dest
+            )
+            copied += 1
+            _LOGGER.info("Installed starter rule: %s", dest)
+        if copied:
+            _LOGGER.info(
+                "Installed %d starter rule(s) to %s. "
+                "Edit them to match your home, or call `intentional.reload` "
+                "to see them in action.",
+                copied, rule_dir,
+            )
+    except OSError as err:
+        _LOGGER.warning("Could not install starter rules: %s", err)
 
 
 def _sync_state_into_engine(hass: HomeAssistant, engine: Engine) -> None:

@@ -1,7 +1,8 @@
 """Config flow for the Intentional integration.
 
-The user only needs to point us at their rule directory. Everything else
-(rule parsing, hot-reload, schema validation) is automatic.
+The initial setup only asks for the rule directory. The options flow
+provides a UI for managing rules (list/edit/save/delete) without
+leaving Home Assistant.
 """
 
 from __future__ import annotations
@@ -16,23 +17,17 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.selector import selector
 
 from .const import CONF_RULE_DIR, DEFAULT_NAME, DEFAULT_RULE_DIR, DOMAIN
+from .rule_files import (
+    _delete_rule_file,
+    _is_safe_filename,
+    _list_rule_files,
+    _read_rule_file,
+    _starter_template,
+    _validate_rule_dir,
+    _write_rule_file,
+)
 
 _LOGGER = logging.getLogger(__name__)
-
-
-def _validate_rule_dir(rule_dir: str) -> None:
-    """Best-effort validation of the rule directory path.
-
-    We don't require the directory to exist at config time — the user
-    may want to create it later. We just sanity-check the path string.
-    """
-    if not rule_dir or not isinstance(rule_dir, str):
-        raise ValueError("Rule directory must be a non-empty string")
-    if not rule_dir.startswith("/"):
-        raise ValueError(
-            f"Rule directory must be an absolute path (got {rule_dir!r}). "
-            "On Home Assistant OS, the default is /config/intentional/rules/."
-        )
 
 
 class IntentionalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -84,7 +79,12 @@ class IntentionalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class IntentionalOptionsFlow(config_entries.OptionsFlow):
-    """Handle the options flow (changing the rule directory)."""
+    """Handle the options flow.
+
+    Provides two steps via a menu:
+    1. general  — change the rule directory
+    2. rules    — list, edit, create, delete rule files
+    """
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         self.config_entry = config_entry
@@ -92,13 +92,23 @@ class IntentionalOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
+        """Show the options menu."""
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=["general", "rules"],
+        )
+
+    async def async_step_general(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Change the rule directory."""
         if user_input is not None:
             new_dir = user_input[CONF_RULE_DIR].strip()
             try:
                 _validate_rule_dir(new_dir)
             except ValueError:
                 return self.async_show_form(
-                    step_id="init",
+                    step_id="general",
                     data_schema=vol.Schema(
                         {
                             vol.Required(
@@ -111,7 +121,6 @@ class IntentionalOptionsFlow(config_entries.OptionsFlow):
                     ),
                     errors={CONF_RULE_DIR: "invalid_path"},
                 )
-            # Update the entry — this triggers a reload of the integration
             self.hass.config_entries.async_update_entry(
                 self.config_entry,
                 data={**self.config_entry.data, CONF_RULE_DIR: new_dir},
@@ -121,8 +130,172 @@ class IntentionalOptionsFlow(config_entries.OptionsFlow):
 
         current = self.config_entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR)
         return self.async_show_form(
-            step_id="init",
+            step_id="general",
             data_schema=vol.Schema(
                 {vol.Required(CONF_RULE_DIR, default=current): selector({"text": {}})}
             ),
+        )
+
+    async def async_step_rules(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Rule management hub: pick a file to edit, or create/delete."""
+        rule_dir = self.config_entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR)
+
+        # Handle a previous submit: route to the right step
+        if user_input is not None:
+            action = user_input.get("action", "")
+            if action == "__create__":
+                return await self.async_step_edit_new()
+            if action == "__delete__":
+                return await self.async_step_delete_pick()
+            # Otherwise it's a filename → show editor
+            self._selected_file = action
+            return await self.async_step_edit_existing()
+
+        files = _list_rule_files(rule_dir)
+        # Build select options: each file + create + delete
+        if not files:
+            return self.async_show_form(
+                step_id="rules",
+                data_schema=vol.Schema(
+                    {
+                        vol.Required("action", default="__create__"): vol.In(
+                            {"__create__": "➕ Create your first rule"}
+                        ),
+                    }
+                ),
+                description_placeholders={
+                    "rule_dir": rule_dir,
+                    "file_count": "0",
+                    "filenames": "(no rule files yet)",
+                },
+            )
+
+        file_choices: dict[str, str] = {
+            f["filename"]: f["filename"] for f in files
+        }
+        file_choices["__create__"] = "➕ Create new rule"
+        file_choices["__delete__"] = "🗑️  Delete a rule"
+
+        return self.async_show_form(
+            step_id="rules",
+            data_schema=vol.Schema(
+                {vol.Required("action"): vol.In(file_choices)}
+            ),
+            description_placeholders={
+                "rule_dir": rule_dir,
+                "file_count": str(len(files)),
+                "filenames": ", ".join(f["filename"] for f in files),
+            },
+        )
+
+    async def async_step_edit_existing(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Edit the currently-selected rule file."""
+        rule_dir = self.config_entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR)
+
+        if user_input is not None:
+            contents = user_input.get("contents", "")
+            err = _write_rule_file(rule_dir, self._selected_file, contents)
+            if err:
+                return self.async_show_form(
+                    step_id="edit_existing",
+                    data_schema=vol.Schema(
+                        {
+                            vol.Optional(
+                                "contents", default=contents
+                            ): selector(
+                                {"text": {"multiline": True, "rows": 20}}
+                            ),
+                        }
+                    ),
+                    errors={"base": err},
+                    description_placeholders={"filename": self._selected_file},
+                )
+            await self.hass.services.async_call(DOMAIN, "reload", blocking=True)
+            return self.async_create_entry(title="", data={})
+
+        current = _read_rule_file(rule_dir, self._selected_file) or ""
+        return self.async_show_form(
+            step_id="edit_existing",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional("contents", default=current): selector(
+                        {"text": {"multiline": True, "rows": 20}}
+                    ),
+                }
+            ),
+            description_placeholders={"filename": self._selected_file},
+        )
+
+    async def async_step_edit_new(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Create a new rule file."""
+        rule_dir = self.config_entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR)
+
+        if user_input is not None:
+            filename = user_input["filename"].strip()
+            contents = user_input.get("contents") or _starter_template().replace(
+                "new-rule", filename.rsplit(".", 1)[0]
+            )
+            err = _write_rule_file(rule_dir, filename, contents)
+            if err:
+                return self.async_show_form(
+                    step_id="edit_new",
+                    data_schema=vol.Schema(
+                        {
+                            vol.Required("filename", default=filename): str,
+                            vol.Optional("contents", default=contents): selector(
+                                {"text": {"multiline": True, "rows": 18}}
+                            ),
+                        }
+                    ),
+                    errors={"base": err},
+                )
+            await self.hass.services.async_call(DOMAIN, "reload", blocking=True)
+            return self.async_create_entry(title="", data={})
+
+        return self.async_show_form(
+            step_id="edit_new",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("filename", default="new-rule.yaml"): str,
+                    vol.Optional("contents", default=_starter_template()): selector(
+                        {"text": {"multiline": True, "rows": 18}}
+                    ),
+                }
+            ),
+            description_placeholders={"rule_dir": rule_dir},
+        )
+
+    async def async_step_delete_pick(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Pick a file to delete, then delete it."""
+        rule_dir = self.config_entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR)
+
+        if user_input is not None:
+            filename = user_input["filename"]
+            err = _delete_rule_file(rule_dir, filename)
+            if err:
+                return self.async_abort(reason=err)
+            await self.hass.services.async_call(DOMAIN, "reload", blocking=True)
+            return self.async_create_entry(title="", data={})
+
+        files = _list_rule_files(rule_dir)
+        if not files:
+            return self.async_create_entry(title="", data={})
+        file_choices = {f["filename"]: f["filename"] for f in files}
+        return self.async_show_form(
+            step_id="delete_pick",
+            data_schema=vol.Schema(
+                {vol.Required("filename"): vol.In(file_choices)}
+            ),
+            description_placeholders={
+                "rule_dir": rule_dir,
+                "filenames": ", ".join(f["filename"] for f in files),
+            },
         )
