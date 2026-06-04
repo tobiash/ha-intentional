@@ -1,0 +1,106 @@
+# GitHub Actions workflow for ha-intentional
+#
+# This file lives in ci/test.yml (not .github/workflows/) because
+# the project's GitHub token doesn't have `workflow` scope. The
+# user copies it to .github/workflows/test.yml once they grant the
+# scope. See docs/ci-setup.md for full instructions.
+#
+# ─────────────────────────────────────────────────────────────────
+# How to enable CI (one-time setup)
+# ─────────────────────────────────────────────────────────────────
+# 1. Grant the gh CLI token the `workflow` scope:
+#      gh auth refresh -h github.com -s workflow
+# 2. Push this file to its proper location:
+#      mkdir -p .github/workflows
+#      cp ci/test.yml .github/workflows/test.yml
+#      git add .github/workflows/test.yml
+#      git commit -m "Enable CI workflow"
+#      git push
+# 3. Watch the Actions tab on GitHub — first run takes ~5 minutes
+#    (most of which is installing the full Home Assistant package).
+# ─────────────────────────────────────────────────────────────────
+#
+# What this workflow does
+# ───────────────────────
+# 1. Lint    — ruff check on the engine + integration code
+# 2. Test    — full test suite (unit + integration with HA)
+# 3. Verify  — bundled engine matches the source (catches drift)
+#
+# Why one job, not a matrix
+# ─────────────────────────
+# We tested against a single Python version (3.13) because the
+# engine is pure Python with no C extensions. A matrix would
+# triple CI time and cost for zero real-world signal.
+#
+# If a future change introduces C extensions (e.g. for performance),
+# add a matrix over Python 3.11 / 3.12 / 3.13 at that point.
+
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:  # allow manual runs
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so version-cross-check tests can read tags
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Install the package in editable mode with all test deps
+          # (unit + integration). The integration deps include
+          # homeassistant, which is ~500MB — this is the slow step.
+          pip install -e ".[all-tests]"
+
+      - name: Lint
+        run: |
+          ruff check src/ tests/ custom_components/intentional/
+
+      - name: Verify bundled engine matches source
+        run: |
+          # Catch drift: the bundled engine subpackage must include
+          # every file in src/intentional/. If they diverge, the
+          # integration installed by HACS will be broken.
+          python ci/check-bundle-sync.py
+
+      - name: Run unit tests
+        run: |
+          pytest tests/ -v --tb=short \
+            --ignore=tests/test_manifest.py \
+            --ignore=tests/test_integration.py \
+            --ignore=tests/test_api.py
+
+      - name: Run integration tests
+        # Integration tests need HA + pytest-homeassistant-custom-component.
+        # They take a few minutes to start up; we run them after the fast
+        # unit tests so failures surface quickly.
+        run: |
+          pytest tests/test_api.py tests/test_integration.py -v --tb=short
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            htmlcov/
+            .coverage
+          if-no-files-found: ignore

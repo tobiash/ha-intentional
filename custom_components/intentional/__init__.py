@@ -144,6 +144,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Set up services
     await _register_services(hass, engine, rule_dir, entry)
 
+    # Register HTTP API views
+    from .api import register_api
+    register_api(hass)
+
     # Subscribe to state changes to keep engine in sync
     entry.async_on_unload(
         hass.bus.async_listen("state_changed", _on_ha_state_change_factory(hass, engine))
