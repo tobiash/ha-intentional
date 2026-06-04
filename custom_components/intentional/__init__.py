@@ -23,7 +23,6 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, State, SupportsResponse
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.directory_watcher import async_watch_directory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
@@ -85,7 +84,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except RuleLoadError as err:
         _LOGGER.error("Could not load rules from %s: %s", rule_dir, err)
         # Don't fail the whole integration — let the user fix the file
-        # and the directory watcher will retry. We log the error.
+        # and call `intentional.reload` to retry. We log the error.
         initial_rules = []
     except Exception as err:
         raise ConfigEntryNotReady(f"Failed to load rules: {err}") from err
@@ -93,34 +92,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     engine.load_rules(initial_rules)
     _LOGGER.info("Loaded %d rules from %s", len(initial_rules), rule_dir)
 
-    # Watch the rule directory for changes (hot reload)
-    async def _on_rule_dir_change(_change_type: str, _path: str) -> None:
-        _LOGGER.info("Rule directory changed, reloading rules from %s", rule_dir)
-        try:
-            new_rules = await hass.async_add_executor_job(load_rules, rule_dir)
-        except RuleLoadError as err:
-            _LOGGER.error("Rule reload failed: %s", err)
-            return
-        engine.load_rules(new_rules)
-        # Re-evaluate to pick up the new rules immediately
-        engine.evaluate_all()
-        # Trigger a manual state update so entities refresh
-        await _refresh_entities(hass, entry)
-
-    # Make sure the directory exists before watching
+    # Make sure the rule directory exists. (We don't watch it for
+    # changes — that's a v0.2 polish. The `intentional.reload` service
+    # is the supported way to pick up rule edits for now.)
     rule_path = Path(rule_dir)
     if not rule_path.exists():
         try:
             rule_path.mkdir(parents=True, exist_ok=True)
         except OSError as err:
             _LOGGER.warning("Could not create rule directory %s: %s", rule_dir, err)
-
-    if rule_path.exists():
-        entry.async_on_unload(
-            await async_watch_directory(
-                hass, str(rule_path), _on_rule_dir_change
-            )
-        )
 
     # Set up platforms (sensors)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
