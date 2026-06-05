@@ -74,6 +74,13 @@ MANUAL_SET_FIELDS = (
     "message",
     "title",
     "data",
+    "todo_action",
+    "item",
+    "rename",
+    "status",
+    "due_date",
+    "due_datetime",
+    "description",
     "variables",
     "skip_condition",
     "datetime",
@@ -327,7 +334,7 @@ def manual_set_from_state_object(state: Any) -> dict[str, Any]:
         result["value"] = attributes.get("value", state_value)
     if domain in {"select", "input_select"}:
         result["option"] = state_value
-    if domain == "input_text":
+    if domain in {"text", "input_text"}:
         result["value"] = state_value
     if domain == "input_datetime":
         has_date = attributes.get("has_date")
@@ -771,7 +778,7 @@ def _service_calls_without_update_entity(
             {"entity_id": target, "option": option},
         ),)
 
-    if domain == "input_text":
+    if domain in {"text", "input_text"}:
         text_value = value.get("value", state)
         if text_value is None:
             return ()
@@ -780,6 +787,55 @@ def _service_calls_without_update_entity(
             "set_value",
             {"entity_id": target, "value": text_value},
         ),)
+
+    if domain == "todo":
+        todo_action = value.get("todo_action", state)
+        if todo_action is None and "item" in value:
+            todo_action = "add_item"
+        if todo_action is None:
+            return ()
+        service = str(todo_action)
+        if service in {"add", "add_item"}:
+            item = value.get("item")
+            if item is None:
+                return ()
+            data = {"entity_id": target, "item": item}
+            for field in ("due_date", "due_datetime", "description"):
+                if field in value:
+                    data[field] = value[field]
+            return ((domain, "add_item", data),)
+        if service in {"update", "update_item", "complete", "completed", "needs_action"}:
+            item = value.get("item")
+            if item is None:
+                return ()
+            data = {"entity_id": target, "item": item}
+            if service in {"complete", "completed"}:
+                data["status"] = "completed"
+            elif service == "needs_action":
+                data["status"] = "needs_action"
+            for field in (
+                "rename",
+                "status",
+                "due_date",
+                "due_datetime",
+                "description",
+            ):
+                if field in value:
+                    data[field] = value[field]
+            return ((domain, "update_item", data),)
+        if service in {"remove", "remove_item"}:
+            item = value.get("item")
+            if item is None:
+                return ()
+            return ((domain, "remove_item", {"entity_id": target, "item": item}),)
+        if service in {"clear_completed", "remove_completed", "remove_completed_items"}:
+            return ((domain, "remove_completed_items", {"entity_id": target}),)
+        if service in {"get", "get_items"}:
+            data = dict(service_data)
+            if "status" in value:
+                data["status"] = value["status"]
+            return ((domain, "get_items", data),)
+        return ()
 
     if domain == "input_datetime":
         datetime_fields = {

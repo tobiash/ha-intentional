@@ -128,6 +128,8 @@ The integration currently supports:
 | `number.*`, `input_number.*` | `set_value`                            |
 | `counter.*`    | `set_value`, `increment`, `decrement`, `reset`         |
 | `select.*`, `input_select.*` | `select_option`, `select_next`, `select_previous`; `input_select` also supports `select_first`, `select_last` |
+| `text.*`, `input_text.*` | `set_value`                                  |
+| `todo.*`       | `add_item`, `update_item`, `remove_item`, `remove_completed_items`, `get_items` |
 | `input_text.*`  | `set_value`                                            |
 | `input_datetime.*` | `set_datetime`                                     |
 | `lock.*`        | `lock`, `unlock`                                       |
@@ -181,7 +183,7 @@ Counters also support `state: increment`, `state: decrement`, and
 support `option`, with `state` as an alias for the selected option. `state:
 next` and `state: previous` call the next/previous actions; `input_select`
 also supports `state: first` and `state: last`. Add `cycle: false` to prevent
-next/previous from wrapping where HA supports it. Input text
+next/previous from wrapping where HA supports it. Text and input text
 supports `value`, with `state` as an alias for the text value. Input datetime
 helpers support `datetime`, `date`, `time`, and `timestamp`, with `state` as
 an alias for `datetime`. Locks support `state: locked` and `state: unlocked`.
@@ -202,6 +204,10 @@ called, normal HA state settling does not re-trigger the action while the same
 intent remains active. Script targets support optional `variables`. Automation
 targets default to `automation.trigger`, support optional `skip_condition`, and
 use `automation.turn_on` / `automation.turn_off` when `state` is `on` or `off`.
+To-do targets support `todo_action` values `add_item`, `update_item`,
+`remove_item`, `clear_completed`, and `get_items`. Supplying `item` without
+`todo_action` defaults to `add_item`; `state: completed` marks an item
+complete.
 Media-player transport actions that settle into a clear state are checked as
 durable plans: `play` expects `playing`, `pause` expects `paused`, and `stop`
 expects `idle` or `stopped`. Other media actions such as `play_media`, `seek`,
@@ -383,7 +389,8 @@ payloads: `state`, `brightness_pct`, `brightness`, `color_temp_k`,
 `preset_mode`, `fan_mode`, `direction`, `oscillating`, `value`, `option`, `cycle`,
 `humidity`, `swing_mode`, `swing_horizontal_mode`, `aux_heat`, `code`,
 `message`, `title`,
-`data`, `variables`, `skip_condition`, `datetime`, `date`, `time`,
+`data`, `todo_action`, `item`, `rename`, `status`, `due_date`, `due_datetime`,
+`description`, `variables`, `skip_condition`, `datetime`, `date`, `time`,
 `timestamp`, `duration`, `humidity`, `mode`, `operation_mode`, `away_mode`,
 `fan_speed`, `command`, `params`, `cleaning_area_id`, `activity`, `device`,
 `num_repeats`, `delay_secs`, `hold_secs`, and `update_entity`.

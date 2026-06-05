@@ -390,6 +390,48 @@
           "required": false,
           "selector": { "object": {} }
         },
+        "todo_action": {
+          "name": "To-do action",
+          "description": "Optional todo action such as add_item, update_item, remove_item, clear_completed, or get_items.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "item": {
+          "name": "To-do item",
+          "description": "To-do item summary for add, update, complete, or remove actions.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "rename": {
+          "name": "Rename to-do item",
+          "description": "Replacement summary for todo.update_item.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "status": {
+          "name": "To-do status",
+          "description": "To-do status such as needs_action or completed.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "due_date": {
+          "name": "To-do due date",
+          "description": "Optional due date for todo.add_item or todo.update_item.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "due_datetime": {
+          "name": "To-do due date and time",
+          "description": "Optional due date and time for todo.add_item or todo.update_item.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "description": {
+          "name": "To-do description",
+          "description": "Optional description for todo.add_item or todo.update_item.",
+          "required": false,
+          "selector": { "text": {} }
+        },
         "variables": {
           "name": "Variables",
           "description": "Optional script variables for script targets.",

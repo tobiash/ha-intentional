@@ -106,6 +106,13 @@ def test_manual_set_from_service_data_supports_helper_fields() -> None:
         "message": "Door opened",
         "title": "Front door",
         "data": {"tag": "door"},
+        "todo_action": "add_item",
+        "item": "Buy filters",
+        "rename": "Buy HVAC filters",
+        "status": "completed",
+        "due_date": "2026-06-06",
+        "due_datetime": "2026-06-06 10:00:00",
+        "description": "For the office purifier",
         "variables": {"mode": "movie"},
         "skip_condition": True,
         "datetime": "2026-06-05 22:30:00",
@@ -146,6 +153,13 @@ def test_manual_set_from_service_data_supports_helper_fields() -> None:
         "message": "Door opened",
         "title": "Front door",
         "data": {"tag": "door"},
+        "todo_action": "add_item",
+        "item": "Buy filters",
+        "rename": "Buy HVAC filters",
+        "status": "completed",
+        "due_date": "2026-06-06",
+        "due_datetime": "2026-06-06 10:00:00",
+        "description": "For the office purifier",
         "variables": {"mode": "movie"},
         "skip_condition": True,
         "datetime": "2026-06-05 22:30:00",
@@ -1617,6 +1631,105 @@ def test_input_text_maps_to_set_value_service() -> None:
             "input_text",
             "set_value",
             {"entity_id": "input_text.status", "value": "quiet"},
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "text.fridge_note",
+        {"value": "Buy milk"},
+    ) == (
+        (
+            "text",
+            "set_value",
+            {"entity_id": "text.fridge_note", "value": "Buy milk"},
+        ),
+    )
+
+
+def test_todo_target_maps_to_todo_services() -> None:
+    from intentional.ha_adapter import service_calls_for_resolved_target
+
+    assert service_calls_for_resolved_target(
+        "todo.shopping_list",
+        {
+            "item": "Buy filters",
+            "due_date": "2026-06-06",
+            "description": "For the office purifier",
+        },
+    ) == (
+        (
+            "todo",
+            "add_item",
+            {
+                "entity_id": "todo.shopping_list",
+                "item": "Buy filters",
+                "due_date": "2026-06-06",
+                "description": "For the office purifier",
+            },
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "todo.shopping_list",
+        {
+            "todo_action": "update",
+            "item": "Buy filters",
+            "rename": "Buy HVAC filters",
+            "status": "needs_action",
+            "due_datetime": "2026-06-06 10:00:00",
+        },
+    ) == (
+        (
+            "todo",
+            "update_item",
+            {
+                "entity_id": "todo.shopping_list",
+                "item": "Buy filters",
+                "rename": "Buy HVAC filters",
+                "status": "needs_action",
+                "due_datetime": "2026-06-06 10:00:00",
+            },
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "todo.shopping_list",
+        {"state": "completed", "item": "Buy filters"},
+    ) == (
+        (
+            "todo",
+            "update_item",
+            {
+                "entity_id": "todo.shopping_list",
+                "item": "Buy filters",
+                "status": "completed",
+            },
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "todo.shopping_list",
+        {"todo_action": "remove", "item": "Buy filters"},
+    ) == (
+        (
+            "todo",
+            "remove_item",
+            {"entity_id": "todo.shopping_list", "item": "Buy filters"},
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "todo.shopping_list",
+        {"todo_action": "clear_completed"},
+    ) == (
+        ("todo", "remove_completed_items", {"entity_id": "todo.shopping_list"}),
+    )
+    assert service_calls_for_resolved_target(
+        "todo.shopping_list",
+        {"todo_action": "get_items", "status": ["needs_action", "completed"]},
+    ) == (
+        (
+            "todo",
+            "get_items",
+            {
+                "entity_id": "todo.shopping_list",
+                "status": ["needs_action", "completed"],
+            },
         ),
     )
 
