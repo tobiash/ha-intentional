@@ -3,6 +3,17 @@
 The initial setup only asks for the rule directory. The options flow
 provides a UI for managing rules (list/edit/save/delete) without
 leaving Home Assistant.
+
+Async-safety contract
+---------------------
+All filesystem operations in this flow MUST run in HA's executor
+(via ``hass.async_add_executor_job``). The ``rule_files`` module
+is deliberately synchronous so it can be unit-tested without HA,
+but calling it directly from an async handler blocks the event
+loop. HA detects this and returns 500.
+
+The regression test ``tests/test_config_flow_no_blocking_io.py``
+fails the build if a sync call from this module slips back in.
 """
 
 from __future__ import annotations
@@ -30,6 +41,39 @@ from .rule_files import (
 _LOGGER = logging.getLogger(__name__)
 
 
+async def _list_in_executor(hass, rule_dir: str) -> list[dict[str, str]]:
+    """Async wrapper: list rule files in the executor.
+
+    Defined at module level (not as a method) so it's trivial to
+    audit and mock. The instance methods on the flows below all
+    route filesystem I/O through this and its siblings.
+    """
+    return await hass.async_add_executor_job(_list_rule_files, rule_dir)
+
+
+async def _read_in_executor(hass, rule_dir: str, filename: str) -> str | None:
+    """Async wrapper: read a rule file in the executor."""
+    return await hass.async_add_executor_job(_read_rule_file, rule_dir, filename)
+
+
+async def _write_in_executor(
+    hass, rule_dir: str, filename: str, contents: str
+) -> str | None:
+    """Async wrapper: write a rule file (with YAML validation) in the executor."""
+    return await hass.async_add_executor_job(
+        _write_rule_file, rule_dir, filename, contents
+    )
+
+
+async def _delete_in_executor(
+    hass, rule_dir: str, filename: str
+) -> str | None:
+    """Async wrapper: delete a rule file in the executor."""
+    return await hass.async_add_executor_job(
+        _delete_rule_file, rule_dir, filename
+    )
+
+
 class IntentionalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle the initial setup flow."""
 
@@ -43,6 +87,8 @@ class IntentionalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             rule_dir = user_input[CONF_RULE_DIR].strip()
             try:
+                # _validate_rule_dir is pure-string validation,
+                # no I/O — safe to call sync.
                 _validate_rule_dir(rule_dir)
             except ValueError as err:
                 errors[CONF_RULE_DIR] = "invalid_path"
@@ -96,6 +142,12 @@ class IntentionalOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
     HA logged ``AttributeError: property 'config_entry' of
     'IntentionalOptionsFlow' object has no setter`` and Configure
     returned HTTP 500. See CHANGELOG v0.3.3.
+
+    A second bug bit users in v0.3.0: every rule-files call was sync
+    on the event loop, so HA logged blocking-call warnings and returned
+    500 on every "list rules" / "edit" / "create" / "delete" step.
+    v0.3.4 routes all such calls through ``hass.async_add_executor_job``
+    via the ``_*_in_executor`` helpers above.
     """
 
     async def async_step_init(
@@ -114,6 +166,7 @@ class IntentionalOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
         if user_input is not None:
             new_dir = user_input[CONF_RULE_DIR].strip()
             try:
+                # Pure-string validation, safe to call sync.
                 _validate_rule_dir(new_dir)
             except ValueError:
                 return self.async_show_form(
@@ -134,7 +187,9 @@ class IntentionalOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
                 self.config_entry,
                 data={**self.config_entry.data, CONF_RULE_DIR: new_dir},
             )
-            await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+            await self.hass.config_entries.async_reload(
+                self.config_entry.entry_id
+            )
             return self.async_create_entry(title="", data={})
 
         current = self.config_entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR)
@@ -162,7 +217,10 @@ class IntentionalOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
             self._selected_file = action
             return await self.async_step_edit_existing()
 
-        files = _list_rule_files(rule_dir)
+        # EXECUTOR: list_rule_files does path.glob() + stat() — both
+        # blocking I/O. v0.3.0..v0.3.3 called this sync, triggering
+        # HA's "Detected blocking call to scandir" warning + 500.
+        files = await _list_in_executor(self.hass, rule_dir)
         # Build select options: each file + create + delete
         if not files:
             return self.async_show_form(
@@ -207,7 +265,11 @@ class IntentionalOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
 
         if user_input is not None:
             contents = user_input.get("contents", "")
-            err = _write_rule_file(rule_dir, self._selected_file, contents)
+            # EXECUTOR: writes go through the executor (mkdir + write_text
+            # + yaml validation — all blocking).
+            err = await _write_in_executor(
+                self.hass, rule_dir, self._selected_file, contents
+            )
             if err:
                 return self.async_show_form(
                     step_id="edit_existing",
@@ -216,7 +278,7 @@ class IntentionalOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
                             vol.Optional(
                                 "contents", default=contents
                             ): selector(
-                                {"text": {"multiline": True, "rows": 20}}
+                                {"text": {"multiline": True}}
                             ),
                         }
                     ),
@@ -226,13 +288,17 @@ class IntentionalOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
             await self.hass.services.async_call(DOMAIN, "reload", blocking=True)
             return self.async_create_entry(title="", data={})
 
-        current = _read_rule_file(rule_dir, self._selected_file) or ""
+        # EXECUTOR: read_text() on the loop. v0.3.0..v0.3.3 hit this
+        # every time the user clicked "edit" on an existing rule.
+        current = await _read_in_executor(
+            self.hass, rule_dir, self._selected_file
+        ) or ""
         return self.async_show_form(
             step_id="edit_existing",
             data_schema=vol.Schema(
                 {
                     vol.Optional("contents", default=current): selector(
-                        {"text": {"multiline": True, "rows": 20}}
+                        {"text": {"multiline": True}}
                     ),
                 }
             ),
@@ -250,7 +316,10 @@ class IntentionalOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
             contents = user_input.get("contents") or _starter_template().replace(
                 "new-rule", filename.rsplit(".", 1)[0]
             )
-            err = _write_rule_file(rule_dir, filename, contents)
+            # EXECUTOR: same reason as edit_existing.
+            err = await _write_in_executor(
+                self.hass, rule_dir, filename, contents
+            )
             if err:
                 return self.async_show_form(
                     step_id="edit_new",
@@ -258,7 +327,7 @@ class IntentionalOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
                         {
                             vol.Required("filename", default=filename): str,
                             vol.Optional("contents", default=contents): selector(
-                                {"text": {"multiline": True, "rows": 18}}
+                                {"text": {"multiline": True}}
                             ),
                         }
                     ),
@@ -273,7 +342,7 @@ class IntentionalOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
                 {
                     vol.Required("filename", default="new-rule.yaml"): str,
                     vol.Optional("contents", default=_starter_template()): selector(
-                        {"text": {"multiline": True, "rows": 18}}
+                        {"text": {"multiline": True}}
                     ),
                 }
             ),
@@ -288,13 +357,17 @@ class IntentionalOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
 
         if user_input is not None:
             filename = user_input["filename"]
-            err = _delete_rule_file(rule_dir, filename)
+            # EXECUTOR: unlink() is blocking I/O.
+            err = await _delete_in_executor(
+                self.hass, rule_dir, filename
+            )
             if err:
                 return self.async_abort(reason=err)
             await self.hass.services.async_call(DOMAIN, "reload", blocking=True)
             return self.async_create_entry(title="", data={})
 
-        files = _list_rule_files(rule_dir)
+        # EXECUTOR: listing files for the picker.
+        files = await _list_in_executor(self.hass, rule_dir)
         if not files:
             return self.async_create_entry(title="", data={})
         file_choices = {f["filename"]: f["filename"] for f in files}

@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4] - 2026-06-05
+
+### Fixed
+- **Blocking I/O on the event loop in the config flow options handlers** (v0.3.0 origin, 4 versions live before being reported). `async_step_rules`, `async_step_edit_existing`, `async_step_edit_new`, and `async_step_delete_pick` all called `rule_files._list_rule_files` / `_read_rule_file` / `_write_rule_file` / `_delete_rule_file` *synchronously*. HA logged `Detected blocking call to scandir/read_text/write_text/unlink` and the flow returned 500 — every click in the "Manage rules" hub hit this. Fix: route all four operations through new module-level `_*_in_executor` helpers that wrap each call in `hass.async_add_executor_job`. `_validate_rule_dir` stays sync (pure-string validation, no I/O).
+- **Invalid `rows` key in `TextSelector` configs** (v0.2.0 origin, 4 versions live). All four `{"text": {"multiline": True, "rows": N}}` literals used `rows`, which is not a valid `TextSelectorConfig` key on any HA version. HA's `validate_selector` raises `InvalidData` ("extra keys not allowed @ data['rows']") at flow-show time → 500. Fix: drop the `rows` key from all four selectors. The frontend defaults to a sensible multiline height without it. Valid keys: `read_only`, `multiline`, `prefix`, `suffix`, `type`, `autocomplete`, `multiple`.
+
+### Added
+- **`tests/test_config_flow_no_blocking_io.py`** — four static regression guards that fail the build on the exact bug classes that bit us:
+  - `test_no_sync_rule_files_called_from_config_flow` — fails if `_list_rule_files` / `_read_rule_file` / `_write_rule_file` / `_delete_rule_file` is called directly from `config_flow.py`. AST-inspected, so it can't be accidentally disabled. (Note: the import check is `node.module in {"rule_files", ends-with-".rule_files"}` because the AST resolves `from .rule_files import X` as `module="rule_files", level=1`, not `".rule_files"`. The first version of this test had a wrong check that matched nothing and silently passed — caught during regression testing.)
+  - `test_validate_rule_dir_may_be_called_sync` — documents the one allowed sync callsite (pure-string validation).
+  - `test_executor_wrappers_use_hass_async_add_executor_job` — fails if any of the four `_*_in_executor` helpers stop using the executor. Defends against "I optimized it to be sync because it's only one call" regressions.
+  - `test_no_invalid_text_selector_keys` — fails if any `{"text": {...}}` literal in `config_flow.py` uses a key not in `TextSelectorConfig`'s schema. Catches the `rows` bug class. (Uses regex over source rather than importing `TextSelectorConfig` so the test runs without HA installed.)
+- **`tests/test_e2e_config_flow.py`** — 15 end-to-end config-flow tests that drive the *real* HA flow manager (`hass.config_entries.options.async_init` / `async_configure`) through a real `HomeAssistant` test instance. This is the runtime complement to the AST guards. Coverage:
+  - User flow: initial form, rejects relative/empty paths, creates entry, prevents duplicate entries
+  - Options flow: init doesn't 500, shows menu with `general` + `rules`, lists files, create/edit/delete rule (asserts file on disk AND engine state updated), general step changes dir + rejects invalid paths
+  - `test_options_flow_uses_executor_for_io` — wraps `hass.async_add_executor_job` and asserts the config flow actually goes through it for `_list_rule_files` and `_read_rule_file`. Catches "I optimized it to be sync" regressions at runtime.
+  - `test_no_blocking_io_warnings_during_full_options_flow` — drives the full flow end-to-end as a smoke test.
+- **CI workflow updates** (`ci/test.yml`):
+  - Pins `homeassistant==2026.5.1` and `pytest-homeassistant-custom-component==0.13.316` explicitly. The local venv was on HA 2026.2.3, the live cluster on 2026.5.1 — the version difference is what hid three of the four bugs. Pinning means CI tests the same HA users run.
+  - Adds a dedicated step for the e2e tests in a *separate* `pytest` invocation. The e2e tests have to run in a fresh Python process because `pytest-homeassistant-custom-component` ≥ 0.13.250 has a `@singleton` translation cache that gets polluted by `services.yaml` `required: true` bools after a config flow is exercised. The next test in the same process then crashes in `_validate_placeholders` with `TypeError: expected str, got bool`. See the docstring at the top of `test_e2e_config_flow.py` for the full root-cause analysis.
+  - Adds a step for the HACS smoke-load test (`test_hacs_load.py`) explicitly so it's obvious in CI which step guards the v0.3.1 bug class.
+
+### Notes
+- The four bugs fixed in v0.3.3 + v0.3.4 all had a common shape: they only manifested in real HA (not the local venv), only on specific user actions (Configure → rules hub), and only after HA's runtime had a chance to load something. Every one of them would have been caught by the new tests in this release. The release-checklist skill has been updated to require an e2e config flow smoke test before any release.
+- Test counts: 250 unit/integration tests + 15 e2e + 1 optional bonus = 266 total. The e2e tests must be run in a separate `pytest` invocation; the default `pytest` invocation deselects them via `-m "not e2e_config_flow"`. CI runs both invocations.
+
 ## [0.3.3] - 2026-06-05
 
 ### Fixed

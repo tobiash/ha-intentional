@@ -21,19 +21,36 @@
 # ─────────────────────────────────────────────────────────────────
 #
 # What this workflow does
-# ───────────────────────
-# 1. Lint    — ruff check on the engine + integration code
-# 2. Test    — full test suite (unit + integration with HA)
-# 3. Verify  — bundled engine matches the source (catches drift)
+# ────────────────────────
+# 1. Lint               — ruff check on the engine + integration code
+# 2. Unit + AST guards  — fast unit tests + the config-flow AST guards
+# 3. Integration        — test_integration + test_api (real HA harness)
+# 4. E2E config flow    — test_e2e_config_flow (real HA harness, separate
+#                         pytest invocation; see test_e2e_config_flow.py
+#                         docstring for why it must be a separate process)
+# 5. Verify             — bundled engine matches the source
 #
-# Why one job, not a matrix
-# ─────────────────────────
-# We tested against a single Python version (3.13) because the
-# engine is pure Python with no C extensions. A matrix would
-# triple CI time and cost for zero real-world signal.
+# Why three test jobs, not one
+# ────────────────────────────
+# v0.3.4 added test_e2e_config_flow.py. These tests must run in a
+# SEPARATE pytest invocation from test_integration.py because
+# ``pytest-homeassistant-custom-component`` ≥ 0.13.250 has a
+# translation-cache singleton that pollutes across test files in
+# the same process (see test_e2e_config_flow.py docstring for the
+# root cause and the upstream HA issue). Running them in a
+# separate `pytest` invocation is the simplest fix that doesn't
+# require patching the test harness.
 #
-# If a future change introduces C extensions (e.g. for performance),
-# add a matrix over Python 3.11 / 3.12 / 3.13 at that point.
+# Pinning the HA version
+# ──────────────────────
+# HA 2026.5 is the current stable as of writing. We pin to that
+# explicitly so CI tests the same version users run, not whatever
+# ``pytest-homeassistant-custom-component`` happens to pull. Bump
+# this pin when doing a HA compatibility review. The
+# ``test_e2e_config_flow.py`` tests catch the kinds of
+# HA-version-specific config-flow bugs that bit us in v0.3.x
+# (OptionsFlow.config_entry read-only property, invalid
+# TextSelector keys, blocking I/O on the event loop).
 
 name: Test
 
@@ -69,6 +86,11 @@ jobs:
           # (unit + integration). The integration deps include
           # homeassistant, which is ~500MB — this is the slow step.
           pip install -e ".[all-tests]"
+          # Pin the HA version explicitly. This is what catches
+          # HA-version-specific config-flow bugs (see header comment).
+          pip install "homeassistant==2026.5.1"
+          # Pin the test harness to a known-good version
+          pip install "pytest-homeassistant-custom-component==0.13.316"
 
       - name: Lint
         run: |
@@ -81,12 +103,27 @@ jobs:
           # integration installed by HACS will be broken.
           python ci/check-bundle-sync.py
 
-      - name: Run unit tests
+      - name: Run unit tests + AST guards
+        # Fast: no HA needed, runs in seconds. Includes
+        # test_config_flow_no_blocking_io.py which guards against
+        # sync I/O in the config flow and invalid TextSelector
+        # keys — both bugs we shipped in v0.3.x and don't want
+        # to ship again.
         run: |
           pytest tests/ -v --tb=short \
             --ignore=tests/test_manifest.py \
             --ignore=tests/test_integration.py \
-            --ignore=tests/test_api.py
+            --ignore=tests/test_api.py \
+            --ignore=tests/test_e2e_config_flow.py \
+            --ignore=tests/test_hacs_load.py
+
+      - name: Run HACS smoke-load test
+        # The HACS contract test: the integration must import
+        # cleanly in a fresh subprocess with only
+        # custom_components/ on sys.path. This is the test that
+        # would have caught the v0.3.1 bare-import bug.
+        run: |
+          pytest tests/test_hacs_load.py -v --tb=short
 
       - name: Run integration tests
         # Integration tests need HA + pytest-homeassistant-custom-component.
@@ -94,6 +131,15 @@ jobs:
         # unit tests so failures surface quickly.
         run: |
           pytest tests/test_api.py tests/test_integration.py -v --tb=short
+
+      - name: Run E2E config flow tests
+        # These must be a separate pytest invocation from
+        # test_integration.py — see test_e2e_config_flow.py
+        # docstring for the pytest-homeassistant-custom-component
+        # translation cache pollution issue. The ``-m
+        # e2e_config_flow`` selector runs only the marked tests.
+        run: |
+          pytest -m e2e_config_flow tests/test_e2e_config_flow.py -v --tb=short
 
       - name: Upload coverage
         if: always()

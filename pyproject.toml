@@ -76,6 +76,9 @@ addopts = [
     "--strict-markers",
     "--tb=short",
 ]
+markers = [
+    "e2e_config_flow: end-to-end config flow tests that need to run in a separate pytest invocation (see test_e2e_config_flow.py docstring for the pytest-homeassistant-custom-component translation cache pollution issue).",
+]
 
 [tool.coverage.run]
 source = ["src/intentional"]
