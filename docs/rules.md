@@ -274,7 +274,7 @@ of Home Assistant entities. Supported:
 - Comparisons: `==`, `!=`, `<`, `<=`, `>`, `>=`
 - Logical operators: `and`, `or`, `not` (with parentheses)
 - String literals: `"on"`, `'off'`
-- Numeric literals: `42`, `3.14`
+- Numeric literals: `42`, `3.14`, `-61`
 - Boolean literals: `true`, `false`
 - Time helper: `time_of_day` matches both buckets (`morning`, `afternoon`,
   `evening`, `night`) and exact local clock strings such as `23:00`
@@ -289,6 +289,12 @@ when: time_of_day == "night" or binary_sensor.door == "on"
 when: time_of_day >= "22:00" and time_of_day < "23:30"
 when: not (sensor.x == "off" and input_boolean.focus == "on")
 ```
+
+For ordered comparisons (`<`, `<=`, `>`, `>=`), numeric-looking HA state
+strings are compared numerically. This means helper-driven thresholds work as
+expected, for example
+`sensor.office_illuminance < input_number.office_lux_threshold`, even though
+Home Assistant reports both states as strings.
 
 The built-in buckets use local Home Assistant time: `morning` is 05:00-11:59,
 `afternoon` is 12:00-16:59, `evening` is 17:00-21:59, and `night` is

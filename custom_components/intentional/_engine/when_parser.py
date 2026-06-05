@@ -10,7 +10,7 @@ Supported syntax:
 - Comparison operators: ==, !=, <, <=, >, >=
 - Logical operators: and, or, not (with parentheses)
 - String literals: "on", 'off'
-- Numeric literals: 42, 3.14
+- Numeric literals: 42, 3.14, -61
 - Boolean literals: true, false
 - Time helper: time_of_day (bucket names or exact HH:MM clock values)
 - Parentheses for grouping
@@ -130,7 +130,7 @@ _TOKEN_SPEC = [
     ("EQ", r"=="),
     ("NE", r"!="),
     ("STRING", r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\''),
-    ("NUMBER", r"\d+(?:\.\d+)?"),
+    ("NUMBER", r"-?\d+(?:\.\d+)?"),
     ("DOT", r"\."),
     ("LPAREN", r"\("),
     ("RPAREN", r"\)"),
@@ -381,6 +381,10 @@ def _eval_comparison(
     if time_comparison is not None:
         return time_comparison
 
+    numeric_comparison = _compare_numeric_values(left, right, comp.op)
+    if numeric_comparison is not None:
+        return numeric_comparison
+
     try:
         if comp.op == "==":
             return left == right
@@ -466,6 +470,41 @@ def _compare_ordered(left: int, right: int, op: str) -> bool:
     if op == ">=":
         return left >= right
     raise WhenSyntaxError(f"unknown comparison op: {op}")
+
+
+def _compare_numeric_values(left: Any, right: Any, op: str) -> bool | None:
+    """Compare numbers even when Home Assistant provides numeric state as text."""
+    if op not in {"<", "<=", ">", ">="}:
+        return None
+    left_number = _numeric_value(left)
+    right_number = _numeric_value(right)
+    if left_number is None or right_number is None:
+        return None
+    if op == "<":
+        return left_number < right_number
+    if op == "<=":
+        return left_number <= right_number
+    if op == ">":
+        return left_number > right_number
+    if op == ">=":
+        return left_number >= right_number
+    raise WhenSyntaxError(f"unknown comparison op: {op}")
+
+
+def _numeric_value(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    try:
+        return float(stripped)
+    except ValueError:
+        return None
 
 
 def _clock_minutes(value: str) -> int | None:

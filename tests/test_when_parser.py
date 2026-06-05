@@ -141,6 +141,34 @@ class TestEvaluation:
         result = evaluate_when(ast, {"sensor.temp.state": 25})
         assert result is True
 
+    def test_numeric_comparison_coerces_ha_string_states(self) -> None:
+        ast = parse_when("sensor.pm2_5.state > 12.5")
+        result = evaluate_when(ast, {"sensor.pm2_5.state": "13.1"})
+        assert result is True
+
+    def test_numeric_comparison_coerces_entity_helper_thresholds(self) -> None:
+        ast = parse_when(
+            "sensor.office_illuminance < input_number.office_lux_threshold"
+        )
+        result = evaluate_when(
+            ast,
+            {
+                "sensor.office_illuminance.state": "2.6",
+                "input_number.office_lux_threshold.state": "12.0",
+            },
+        )
+        assert result is True
+
+    def test_numeric_comparison_coerces_negative_ha_string_states(self) -> None:
+        ast = parse_when("sensor.wifi_signal <= -60")
+        result = evaluate_when(ast, {"sensor.wifi_signal.state": "-61.0"})
+        assert result is True
+
+    def test_numeric_comparison_with_non_numeric_state_is_false(self) -> None:
+        ast = parse_when("sensor.pm2_5.state > 12.5")
+        result = evaluate_when(ast, {"sensor.pm2_5.state": "unknown"})
+        assert result is False
+
     def test_missing_entity_returns_none_state(self) -> None:
         """If an entity isn't in the state dict, treat it as None."""
         ast = parse_when('sensor.x.state == "on"')
