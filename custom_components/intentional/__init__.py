@@ -221,17 +221,29 @@ async def _maybe_install_starter_rules(hass: HomeAssistant, rule_dir: str) -> No
 
     rule_path = Path(rule_dir)
     try:
-        copied = 0
-        for starter_file in starter_source.glob("*.yaml"):
-            dest = rule_path / starter_file.name
-            if dest.exists():
-                # Don't clobber — user may have edited it
-                continue
-            await hass.async_add_executor_job(
-                shutil.copy2, starter_file, dest
-            )
-            copied += 1
-            _LOGGER.info("Installed starter rule: %s", dest)
+        # Glob + copy is filesystem I/O — must run in the executor,
+        # not in the event loop. Earlier versions only wrapped the
+        # shutil.copy2() in the executor but called the synchronous
+        # .glob() inline, which blocks the event loop on every entry
+        # load. HA logged:
+        #   Detected blocking call to scandir with args
+        #   ('/config/custom_components/intentional/starter_rules/',)
+        # and the subsequent bootstrap timed out waiting on the
+        # intentional_tick task. See CHANGELOG v0.3.3.
+        def _copy_starter_pack() -> int:
+            """Sync helper: glob the starter pack, copy any that don't exist."""
+            count = 0
+            for starter_file in starter_source.glob("*.yaml"):
+                dest = rule_path / starter_file.name
+                if dest.exists():
+                    # Don't clobber — user may have edited it
+                    continue
+                shutil.copy2(starter_file, dest)
+                count += 1
+                _LOGGER.info("Installed starter rule: %s", dest)
+            return count
+
+        copied = await hass.async_add_executor_job(_copy_starter_pack)
         if copied:
             _LOGGER.info(
                 "Installed %d starter rule(s) to %s. "

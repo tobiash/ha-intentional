@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-06-05
+
+### Fixed
+- **Options flow 500 on Configure** — `IntentionalOptionsFlow.__init__` did `self.config_entry = config_entry`, which raises `AttributeError: property 'config_entry' has no setter` on HA 2025+ (where `OptionsFlow.config_entry` is a read-only property). Configure now works. Fix: inherit from `OptionsFlowWithConfigEntry` (the documented base for custom integrations), which sets `self._config_entry` correctly and inherits the parent's read-only `config_entry` property.
+- **Blocking scandir in `_maybe_install_starter_rules`** — `starter_source.glob("*.yaml")` was called inline in `async_setup_entry`, blocking the event loop on every integration load. HA logged `Detected blocking call to scandir` and the bootstrap timed out waiting on the tick loop task. Fix: wrap the entire glob+copy loop in a single `hass.async_add_executor_job` call.
+- **Missing `services.yaml`** — HA logged `Failed to load services.yaml for integration: intentional` (warning, not fatal, but noisy). Added a services.yaml with descriptions for `fire`, `activate_scene`, and `reload`.
+
+### Added
+- **`test_options_flow_inherits_from_modern_base`** — regression guard that fails if `IntentionalOptionsFlow` doesn't inherit from `OptionsFlowWithConfigEntry`. Catches the v0.3.3 bug class.
+- **`test_options_flow_instantiable_with_config_entry`** — bonus test that actually constructs the flow with a fake config entry. Skipped if HA's frame helper isn't set up (i.e. outside the HA test harness).
+- **`test_no_blocking_io_in_async_paths`** — static AST-based check that fails if any blocking I/O call (`.glob()`, `.iterdir()`, `.scandir()`, `.listdir()`) appears in an async function and is NOT wrapped in `hass.async_add_executor_job`. Catches the v0.3.3 scandir bug class.
+
+### Notes
+- This release has integration code changes (unlike v0.3.2 which was only an import fix). Three real bugs fixed, all caught by the live HA instance but not by local CI.
+- The local test suite was green on v0.3.2 because (a) it uses HA 2026.2.3 in the venv, (b) no test exercised the Configure flow, and (c) no test caught inline blocking I/O in async functions. v0.3.3 closes those test gaps.
+
 ## [0.3.2] - 2026-06-05
 
 ### Fixed

@@ -260,3 +260,86 @@ def test_options_flow_writes_validate_yaml() -> None:
         err = _write_rule_file(tmp, "rt.yaml", valid)
         assert err is None
         assert _read_rule_file(tmp, "rt.yaml") == valid
+
+
+# ── OptionsFlow integration ────────────────────────────────────────
+# v0.3.3 hotfix: IntentionalOptionsFlow used to inherit from
+# OptionsFlow and assign self.config_entry = config_entry in __init__.
+# On HA 2025+ OptionsFlow.config_entry is a read-only property, so
+# __init__ raised AttributeError and Configure returned HTTP 500. The
+# test below is a regression guard that exercises the actual
+# OptionsFlow class against a real (or stub) Home Assistant instance.
+
+
+def test_options_flow_inherits_from_modern_base() -> None:
+    """IntentionalOptionsFlow must inherit from OptionsFlowWithConfigEntry.
+
+    The earlier inheritance from OptionsFlow + self.config_entry =
+    config_entry in __init__ broke on HA 2025+. OptionsFlowWithConfigEntry
+    is the documented base for custom integrations on modern HA.
+    """
+    from homeassistant.config_entries import (
+        OptionsFlowWithConfigEntry,
+    )
+
+    from custom_components.intentional.config_flow import (
+        IntentionalOptionsFlow,
+    )
+
+    assert issubclass(
+        IntentionalOptionsFlow, OptionsFlowWithConfigEntry
+    ), (
+        "IntentionalOptionsFlow must inherit from "
+        "OptionsFlowWithConfigEntry. Direct OptionsFlow inheritance "
+        "with self.config_entry = ... in __init__ is broken on "
+        "HA 2025+ — the property has no setter. This is the v0.3.2 bug."
+    )
+
+
+def test_options_flow_instantiable_with_config_entry() -> None:
+    """Constructing IntentionalOptionsFlow(config_entry) must not raise.
+
+    The earlier code did ``self.config_entry = config_entry`` in
+    __init__, which raised AttributeError on HA 2025+. OptionsFlowWithConfigEntry
+    provides a proper __init__ that stores ``self._config_entry`` and
+    relies on the parent OptionsFlow.config_entry property for lookup.
+
+    Skipped if HA's frame helper isn't set up (i.e. we're not running
+    inside a real HA test harness), because OptionsFlowWithConfigEntry's
+    __init__ calls ``report_usage`` which requires HA to be initialized.
+    """
+    from custom_components.intentional.config_flow import (
+        IntentionalOptionsFlow,
+    )
+
+    # Minimal mock — OptionsFlowWithConfigEntry only needs .options
+    # for its own bookkeeping. The parent's config_entry property is
+    # read after self.hass is set by the flow manager.
+    from custom_components.intentional.const import CONF_RULE_DIR
+
+    class FakeEntry:
+        entry_id = "fake"
+        domain = "intentional"
+        data = {CONF_RULE_DIR: "/tmp/fake-rules"}
+        options: dict = {}
+
+    entry = FakeEntry()
+
+    try:
+        flow = IntentionalOptionsFlow(entry)
+    except RuntimeError as err:
+        # "Frame helper not set up" — happens when the test runs
+        # outside a real HA context. The class-hierarchy test above
+        # is the real regression guard; this one is a bonus that
+        # requires HA infrastructure.
+        if "Frame helper" in str(err):
+            import pytest
+
+            pytest.skip(
+                "HA frame helper not set up — instantiation test "
+                "requires the HA test harness"
+            )
+        raise
+    # _config_entry is set (private attribute used by
+    # OptionsFlowWithConfigEntry to remember the entry passed in).
+    assert flow._config_entry is entry

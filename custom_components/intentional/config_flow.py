@@ -78,16 +78,25 @@ class IntentionalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return IntentionalOptionsFlow(config_entry)
 
 
-class IntentionalOptionsFlow(config_entries.OptionsFlow):
+class IntentionalOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
     """Handle the options flow.
 
     Provides two steps via a menu:
     1. general  — change the rule directory
     2. rules    — list, edit, create, delete rule files
-    """
 
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = config_entry
+    Inherits from ``OptionsFlowWithConfigEntry`` (the documented
+    convenience base for custom integrations) so ``self.config_entry``
+    is available via the parent ``OptionsFlow`` property after init.
+
+    The earlier code inherited from ``OptionsFlow`` directly and did
+    ``self.config_entry = config_entry`` in ``__init__``. That worked
+    on HA versions where ``OptionsFlow.config_entry`` was a writable
+    attribute, but HA 2025+ made it a read-only property. Result:
+    HA logged ``AttributeError: property 'config_entry' of
+    'IntentionalOptionsFlow' object has no setter`` and Configure
+    returned HTTP 500. See CHANGELOG v0.3.3.
+    """
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None

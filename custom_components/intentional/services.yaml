@@ -1,0 +1,72 @@
+# Service descriptions for the Intentional integration.
+# HA logs a warning when this file is missing ("Failed to load
+# services.yaml for integration: intentional"), so we provide
+# the minimum viable stub. Each service has its own entries —
+# names are the service names registered in __init__.py.
+
+fire:
+  name: Fire
+  description: >-
+    Manually emit a user-authority intent for a target entity. Useful
+    for triggering a light state from an automation, script, or button.
+  fields:
+    target:
+      name: Target
+      description: The entity_id to apply the intent to (e.g. light.kitchen).
+      required: true
+      example: light.kitchen
+      selector:
+        entity:
+    brightness_pct:
+      name: Brightness (%)
+      description: Target brightness as a percentage (0-100). Optional.
+      required: false
+      example: 75
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+    ttl:
+      name: TTL (seconds)
+      description: How long the intent should remain active before expiring.
+      required: false
+      default: 7200
+      example: 3600
+      selector:
+        number:
+          min: 0
+          max: 86400
+          unit_of_measurement: "s"
+
+activate_scene:
+  name: Activate scene rule
+  description: >-
+    Force a scene rule to fire, regardless of its `when:` condition.
+    Honors the rule's configured transition and TTL.
+  fields:
+    rule_id:
+      name: Rule ID
+      description: The id of a scene rule (a rule whose emit has a `scene:` field).
+      required: true
+      example: evening-warm
+      selector:
+        text:
+    ttl:
+      name: TTL (seconds)
+      description: Override the rule's TTL. 0 means use the rule's configured TTL.
+      required: false
+      default: 0
+      example: 0
+      selector:
+        number:
+          min: 0
+          max: 86400
+          unit_of_measurement: "s"
+
+reload:
+  name: Reload rules
+  description: >-
+    Re-read all rule files from the configured rule directory and
+    re-evaluate intents. Call this after editing a rule file by hand.
+  fields: {}
