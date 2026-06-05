@@ -52,8 +52,9 @@ the PR / commit.
 
 ## Why one Python version, not a matrix
 
-The engine is pure Python with no C extensions, so version
-compatibility isn't a real risk. We test on Python 3.13 only.
+The engine is pure Python with no C extensions, but the HA-backed integration
+tests follow Home Assistant's supported interpreter. We test on Python 3.14
+only because HA 2026.5+ requires Python 3.14.2 or newer.
 A matrix would triple CI time for no real-world signal.
 
 If a future change introduces C extensions, add a matrix at
@@ -76,8 +77,8 @@ scripts/bootstrap-ha-test-venv.sh
 .venv-ha/bin/python -m pytest -m e2e_config_flow tests/test_e2e_config_flow.py -v --tb=short
 ```
 
-This requires Python 3.13 by default, matching CI. Set `PYTHON_BIN` if your
-Python 3.13 executable is elsewhere. It also requires ~500MB of disk space for
+This requires Python 3.14 by default, matching CI. Set `PYTHON_BIN` if your
+Python 3.14 executable is elsewhere. It also requires ~500MB of disk space for
 the HA dependency tree. Most developers only run unit tests locally and let CI
 handle the integration suite.
 

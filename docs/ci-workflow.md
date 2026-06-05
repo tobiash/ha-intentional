@@ -37,7 +37,7 @@ scripts/bootstrap-ha-test-venv.sh
 .venv-ha/bin/python -m pytest -m e2e_config_flow tests/test_e2e_config_flow.py -v --tb=short
 ```
 
-The bootstrap script requires Python 3.13 by default to match CI, and pins
+The bootstrap script requires Python 3.14 by default to match CI, and pins
 Home Assistant plus `pytest-homeassistant-custom-component` to the same versions
 as the workflow. The full loop is large because Home Assistant and its harness
 pull a substantial dependency tree. CI is the normal place to run it.
