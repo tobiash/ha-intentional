@@ -87,7 +87,7 @@ Home Assistant's `automation:` system is powerful but has a familiar scaling pro
 
 - **Declarative YAML rule format** — no Python, no DSL, designed to be writable by AI agents
 - **Rule inheritance** — share common rule defaults with `extends:` and override per room or mode
-- **Dwell timing** — HA-style `for:` conditions for motion, presence, and spike filtering
+- **Dwell timing** — HA-style `for:` conditions for motion, presence, and spike filtering, including helper-driven durations
 - **Comfort, energy, and cleaning targets** — drive climate, humidifier, fan, water-heater, vacuum, and lawn mower entities from the same intent model
 - **Helper targets** — drive counters, input helpers, number/select entities, and datetime helpers
 - **Security targets** — control locks, valves, sirens, and alarm panels through resolved intents

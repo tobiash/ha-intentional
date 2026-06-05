@@ -48,6 +48,12 @@ from intentional.when_parser import TimeOfDay, WhenAST, evaluate_when, parse_whe
 from intentional.yaml_loader import Rule
 
 StateChangeCallback = Callable[[str, Any], None]
+_FOR_UNIT_MULTIPLIERS = {
+    "ms": 1,
+    "s": 1_000,
+    "m": 60_000,
+    "h": 3_600_000,
+}
 
 
 @dataclass
@@ -261,7 +267,8 @@ class Engine:
                     if update_timers:
                         self._condition_true_since[rule_id] = since
                 elapsed_ms = now - since
-                remaining_ms = max(0, parsed.rule.for_ms - elapsed_ms)
+                required_for_ms = self._rule_for_ms(parsed.rule)
+                remaining_ms = max(0, required_for_ms - elapsed_ms)
                 if remaining_ms:
                     for_remaining[rule_id] = remaining_ms
                 else:
@@ -279,6 +286,17 @@ class Engine:
             firing.pop(rule_id, None)
 
         return firing, condition_firing, blocked_by, for_remaining
+
+    def _rule_for_ms(self, rule: Rule) -> int:
+        if rule.for_entity is None:
+            return rule.for_ms
+        raw_value = self.state.get(f"{rule.for_entity}.state")
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return rule.for_ms
+        multiplier = _FOR_UNIT_MULTIPLIERS.get(rule.for_entity_unit, 1_000)
+        return max(0, int(value * multiplier))
 
     def _spawn_intent_from_rule(self, rule: Rule, now: int) -> Intent:
         # Scene rules: target is empty, intent carries scene reference.

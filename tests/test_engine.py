@@ -144,6 +144,50 @@ class TestRuleEvaluation:
         assert len(intents) == 1
         assert intents[0].rule_id == "motion-held"
 
+    def test_for_uses_dynamic_entity_duration(self) -> None:
+        engine = Engine(clock_fn=lambda: 0)
+        rule = _rule(
+            "motion-held",
+            'binary_sensor.motion == "on"',
+            for_ms=120_000,
+            for_entity="input_number.motion_off_delay",
+            for_entity_unit="s",
+        )
+        engine.load_rules([rule])
+        engine.update_state("input_number.motion_off_delay", "10")
+        engine.update_state("binary_sensor.motion", "on")
+
+        engine.evaluate_all()
+        engine.advance_clock(9_999)
+        engine.evaluate_all()
+        assert engine.list_active_intents("light.x") == []
+
+        engine.advance_clock(1)
+        engine.evaluate_all()
+        assert len(engine.list_active_intents("light.x")) == 1
+
+    def test_for_uses_default_when_dynamic_entity_is_unavailable(self) -> None:
+        engine = Engine(clock_fn=lambda: 0)
+        rule = _rule(
+            "motion-held",
+            'binary_sensor.motion == "on"',
+            for_ms=5_000,
+            for_entity="input_number.motion_off_delay",
+            for_entity_unit="s",
+        )
+        engine.load_rules([rule])
+        engine.update_state("input_number.motion_off_delay", "unavailable")
+        engine.update_state("binary_sensor.motion", "on")
+
+        engine.evaluate_all()
+        engine.advance_clock(4_999)
+        engine.evaluate_all()
+        assert engine.list_active_intents("light.x") == []
+
+        engine.advance_clock(1)
+        engine.evaluate_all()
+        assert len(engine.list_active_intents("light.x")) == 1
+
     def test_for_resets_when_condition_goes_false(self) -> None:
         engine = Engine(clock_fn=lambda: 0)
         rule = _rule("motion-held", 'binary_sensor.motion == "on"', for_ms=5_000)

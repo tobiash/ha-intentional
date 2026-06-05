@@ -134,7 +134,12 @@ class Rule:
         the current state of referenced entities.
     for_ms
         Optional dwell time: the `when` expression must stay true for this
-        long before the rule fires.
+        long before the rule fires. Used directly for static dwell timing and
+        as the fallback for dynamic entity-backed dwell timing.
+    for_entity
+        Optional entity_id whose numeric state controls the dwell time.
+    for_entity_unit
+        Unit for the numeric `for_entity` state: ms, s, m, or h.
     target
         The entity_id this rule's intents apply to. Empty string when the
         rule references a scene instead.
@@ -172,6 +177,8 @@ class Rule:
     id: str
     when: str
     for_ms: int = 0
+    for_entity: str | None = None
+    for_entity_unit: str = "s"
     target: str = ""
     scene: str | None = None
     set: dict[str, Any] = field(default_factory=dict)
@@ -212,6 +219,8 @@ _ANIMATION_FIELDS = {
 # Recognized easing names
 _VALID_EASINGS = {"linear", "ease-in", "ease-out", "ease-in-out", "sine"}
 _MERGED_EMIT_DICTS = {"set", "cap", "floor", "offset", "multiply"}
+_FOR_FIELDS = {"entity", "unit", "default"}
+_FOR_UNITS = {"ms", "s", "m", "h"}
 
 
 @dataclass(frozen=True)
@@ -257,7 +266,12 @@ def _validate_rule(
         raise RuleLoadError(f"Rule {rule_id!r}: missing or invalid `when` (must be a non-empty string)", file=file, line=line)
 
     # for
-    for_ms = _parse_optional_duration(raw.get("for"), f"Rule {rule_id!r}: for", file, line)
+    for_ms, for_entity, for_entity_unit = _parse_for(
+        raw.get("for"),
+        f"Rule {rule_id!r}: for",
+        file,
+        line,
+    )
 
     # emit
     emit = raw.get("emit")
@@ -360,6 +374,8 @@ def _validate_rule(
         id=rule_id,
         when=when,
         for_ms=for_ms,
+        for_entity=for_entity,
+        for_entity_unit=for_entity_unit,
         target=target or "",
         scene=scene,
         set=_normalize_emit_mapping(emit.get("set", {})),
@@ -415,6 +431,62 @@ def _parse_optional_duration(
         f"{label} must be an integer (ms) or a duration string, got {type(value).__name__}",
         file=file, line=line,
     )
+
+
+def _parse_for(
+    value: Any,
+    label: str,
+    file: Path | None,
+    line: int | None,
+) -> tuple[int, str | None, str]:
+    """Parse top-level `for`, including dynamic entity-backed dwell timing."""
+    if not isinstance(value, dict):
+        return (
+            _parse_optional_duration(value, label, file, line) or 0,
+            None,
+            "s",
+        )
+
+    unknown = set(value) - _FOR_FIELDS
+    if unknown:
+        raise RuleLoadError(
+            f"{label}: unknown fields: {sorted(unknown)}. "
+            f"Allowed: {sorted(_FOR_FIELDS)}",
+            file=file,
+            line=line,
+        )
+
+    entity = value.get("entity")
+    if not entity or not isinstance(entity, str):
+        raise RuleLoadError(
+            f"{label}: dynamic dwell requires `entity` as a non-empty string",
+            file=file,
+            line=line,
+        )
+
+    unit = value.get("unit", "s")
+    if unit not in _FOR_UNITS:
+        raise RuleLoadError(
+            f"{label}: `unit` must be one of {sorted(_FOR_UNITS)}, got {unit!r}",
+            file=file,
+            line=line,
+        )
+
+    default = value.get("default")
+    if default is None:
+        raise RuleLoadError(
+            f"{label}: dynamic dwell requires `default` for unavailable entity states",
+            file=file,
+            line=line,
+        )
+
+    default_ms = _parse_optional_duration(
+        default,
+        f"{label}.default",
+        file,
+        line,
+    )
+    return default_ms or 0, entity, unit
 
 
 def _parse_animation(

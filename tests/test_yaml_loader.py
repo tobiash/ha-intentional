@@ -210,6 +210,33 @@ class TestYAMLFeatures:
 
         assert rules[0].for_ms == 120_000
 
+    def test_for_can_use_entity_backed_dynamic_duration(self) -> None:
+        rules = load_rules_from_string("""
+- id: motion-held
+  when: binary_sensor.motion == "on"
+  for:
+    entity: input_number.motion_off_delay
+    unit: s
+    default: 2m
+  emit:
+    target: light.hall
+""")
+
+        assert rules[0].for_ms == 120_000
+        assert rules[0].for_entity == "input_number.motion_off_delay"
+        assert rules[0].for_entity_unit == "s"
+
+    def test_dynamic_for_requires_default(self) -> None:
+        with pytest.raises(RuleLoadError, match="requires `default`"):
+            load_rules_from_string("""
+- id: motion-held
+  when: binary_sensor.motion == "on"
+  for:
+    entity: input_number.motion_off_delay
+  emit:
+    target: light.hall
+""")
+
     def test_blocked_rules_parsed(self) -> None:
         rules = load_rules_from_string("""
 - id: blocker

@@ -265,6 +265,26 @@ If the `when` expression becomes false before the dwell time finishes, the
 timer resets. Once the rule fires, it withdraws as soon as `when` becomes
 false, unless it is a forced manual intent such as `intentional.activate_scene`.
 
+`for:` can also read a numeric Home Assistant helper at runtime. This is useful
+for room tuning sliders such as motion off-delay helpers:
+
+```yaml
+- id: office-motion-held
+  when: binary_sensor.office_presence == "on"
+  for:
+    entity: input_number.office_off_delay_day
+    unit: s
+    default: 2m
+  emit:
+    target: light.office
+    set: { state: on, brightness_pct: 70 }
+```
+
+The dynamic form requires `default` so the rule has deterministic behavior when
+the helper is `unknown` or `unavailable`. Supported units are `ms`, `s`, `m`,
+and `h`; `unit: s` matches Home Assistant helpers whose state is a number of
+seconds.
+
 ## When expressions
 
 The `when` field is a string expression evaluated against the current state
