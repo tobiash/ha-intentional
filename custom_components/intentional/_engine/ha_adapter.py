@@ -307,7 +307,7 @@ TTS_SERVICE_TARGETS = frozenset({"speak", "cloud_say", "clear_cache"})
 
 
 def manual_set_from_service_data(data: dict[str, Any]) -> dict[str, Any]:
-    """Extract supported set fields from intentional.fire service data."""
+    """Extract supported set fields from .fire service data."""
     return {
         field: data[field]
         for field in MANUAL_SET_FIELDS
@@ -1436,6 +1436,8 @@ def sync_state_object_into_engine(engine: Engine, state: Any) -> None:
     engine.update_state(entity_id, state.state)
 
     current_fields = {"state"}
+    if entity_id.startswith("event.") and f"{entity_id}.triggered" in engine.state:
+        current_fields.add("triggered")
     for field, value in state.attributes.items():
         current_fields.add(field)
         engine.update_state(entity_id, value, field=field)
@@ -1447,3 +1449,31 @@ def sync_state_object_into_engine(engine: Engine, state: Any) -> None:
         field = key[len(prefix):]
         if field not in current_fields:
             del engine.state[key]
+
+
+def pulse_event_state_change(
+    engine: Engine,
+    old_state: Any | None,
+    new_state: Any,
+) -> bool:
+    """Expose an HA event entity state change as a one-cycle trigger pulse.
+
+    Home Assistant event entities keep their latest event as state and
+    attributes. Rules often need edge semantics instead: "this event just
+    happened." The integration clears the pulse after one apply cycle.
+    """
+    entity_id = new_state.entity_id
+    if not entity_id.startswith("event.") or old_state is None:
+        return False
+    if old_state.state == new_state.state and getattr(
+        old_state, "attributes", {}
+    ).get("event_type") == getattr(new_state, "attributes", {}).get("event_type"):
+        return False
+    engine.update_state(entity_id, True, field="triggered")
+    return True
+
+
+def clear_event_trigger_pulses(engine: Engine, entity_ids: set[str]) -> None:
+    """Clear one-cycle event trigger pulses after the integration applies them."""
+    for entity_id in entity_ids:
+        engine.update_state(entity_id, False, field="triggered")

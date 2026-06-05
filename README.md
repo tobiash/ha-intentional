@@ -63,6 +63,14 @@ Home Assistant's `automation:` system is powerful but has a familiar scaling pro
   authority: automation
   ttl: 20s
   reason: "Front door opened"
+
+- id: doorbell-message
+  when: event.espnow_recv_doorbell.triggered == true and event.espnow_recv_doorbell.event_type == "ringer"
+  emit:
+    target: telegram_bot.send_message
+    set: { message: "Doorbell" }
+  authority: automation
+  reason: "Doorbell rang"
 ```
 
 **What happens:**

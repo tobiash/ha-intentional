@@ -66,6 +66,69 @@ def test_state_sync_removes_stale_attributes() -> None:
     assert "sensor.office_light.illuminance" not in engine.state
 
 
+def test_event_state_change_exposes_one_cycle_trigger_pulse() -> None:
+    from intentional.engine import Engine
+    from intentional.ha_adapter import (
+        clear_event_trigger_pulses,
+        pulse_event_state_change,
+        sync_state_object_into_engine,
+    )
+    from intentional.yaml_loader import Rule
+
+    engine = Engine(clock_fn=lambda: 1000)
+    engine.load_rules([
+        Rule(
+            id="doorbell-notify",
+            when=(
+                "event.espnow_recv_doorbell.triggered == true "
+                'and event.espnow_recv_doorbell.event_type == "ringer"'
+            ),
+            target="telegram_bot.send_message",
+            set={"message": "Doorbell"},
+        )
+    ])
+    old_state = SimpleNamespace(
+        entity_id="event.espnow_recv_doorbell",
+        state="2026-06-05T18:00:00+00:00",
+        attributes={"event_type": "ringer"},
+    )
+    new_state = SimpleNamespace(
+        entity_id="event.espnow_recv_doorbell",
+        state="2026-06-05T18:07:36+00:00",
+        attributes={"event_type": "ringer"},
+    )
+
+    sync_state_object_into_engine(engine, new_state)
+    assert pulse_event_state_change(engine, old_state, new_state)
+    sync_state_object_into_engine(engine, new_state)
+    engine.evaluate_all()
+
+    resolved = engine.resolve("telegram_bot.send_message")
+    assert resolved is not None
+    assert resolved.value == {"message": "Doorbell"}
+
+    clear_event_trigger_pulses(engine, {"event.espnow_recv_doorbell"})
+    engine.evaluate_all()
+
+    assert engine.resolve("telegram_bot.send_message") is None
+    assert engine.state["event.espnow_recv_doorbell.triggered"] is False
+
+
+def test_event_state_change_does_not_pulse_initial_state() -> None:
+    from intentional.engine import Engine
+    from intentional.ha_adapter import pulse_event_state_change
+
+    engine = Engine(clock_fn=lambda: 1000)
+    new_state = SimpleNamespace(
+        entity_id="event.espnow_recv_doorbell",
+        state="2026-06-05T18:07:36+00:00",
+        attributes={"event_type": "ringer"},
+    )
+
+    assert not pulse_event_state_change(engine, None, new_state)
+    assert "event.espnow_recv_doorbell.triggered" not in engine.state
+
+
 def test_time_sync_sets_bucket_and_exact_clock_context() -> None:
     from intentional.engine import Engine
     from intentional.ha_adapter import sync_time_context_into_engine

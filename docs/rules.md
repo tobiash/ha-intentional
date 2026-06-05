@@ -278,6 +278,8 @@ of Home Assistant entities. Supported:
 - Boolean literals: `true`, `false`
 - Time helper: `time_of_day` matches both buckets (`morning`, `afternoon`,
   `evening`, `night`) and exact local clock strings such as `23:00`
+- Event entity pulse: `event.some_event.triggered == true` is true for one
+  integration apply cycle when a Home Assistant `event.*` entity changes
 
 Examples:
 
@@ -285,6 +287,7 @@ Examples:
 when: sensor.outdoor_light.illuminance < 50
 when: media_player.tv.state == "on"
 when: sensor.x.state == "on" and sensor.y.state == "ready"
+when: event.espnow_recv_doorbell.triggered == true and event.espnow_recv_doorbell.event_type == "ringer"
 when: time_of_day == "night" or binary_sensor.door == "on"
 when: time_of_day >= "22:00" and time_of_day < "23:30"
 when: not (sensor.x == "off" and input_boolean.focus == "on")
@@ -299,6 +302,23 @@ Home Assistant reports both states as strings.
 The built-in buckets use local Home Assistant time: `morning` is 05:00-11:59,
 `afternoon` is 12:00-16:59, `evening` is 17:00-21:59, and `night` is
 22:00-04:59.
+
+Home Assistant `event.*` entities expose the most recent event as a timestamp
+state plus attributes such as `event_type`. Intentional adds a synthetic
+`triggered` field on real event entity updates so action rules can fire once:
+
+```yaml
+- id: doorbell-telegram
+  when: event.espnow_recv_doorbell.triggered == true and event.espnow_recv_doorbell.event_type == "ringer"
+  emit:
+    target: telegram_bot.send_message
+    set:
+      message: "Doorbell"
+```
+
+The pulse is cleared after one service-application cycle. Use this for
+fire-and-forget action targets such as `telegram_bot.*`, `notify.*`,
+`browser_mod.*`, `tts.*`, scripts, scenes, and counters.
 
 ## Animation
 
