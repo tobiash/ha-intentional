@@ -32,10 +32,12 @@ pytest -q
 Full HA-backed loop:
 
 ```bash
-pip install -e ".[all-tests]"
-pytest tests/test_api.py tests/test_integration.py -v --tb=short
-pytest -m e2e_config_flow tests/test_e2e_config_flow.py -v --tb=short
+scripts/bootstrap-ha-test-venv.sh
+.venv-ha/bin/python -m pytest tests/test_api.py tests/test_integration.py -v --tb=short
+.venv-ha/bin/python -m pytest -m e2e_config_flow tests/test_e2e_config_flow.py -v --tb=short
 ```
 
-The full loop is large because Home Assistant and its harness pull a substantial
-dependency tree. CI is the normal place to run it.
+The bootstrap script requires Python 3.13 by default to match CI, and pins
+Home Assistant plus `pytest-homeassistant-custom-component` to the same versions
+as the workflow. The full loop is large because Home Assistant and its harness
+pull a substantial dependency tree. CI is the normal place to run it.

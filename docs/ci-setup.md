@@ -71,15 +71,15 @@ pytest tests/ -v
 The integration tests need HA:
 
 ```bash
-pip install -e ".[all-tests]"
-pytest tests/test_api.py tests/test_integration.py -v --tb=short
-pytest -m e2e_config_flow tests/test_e2e_config_flow.py -v --tb=short
+scripts/bootstrap-ha-test-venv.sh
+.venv-ha/bin/python -m pytest tests/test_api.py tests/test_integration.py -v --tb=short
+.venv-ha/bin/python -m pytest -m e2e_config_flow tests/test_e2e_config_flow.py -v --tb=short
 ```
 
-This requires ~500MB of disk space for the HA dependency tree
-(installed transitively via pytest-homeassistant-custom-component).
-Most developers only run unit tests locally and let CI handle
-the integration suite.
+This requires Python 3.13 by default, matching CI. Set `PYTHON_BIN` if your
+Python 3.13 executable is elsewhere. It also requires ~500MB of disk space for
+the HA dependency tree. Most developers only run unit tests locally and let CI
+handle the integration suite.
 
 ## Manual trigger
 
