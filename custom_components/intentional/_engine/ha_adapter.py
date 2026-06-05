@@ -161,6 +161,15 @@ COUNTER_STATE_SERVICES = {
     "decrement": "decrement",
     "reset": "reset",
 }
+INPUT_NUMBER_STATE_SERVICES = {
+    "increment": "increment",
+    "decrement": "decrement",
+}
+ALERT_STATE_SERVICES = {
+    "on": "turn_on",
+    "off": "turn_off",
+    "toggle": "toggle",
+}
 SELECT_STATE_SERVICES = {
     "next": "select_next",
     "previous": "select_previous",
@@ -762,7 +771,7 @@ def _service_calls_without_update_entity(
             ))
         return tuple(calls)
 
-    if domain in {"number", "input_number"}:
+    if domain == "number":
         if "value" not in value:
             return ()
         return ((
@@ -770,6 +779,16 @@ def _service_calls_without_update_entity(
             "set_value",
             {"entity_id": target, "value": value["value"]},
         ),)
+
+    if domain == "input_number":
+        if "value" in value:
+            return ((
+                domain,
+                "set_value",
+                {"entity_id": target, "value": value["value"]},
+            ),)
+        service = INPUT_NUMBER_STATE_SERVICES.get(state)
+        return ((domain, service, service_data),) if service else ()
 
     if domain == "counter":
         if "value" in value:
@@ -1042,6 +1061,10 @@ def _service_calls_without_update_entity(
             notify_data["data"] = value["data"]
         return ((domain, _object_id, notify_data),)
 
+    if domain == "alert":
+        service = ALERT_STATE_SERVICES.get(state)
+        return ((domain, service, service_data),) if service else ()
+
     if domain == "browser_mod":
         service = str(value.get("service", state or _object_id))
         data = _action_service_data(value)
@@ -1251,6 +1274,7 @@ def _expected_states_for_service(domain: str, service: str) -> set[str] | None:
         "browser_mod",
         "telegram_bot",
         "tts",
+        "alert",
         "scene",
         "siren",
     }:

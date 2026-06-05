@@ -1575,6 +1575,31 @@ def test_number_input_number_and_counter_map_to_set_value_service() -> None:
     )
 
 
+def test_input_number_maps_state_to_increment_and_decrement_services() -> None:
+    from intentional.ha_adapter import service_calls_for_resolved_target
+
+    assert service_calls_for_resolved_target(
+        "input_number.buro_tobias_off_delay_day",
+        {"state": "increment"},
+    ) == (
+        (
+            "input_number",
+            "increment",
+            {"entity_id": "input_number.buro_tobias_off_delay_day"},
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "input_number.buro_tobias_off_delay_day",
+        {"state": "decrement"},
+    ) == (
+        (
+            "input_number",
+            "decrement",
+            {"entity_id": "input_number.buro_tobias_off_delay_day"},
+        ),
+    )
+
+
 def test_counter_maps_state_to_counter_action_services() -> None:
     from intentional.ha_adapter import service_calls_for_resolved_target
 
@@ -2055,6 +2080,29 @@ def test_notify_target_maps_to_notify_service() -> None:
                 "data": {"tag": "front-door"},
             },
         ),
+    )
+
+
+def test_alert_target_maps_to_alert_services() -> None:
+    from intentional.ha_adapter import service_calls_for_resolved_target
+
+    assert service_calls_for_resolved_target(
+        "alert.lqi_hobbyraum",
+        {"state": "on"},
+    ) == (
+        ("alert", "turn_on", {"entity_id": "alert.lqi_hobbyraum"}),
+    )
+    assert service_calls_for_resolved_target(
+        "alert.lqi_hobbyraum",
+        {"state": "off"},
+    ) == (
+        ("alert", "turn_off", {"entity_id": "alert.lqi_hobbyraum"}),
+    )
+    assert service_calls_for_resolved_target(
+        "alert.lqi_hobbyraum",
+        {"state": "toggle"},
+    ) == (
+        ("alert", "toggle", {"entity_id": "alert.lqi_hobbyraum"}),
     )
 
 

@@ -125,7 +125,8 @@ The integration currently supports:
 | `vacuum.*`      | `start`, `pause`, `stop`, `return_to_base`, `locate`, `clean_spot`, `clean_area`, `set_fan_speed`, `send_command`, `turn_on`, `turn_off`, `toggle` |
 | `lawn_mower.*`  | `start_mowing`, `pause`, `dock`                       |
 | `remote.*`      | `turn_on`, `turn_off`, `toggle`, `send_command`       |
-| `number.*`, `input_number.*` | `set_value`                            |
+| `number.*`      | `set_value`                                         |
+| `input_number.*` | `set_value`, `increment`, `decrement`              |
 | `counter.*`    | `set_value`, `increment`, `decrement`, `reset`         |
 | `select.*`, `input_select.*` | `select_option`, `select_next`, `select_previous`; `input_select` also supports `select_first`, `select_last` |
 | `text.*`, `input_text.*` | `set_value`                                  |
@@ -136,6 +137,7 @@ The integration currently supports:
 | `valve.*`       | `open_valve`, `close_valve`, `stop_valve`, `set_valve_position`, `toggle` |
 | `siren.*`       | `turn_on`, `turn_off`, `toggle`                        |
 | `notify.*`      | calls the matching notify service                      |
+| `alert.*`       | `alert.turn_on`, `alert.turn_off`, `alert.toggle`      |
 | `browser_mod.*` | calls the matching Browser Mod service                 |
 | `telegram_bot.*` | calls the matching Telegram Bot service               |
 | `tts.*`         | `tts.speak`, `tts.cloud_say`, `tts.clear_cache`         |
@@ -179,14 +181,15 @@ operation mode is included in the `set_temperature` call. Vacuums support
 `state` values such as `mowing`, `paused`, `returning`, and `dock`. Remotes
 support `state: on`, `state: off`, `state: toggle`, optional `activity`, and
 `command` with optional `device`, `num_repeats`, `delay_secs`, and `hold_secs`.
-Number helpers and counters support `value`.
+Number helpers and counters support `value`. Input number helpers also support
+`state: increment` and `state: decrement`.
 Counters also support `state: increment`, `state: decrement`, and
 `state: reset`. Select helpers
 support `option`, with `state` as an alias for the selected option. `state:
 next` and `state: previous` call the next/previous actions; `input_select`
 also supports `state: first` and `state: last`. Add `cycle: false` to prevent
-next/previous from wrapping where HA supports it. Text and input text
-supports `value`, with `state` as an alias for the text value. Input datetime
+next/previous from wrapping where HA supports it. Text and input text targets
+support `value`, with `state` as an alias for the text value. Input datetime
 helpers support `datetime`, `date`, `time`, and `timestamp`, with `state` as
 an alias for `datetime`. Locks support `state: locked` and `state: unlocked`.
 Valves support `state` (`open`, `closed`, `stop`, or `toggle`) and `position`.
@@ -200,7 +203,8 @@ Alarm panels support `state` values
 service plans are de-duplicated so the 100ms engine tick does not repeatedly
 call the same HA service. Notify targets use `target: notify.service_name` and
 support `message`, optional `title`, and optional `data`; `state` can be used
-as a shorthand for `message`. Browser Mod targets use the target object as the
+as a shorthand for `message`. Alert targets support `state: on`, `state: off`,
+and `state: toggle`. Browser Mod targets use the target object as the
 service name, for example `target: browser_mod.notification`; use
 `service_data` for less common Browser Mod fields. Telegram Bot targets work the
 same way, for example `target: telegram_bot.send_message`. TTS provider targets
