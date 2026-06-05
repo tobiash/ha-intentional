@@ -43,6 +43,7 @@ Duration shorthand (used for transition, ttl, animation timing):
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,8 @@ import yaml
 
 from .animation import AnimationSpec
 from .intent import Authority
+
+RuleDirFingerprint = tuple[tuple[str, int, int], ...]
 
 # ── Errors ───────────────────────────────────────────────────────────
 
@@ -129,6 +132,9 @@ class Rule:
     when
         The trigger expression as a string. Engine evaluates this against
         the current state of referenced entities.
+    for_ms
+        Optional dwell time: the `when` expression must stay true for this
+        long before the rule fires.
     target
         The entity_id this rule's intents apply to. Empty string when the
         rule references a scene instead.
@@ -165,6 +171,7 @@ class Rule:
 
     id: str
     when: str
+    for_ms: int = 0
     target: str = ""
     scene: str | None = None
     set: dict[str, Any] = field(default_factory=dict)
@@ -190,7 +197,7 @@ class Rule:
 
 # Recognized top-level fields in a rule
 _RULE_TOP_LEVEL = {
-    "id", "when", "emit", "authority", "confidence", "reason", "blocks",
+    "id", "extends", "when", "for", "emit", "authority", "confidence", "reason", "blocks",
 }
 # Recognized fields in the emit block
 _EMIT_FIELDS = {
@@ -204,6 +211,14 @@ _ANIMATION_FIELDS = {
 }
 # Recognized easing names
 _VALID_EASINGS = {"linear", "ease-in", "ease-out", "ease-in-out", "sine"}
+_MERGED_EMIT_DICTS = {"set", "cap", "floor", "offset", "multiply"}
+
+
+@dataclass(frozen=True)
+class _RawRuleDef:
+    raw: dict[str, Any]
+    file: Path | None
+    line: int | None
 
 
 def _validate_rule(
@@ -240,6 +255,9 @@ def _validate_rule(
     when = raw.get("when")
     if not when or not isinstance(when, str):
         raise RuleLoadError(f"Rule {rule_id!r}: missing or invalid `when` (must be a non-empty string)", file=file, line=line)
+
+    # for
+    for_ms = _parse_optional_duration(raw.get("for"), f"Rule {rule_id!r}: for", file, line)
 
     # emit
     emit = raw.get("emit")
@@ -317,7 +335,13 @@ def _validate_rule(
 
     # durations
     transition_ms = _parse_optional_duration(emit.get("transition"), f"Rule {rule_id!r}: transition", file, line)
-    ttl_ms = _parse_optional_duration(emit.get("ttl"), f"Rule {rule_id!r}: ttl", file, line)
+    ttl_ms = _parse_optional_duration(
+        emit.get("ttl"),
+        f"Rule {rule_id!r}: ttl",
+        file,
+        line,
+        default=None,
+    )
 
     # blocks
     blocks_raw = raw.get("blocks", [])
@@ -335,13 +359,14 @@ def _validate_rule(
     return Rule(
         id=rule_id,
         when=when,
+        for_ms=for_ms,
         target=target or "",
         scene=scene,
-        set=dict(emit.get("set", {})),
-        cap=dict(emit.get("cap", {})),
-        floor=dict(emit.get("floor", {})),
-        offset=dict(emit.get("offset", {})),
-        multiply=dict(emit.get("multiply", {})),
+        set=_normalize_emit_mapping(emit.get("set", {})),
+        cap=_normalize_emit_mapping(emit.get("cap", {})),
+        floor=_normalize_emit_mapping(emit.get("floor", {})),
+        offset=_normalize_emit_mapping(emit.get("offset", {})),
+        multiply=_normalize_emit_mapping(emit.get("multiply", {})),
         merge=bool(emit.get("merge", False)),
         transition_ms=transition_ms,
         easing=easing,
@@ -356,15 +381,27 @@ def _validate_rule(
     )
 
 
+def _normalize_emit_mapping(raw: Any) -> dict[str, Any]:
+    """Return an emit mapping with HA state booleans normalized to strings."""
+    mapping = dict(raw)
+    if mapping.get("state") is True:
+        mapping["state"] = "on"
+    elif mapping.get("state") is False:
+        mapping["state"] = "off"
+    return mapping
+
+
 def _parse_optional_duration(
     value: Any,
     label: str,
     file: Path | None,
     line: int | None,
-) -> int:
+    *,
+    default: int | None = 0,
+) -> int | None:
     """Parse an optional duration field. Accepts int (ms) or string ('2s')."""
     if value is None:
-        return 0
+        return default
     if isinstance(value, int):
         if value < 0:
             raise RuleLoadError(f"{label} must be non-negative, got {value}", file=file, line=line)
@@ -445,14 +482,15 @@ def _parse_animation(
         ) from e
 
 
-# ── Public API ───────────────────────────────────────────────────────
+# ── Inheritance resolution ───────────────────────────────────────────
 
 
-def load_rules_from_string(text: str, *, file: Path | None = None) -> list[Rule]:
-    """Parse a YAML string into a list of validated Rule objects.
-
-    Raises RuleLoadError on any parse or schema error.
-    """
+def _load_raw_rule_defs_from_string(
+    text: str,
+    *,
+    file: Path | None = None,
+) -> list[_RawRuleDef]:
+    """Parse YAML into raw rule definitions without schema resolution."""
     try:
         docs = list(yaml.safe_load_all(text))
     except yaml.YAMLError as e:
@@ -460,8 +498,7 @@ def load_rules_from_string(text: str, *, file: Path | None = None) -> list[Rule]
         line_num = line.line + 1 if line else None
         raise RuleLoadError(f"YAML parse error: {e}", file=file, line=line_num) from e
 
-    # Collect all rule objects across documents
-    rules: list[Rule] = []
+    raw_rules: list[_RawRuleDef] = []
     for doc in docs:
         if doc is None:
             continue  # empty document
@@ -472,7 +509,116 @@ def load_rules_from_string(text: str, *, file: Path | None = None) -> list[Rule]
             )
         for i, raw in enumerate(doc):
             line_num = i + 1  # approximate; YAML doesn't preserve original lines per item
-            rules.append(_validate_rule(raw, file=file, line=line_num))
+            if not isinstance(raw, dict):
+                raise RuleLoadError(
+                    f"Each rule must be a mapping, got {type(raw).__name__}",
+                    file=file, line=line_num,
+                )
+            raw_rules.append(_RawRuleDef(raw=raw, file=file, line=line_num))
+
+    return raw_rules
+
+
+def _resolve_rule_inheritance(raw_rules: list[_RawRuleDef]) -> list[_RawRuleDef]:
+    """Resolve `extends:` references into complete raw rule definitions."""
+    by_id: dict[str, _RawRuleDef] = {}
+    for raw_def in raw_rules:
+        rule_id = raw_def.raw.get("id")
+        if not rule_id or not isinstance(rule_id, str):
+            continue
+        if rule_id in by_id:
+            existing = by_id[rule_id]
+            raise RuleLoadError(
+                f"Duplicate rule id {rule_id!r} "
+                f"(first defined in {existing.file or '<inline>'})",
+                file=raw_def.file,
+                line=raw_def.line,
+            )
+        by_id[rule_id] = raw_def
+
+    resolved: dict[str, dict[str, Any]] = {}
+
+    def resolve(rule_id: str, stack: tuple[str, ...] = ()) -> dict[str, Any]:
+        if rule_id in resolved:
+            return deepcopy(resolved[rule_id])
+        raw_def = by_id[rule_id]
+        parent_id = raw_def.raw.get("extends")
+        if parent_id is None:
+            result = deepcopy(raw_def.raw)
+            result.pop("extends", None)
+            resolved[rule_id] = result
+            return deepcopy(result)
+        if not isinstance(parent_id, str) or not parent_id:
+            raise RuleLoadError(
+                f"Rule {rule_id!r}: `extends` must be a non-empty rule id string",
+                file=raw_def.file,
+                line=raw_def.line,
+            )
+        if parent_id not in by_id:
+            raise RuleLoadError(
+                f"Rule {rule_id!r}: extends unknown rule id {parent_id!r}",
+                file=raw_def.file,
+                line=raw_def.line,
+            )
+        if parent_id in stack:
+            cycle = " -> ".join((*stack, rule_id, parent_id))
+            raise RuleLoadError(
+                f"Rule inheritance cycle: {cycle}",
+                file=raw_def.file,
+                line=raw_def.line,
+            )
+        parent = resolve(parent_id, (*stack, rule_id))
+        result = _merge_rule_dicts(parent, raw_def.raw)
+        result.pop("extends", None)
+        resolved[rule_id] = result
+        return deepcopy(result)
+
+    output: list[_RawRuleDef] = []
+    for raw_def in raw_rules:
+        rule_id = raw_def.raw.get("id")
+        if isinstance(rule_id, str) and rule_id:
+            output.append(_RawRuleDef(raw=resolve(rule_id), file=raw_def.file, line=raw_def.line))
+        else:
+            output.append(raw_def)
+    return output
+
+
+def _merge_rule_dicts(parent: dict[str, Any], child: dict[str, Any]) -> dict[str, Any]:
+    """Merge a child rule over its inherited parent rule."""
+    result = deepcopy(parent)
+    for key, value in child.items():
+        if key == "extends":
+            continue
+        if key == "emit" and isinstance(value, dict) and isinstance(result.get("emit"), dict):
+            result["emit"] = _merge_emit_dicts(result["emit"], value)
+            continue
+        result[key] = deepcopy(value)
+    return result
+
+
+def _merge_emit_dicts(parent: dict[str, Any], child: dict[str, Any]) -> dict[str, Any]:
+    """Merge an inherited emit block, preserving per-field modifier maps."""
+    result = deepcopy(parent)
+    for key, value in child.items():
+        if (
+            key in _MERGED_EMIT_DICTS
+            and isinstance(value, dict)
+            and isinstance(result.get(key), dict)
+        ):
+            merged = deepcopy(result[key])
+            merged.update(deepcopy(value))
+            result[key] = merged
+            continue
+        result[key] = deepcopy(value)
+    return result
+
+
+def _validate_raw_rule_defs(raw_rules: list[_RawRuleDef]) -> list[Rule]:
+    resolved_rules = _resolve_rule_inheritance(raw_rules)
+    rules = [
+        _validate_rule(raw_def.raw, file=raw_def.file, line=raw_def.line)
+        for raw_def in resolved_rules
+    ]
 
     # Check for duplicate IDs
     seen: dict[str, Rule] = {}
@@ -482,11 +628,23 @@ def load_rules_from_string(text: str, *, file: Path | None = None) -> list[Rule]
             raise RuleLoadError(
                 f"Duplicate rule id {rule.id!r} "
                 f"(first defined in {existing.source_file or '<inline>'})",
-                file=file,
+                file=rule.source_file,
+                line=rule.source_line,
             )
         seen[rule.id] = rule
 
     return rules
+
+
+# ── Public API ───────────────────────────────────────────────────────
+
+
+def load_rules_from_string(text: str, *, file: Path | None = None) -> list[Rule]:
+    """Parse a YAML string into a list of validated Rule objects.
+
+    Raises RuleLoadError on any parse or schema error.
+    """
+    return _validate_raw_rule_defs(_load_raw_rule_defs_from_string(text, file=file))
 
 
 def load_rules(directory: str | Path) -> list[Rule]:
@@ -505,12 +663,32 @@ def load_rules(directory: str | Path) -> list[Rule]:
         if f.is_file() and f.suffix.lower() in (".yaml", ".yml")
     )
 
-    all_rules: list[Rule] = []
+    raw_rules: list[_RawRuleDef] = []
     for path in rule_files:
         try:
             text = path.read_text(encoding="utf-8")
         except OSError as e:
             raise RuleLoadError(f"Could not read {path}: {e}", file=path) from e
-        all_rules.extend(load_rules_from_string(text, file=path))
+        raw_rules.extend(_load_raw_rule_defs_from_string(text, file=path))
 
-    return all_rules
+    return _validate_raw_rule_defs(raw_rules)
+
+
+def rule_dir_fingerprint(directory: str | Path) -> RuleDirFingerprint:
+    """Return a stable fingerprint of YAML rule files in a directory."""
+    directory = Path(directory)
+    if not directory.exists() or not directory.is_dir():
+        return ()
+
+    files = sorted(
+        path for path in directory.iterdir()
+        if path.is_file() and path.suffix.lower() in (".yaml", ".yml")
+    )
+    fingerprint: list[tuple[str, int, int]] = []
+    for path in files:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        fingerprint.append((path.name, stat.st_mtime_ns, stat.st_size))
+    return tuple(fingerprint)

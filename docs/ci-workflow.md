@@ -1,58 +1,41 @@
-# GitHub Actions workflow
+# CI workflow
 
-We use GitHub Actions for CI. Since this repo's token doesn't have
-`workflow` scope (and we don't want to add it), the workflow file is
-not committed by the agent. To enable CI on your fork, copy the
-following into `.github/workflows/tests.yml` and commit it:
+The authoritative workflow is [`ci/test.yml`](../ci/test.yml). It lives there
+instead of `.github/workflows/test.yml` until the repository token has
+`workflow` scope. To enable it, follow [`docs/ci-setup.md`](ci-setup.md).
 
-```yaml
-name: Tests
+## What CI Runs
 
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+CI installs the full test dependency set, including Home Assistant and
+`pytest-homeassistant-custom-component`, then runs these gates:
 
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.11", "3.12", "3.13"]
-    steps:
-      - uses: actions/checkout@v4
+1. `ruff check src/ tests/ custom_components/intentional/`
+2. `python ci/check-bundle-sync.py`
+3. Fast tests and static guards, excluding only HA-harness test files
+4. HACS smoke-load test
+5. HA integration/API tests
+6. E2E config-flow tests in a separate pytest process
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
+The e2e config-flow tests run separately because Home Assistant translation
+state can leak between pytest modules in the HA custom-component harness.
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[test,dev]"
+## Local Commands
 
-      - name: Lint with ruff
-        run: |
-          ruff check src/intentional tests
+Fast local loop without Home Assistant:
 
-      - name: Run tests
-        run: |
-          pytest --cov=intentional --cov-report=term-missing tests/
+```bash
+ruff check src/intentional custom_components/intentional tests
+python ci/check-bundle-sync.py
+pytest -q
 ```
 
-## Status
+Full HA-backed loop:
 
-[![Tests](https://github.com/tobiash/ha-intentional/actions/workflows/tests.yml/badge.svg)](https://github.com/tobiash/ha-intentional/actions/workflows/tests.yml)
-
-> The badge above will go green once you commit the workflow file in your fork.
-
-## Test results (locally verified)
-
+```bash
+pip install -e ".[all-tests]"
+pytest tests/test_api.py tests/test_integration.py -v --tb=short
+pytest -m e2e_config_flow tests/test_e2e_config_flow.py -v --tb=short
 ```
-156 passed in 0.65s
-Coverage: 85%
-Lint: All checks passed
-```
+
+The full loop is large because Home Assistant and its harness pull a substantial
+dependency tree. CI is the normal place to run it.

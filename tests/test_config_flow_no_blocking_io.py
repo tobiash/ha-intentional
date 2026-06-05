@@ -90,17 +90,17 @@ def test_no_sync_rule_files_called_from_config_flow() -> None:
             violations.append((line, callee))
 
     assert not violations, (
-        f"\n\nconfig_flow.py calls sync rule_files helpers directly — this\n"
-        f"blocks the event loop and triggers HA blocking-I/O warnings +\n"
-        f"500 errors. Wrap every such call in self.hass.async_add_executor_job\n"
-        f"via the _*_in_executor module-level helpers. Offending lines:\n\n"
+        "\n\nconfig_flow.py calls sync rule_files helpers directly — this\n"
+        "blocks the event loop and triggers HA blocking-I/O warnings +\n"
+        "500 errors. Wrap every such call in self.hass.async_add_executor_job\n"
+        "via the _*_in_executor module-level helpers. Offending lines:\n\n"
         + "\n".join(
             f"  line {line}: {callee}(...)" for line, callee in violations
         )
         + "\n\n"
-        f"Accepted: _validate_rule_dir (pure-string validation, no I/O)\n"
-        f"Accepted: _list_in_executor / _read_in_executor / "
-        f"_write_in_executor / _delete_in_executor (executor wrappers)\n"
+        "Accepted: _validate_rule_dir (pure-string validation, no I/O)\n"
+        "Accepted: _list_in_executor / _read_in_executor / "
+        "_write_in_executor / _delete_in_executor (executor wrappers)\n"
     )
 
 

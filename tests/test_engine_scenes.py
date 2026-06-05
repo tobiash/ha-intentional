@@ -63,6 +63,48 @@ class TestSceneRuleLifecycle:
         engine.evaluate_all()
         assert engine.list_active_scene_intents() == []
 
+    def test_forced_scene_intent_ignores_when_until_ttl_expires(self) -> None:
+        engine = Engine(clock_fn=lambda: 0)
+        engine.load_rules([_scene_rule("movie", 'input_boolean.x == "on"', "scene.movie")])
+        engine.update_state("input_boolean.x", "off")
+        intent = engine.activate_scene_rule("movie", ttl_ms=1000)
+
+        assert intent is not None
+        assert intent.rule_id == "movie"
+        assert intent.ignore_when is True
+
+        engine.evaluate_all()
+        assert engine.list_active_scene_intents() == ["scene.movie"]
+
+        engine.advance_clock(1000)
+        engine.evaluate_all()
+        assert engine.list_active_scene_intents() == []
+
+    def test_forced_scene_intent_uses_rule_ttl_by_default(self) -> None:
+        engine = Engine(clock_fn=lambda: 0)
+        engine.load_rules([
+            _scene_rule(
+                "movie",
+                'input_boolean.x == "on"',
+                "scene.movie",
+                ttl_ms=5000,
+            )
+        ])
+
+        intent = engine.activate_scene_rule("movie")
+
+        assert intent is not None
+        assert intent.ttl_ms == 5000
+
+    def test_forced_scene_intent_rejects_missing_or_non_scene_rule(self) -> None:
+        engine = Engine()
+        engine.load_rules([
+            _target_rule("light-rule", 'input_boolean.x == "on"', "light.x")
+        ])
+
+        assert engine.activate_scene_rule("missing") is None
+        assert engine.activate_scene_rule("light-rule") is None
+
 
 class TestMixedSceneAndTargetRules:
     def test_scene_and_target_rules_coexist(self) -> None:
@@ -101,6 +143,68 @@ class TestMixedSceneAndTargetRules:
         assert engine.list_active_scene_intents() == ["scene.movie"]
         cap_intents = engine.list_active_intents("light.living_room")
         assert len(cap_intents) == 1
+
+
+class TestSceneActivationPlanning:
+    def test_scene_activation_plan_returns_new_scene_service_call(self) -> None:
+        from intentional.ha_adapter import scene_activation_plan
+
+        engine = Engine()
+        engine.load_rules([
+            _scene_rule(
+                "movie",
+                'input_boolean.x == "on"',
+                "scene.movie",
+                transition_ms=3000,
+            )
+        ])
+        engine.update_state("input_boolean.x", "on")
+        engine.evaluate_all()
+
+        calls, active, no_longer_active = scene_activation_plan(engine, set())
+
+        assert calls == (
+            (
+                "scene",
+                "turn_on",
+                {"entity_id": "scene.movie", "transition": 3.0},
+            ),
+        )
+        assert active == {"scene.movie"}
+        assert no_longer_active == set()
+
+    def test_scene_activation_plan_suppresses_already_active_scene(self) -> None:
+        from intentional.ha_adapter import scene_activation_plan
+
+        engine = Engine()
+        engine.load_rules([
+            _scene_rule("movie", 'input_boolean.x == "on"', "scene.movie")
+        ])
+        engine.update_state("input_boolean.x", "on")
+        engine.evaluate_all()
+
+        calls, active, no_longer_active = scene_activation_plan(
+            engine,
+            {"scene.movie"},
+        )
+
+        assert calls == ()
+        assert active == {"scene.movie"}
+        assert no_longer_active == set()
+
+    def test_scene_activation_plan_reports_deactivated_scene(self) -> None:
+        from intentional.ha_adapter import scene_activation_plan
+
+        engine = Engine()
+
+        calls, active, no_longer_active = scene_activation_plan(
+            engine,
+            {"scene.movie"},
+        )
+
+        assert calls == ()
+        assert active == set()
+        assert no_longer_active == {"scene.movie"}
 
 
 class TestSceneRuleReload:

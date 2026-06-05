@@ -38,9 +38,14 @@ The workflow runs on every push to `main` and every pull request:
 1. **Lint** — `ruff check` on the engine, tests, and integration code
 2. **Bundle sync** — verifies `src/intentional/` matches
    `custom_components/intentional/_engine/` (catch drift)
-3. **Unit tests** — fast tests that don't need HA installed
-4. **Integration tests** — full HA test instance, exercises
-   the integration end-to-end
+3. **Unit tests + static guards** — fast tests that don't need HA installed,
+   including manifest/package consistency checks
+4. **HACS smoke-load** — verifies the integration imports under a HACS-like
+   `sys.path`
+5. **Integration/API tests** — full HA test instance, exercises the
+   integration end-to-end
+6. **E2E config flow** — full HA config-flow tests in a separate pytest
+   process to avoid HA translation-cache leakage
 
 If anything fails, the workflow fails and you get a red ❌ on
 the PR / commit.
@@ -67,7 +72,8 @@ The integration tests need HA:
 
 ```bash
 pip install -e ".[all-tests]"
-pytest tests/test_integration.py -v
+pytest tests/test_api.py tests/test_integration.py -v --tb=short
+pytest -m e2e_config_flow tests/test_e2e_config_flow.py -v --tb=short
 ```
 
 This requires ~500MB of disk space for the HA dependency tree

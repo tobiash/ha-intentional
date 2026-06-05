@@ -14,7 +14,7 @@ The expression supports:
 - Logical operators: and, or, not (with parentheses)
 - String literals: "on", 'off'
 - Numeric literals: 42, 3.14
-- Time helpers: time_of_day in {"morning", "afternoon", "evening", "night"}
+- Time helpers: time_of_day buckets and exact HH:MM clock values
 
 The parser produces an AST that the engine evaluates. It does NOT do
 attribute access via Python's `eval` — that would be a security risk.
@@ -27,6 +27,7 @@ import pytest
 from intentional.when_parser import (
     Comparison,
     LogicalOp,
+    TimeOfDay,
     WhenSyntaxError,
     evaluate_when,
     parse_when,
@@ -153,3 +154,36 @@ class TestEvaluation:
         assert result is True
         result = evaluate_when(ast, {}, time_of_day="day")
         assert result is False
+
+    def test_time_of_day_matches_bucket_and_exact_clock(self) -> None:
+        context = TimeOfDay(bucket="night", clock="23:00")
+
+        assert evaluate_when(
+            parse_when('time_of_day == "night"'),
+            {},
+            time_of_day=context,
+        )
+        assert evaluate_when(
+            parse_when('time_of_day == "23:00"'),
+            {},
+            time_of_day=context,
+        )
+        assert not evaluate_when(
+            parse_when('time_of_day == "22:59"'),
+            {},
+            time_of_day=context,
+        )
+
+    def test_time_of_day_supports_clock_ordering(self) -> None:
+        context = TimeOfDay(bucket="evening", clock="21:30")
+
+        assert evaluate_when(
+            parse_when('time_of_day >= "21:00" and time_of_day < "22:00"'),
+            {},
+            time_of_day=context,
+        )
+        assert evaluate_when(
+            parse_when('"21:00" <= time_of_day and "22:00" > time_of_day'),
+            {},
+            time_of_day=context,
+        )

@@ -111,7 +111,6 @@ jobs:
         # to ship again.
         run: |
           pytest tests/ -v --tb=short \
-            --ignore=tests/test_manifest.py \
             --ignore=tests/test_integration.py \
             --ignore=tests/test_api.py \
             --ignore=tests/test_e2e_config_flow.py \

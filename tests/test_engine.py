@@ -121,6 +121,111 @@ class TestRuleEvaluation:
         engine.evaluate_all()
         assert len(engine.list_active_intents("light.x")) == 0
 
+    def test_for_delays_rule_until_condition_stays_true(self) -> None:
+        engine = Engine(clock_fn=lambda: 0)
+        rule = _rule(
+            "motion-held",
+            'binary_sensor.motion == "on"',
+            for_ms=5_000,
+        )
+        engine.load_rules([rule])
+        engine.update_state("binary_sensor.motion", "on")
+
+        engine.evaluate_all()
+        assert engine.list_active_intents("light.x") == []
+
+        engine.advance_clock(4_999)
+        engine.evaluate_all()
+        assert engine.list_active_intents("light.x") == []
+
+        engine.advance_clock(1)
+        engine.evaluate_all()
+        intents = engine.list_active_intents("light.x")
+        assert len(intents) == 1
+        assert intents[0].rule_id == "motion-held"
+
+    def test_for_resets_when_condition_goes_false(self) -> None:
+        engine = Engine(clock_fn=lambda: 0)
+        rule = _rule("motion-held", 'binary_sensor.motion == "on"', for_ms=5_000)
+        engine.load_rules([rule])
+        engine.update_state("binary_sensor.motion", "on")
+        engine.evaluate_all()
+        engine.advance_clock(4_000)
+        engine.evaluate_all()
+
+        engine.update_state("binary_sensor.motion", "off")
+        engine.evaluate_all()
+        engine.update_state("binary_sensor.motion", "on")
+        engine.evaluate_all()
+        engine.advance_clock(4_999)
+        engine.evaluate_all()
+
+        assert engine.list_active_intents("light.x") == []
+
+        engine.advance_clock(1)
+        engine.evaluate_all()
+        assert len(engine.list_active_intents("light.x")) == 1
+
+    def test_blocks_suppresses_firing_rule(self) -> None:
+        engine = Engine()
+        engine.load_rules([
+            _rule(
+                "movie-mode",
+                'input_boolean.movie == "on"',
+                target="light.room",
+                set={"brightness_pct": 20},
+                blocks=("ambient",),
+            ),
+            _rule(
+                "ambient",
+                'sensor.dark == "on"',
+                target="light.room",
+                set={"brightness_pct": 80},
+            ),
+        ])
+        engine.update_state("input_boolean.movie", "on")
+        engine.update_state("sensor.dark", "on")
+
+        engine.evaluate_all()
+
+        active_rule_ids = {
+            intent.rule_id for intent in engine.list_active_intents("light.room")
+        }
+        assert active_rule_ids == {"movie-mode"}
+        resolved = engine.resolve("light.room")
+        assert resolved is not None
+        assert resolved.value == {"brightness_pct": 20}
+
+    def test_blocks_withdraws_previously_active_intent(self) -> None:
+        engine = Engine()
+        engine.load_rules([
+            _rule(
+                "movie-mode",
+                'input_boolean.movie == "on"',
+                target="light.room",
+                set={"brightness_pct": 20},
+                blocks=("ambient",),
+            ),
+            _rule(
+                "ambient",
+                'sensor.dark == "on"',
+                target="light.room",
+                set={"brightness_pct": 80},
+            ),
+        ])
+        engine.update_state("sensor.dark", "on")
+        engine.evaluate_all()
+        assert {
+            intent.rule_id for intent in engine.list_active_intents("light.room")
+        } == {"ambient"}
+
+        engine.update_state("input_boolean.movie", "on")
+        engine.evaluate_all()
+
+        assert {
+            intent.rule_id for intent in engine.list_active_intents("light.room")
+        } == {"movie-mode"}
+
 
 # ── Resolution ───────────────────────────────────────────────────────
 
@@ -138,6 +243,107 @@ class TestResolution:
         resolved = engine.resolve("light.x")
         assert resolved is not None
         assert resolved.value == {"brightness_pct": 40}
+
+
+# ── Diagnostics ─────────────────────────────────────────────────────
+
+
+class TestStructuredDiagnostics:
+    def test_explain_target_reports_compositor_winner_not_insertion_order(self) -> None:
+        engine = Engine(clock_fn=lambda: 1000)
+        engine.load_rules([
+            _rule(
+                "low-priority",
+                'sensor.low == "on"',
+                set={"brightness_pct": 20},
+                confidence=0.2,
+            ),
+            _rule(
+                "high-priority",
+                'sensor.high == "on"',
+                set={"brightness_pct": 80},
+                confidence=0.9,
+            ),
+        ])
+        engine.update_state("sensor.low", "on")
+        engine.update_state("sensor.high", "on")
+        engine.evaluate_all()
+
+        explanation = engine.explain_target("light.x")
+
+        assert explanation["resolved"]["value"] == {"brightness_pct": 80}
+        assert explanation["active_intents"][0]["rule_id"] == "high-priority"
+        assert explanation["active_intents"][1]["rule_id"] == "low-priority"
+        assert explanation["winning_intent"]["rule_id"] == "high-priority"
+
+    def test_explain_target_reports_blocked_firing_rules(self) -> None:
+        engine = Engine()
+        engine.load_rules([
+            _rule(
+                "movie-mode",
+                'input_boolean.movie == "on"',
+                target="light.room",
+                set={"brightness_pct": 20},
+                blocks=("ambient",),
+            ),
+            _rule(
+                "ambient",
+                'sensor.dark == "on"',
+                target="light.room",
+                set={"brightness_pct": 80},
+            ),
+        ])
+        engine.update_state("input_boolean.movie", "on")
+        engine.update_state("sensor.dark", "on")
+        engine.evaluate_all()
+
+        explanation = engine.explain_target("light.room")
+
+        assert explanation["rules_for_target"] == [
+            {
+                "rule_id": "movie-mode",
+                "firing": True,
+                "condition_firing": True,
+                "blocked_by": [],
+                "for_remaining_ms": None,
+            },
+            {
+                "rule_id": "ambient",
+                "firing": False,
+                "condition_firing": True,
+                "blocked_by": ["movie-mode"],
+                "for_remaining_ms": None,
+            },
+        ]
+        assert explanation["winning_intent"]["rule_id"] == "movie-mode"
+
+    def test_explain_target_reports_for_remaining(self) -> None:
+        engine = Engine(clock_fn=lambda: 0)
+        engine.load_rules([
+            _rule(
+                "motion-held",
+                'binary_sensor.motion == "on"',
+                target="light.hall",
+                for_ms=5_000,
+                set={"state": "on"},
+            )
+        ])
+        engine.update_state("binary_sensor.motion", "on")
+        engine.evaluate_all()
+        engine.advance_clock(2_000)
+
+        explanation = engine.explain_target("light.hall")
+
+        assert explanation["resolved"] is None
+        assert explanation["rules_for_target"] == [
+            {
+                "rule_id": "motion-held",
+                "firing": False,
+                "condition_firing": True,
+                "blocked_by": [],
+                "for_remaining_ms": 3_000,
+            }
+        ]
 
 
 # ── TTL expiry ───────────────────────────────────────────────────────
@@ -171,41 +377,46 @@ class TestTTLExpiry:
 
 
 class TestAnimationTick:
-    def test_tick_advances_animation(self) -> None:
-        engine = Engine()
+    def test_resolve_applies_current_animation_frame(self) -> None:
+        engine = Engine(clock_fn=lambda: 0)
         rule = _rule(
             "r1",
             'sensor.x.state == "on"',
+            set={"brightness_pct": 0, "color_temp_k": 2700},
             animation=_make_pulse_anim(),
         )
         engine.load_rules([rule])
         engine.update_state("sensor.x", "on")
         engine.evaluate_all()
-        # At t=0, the intent's animation should be at the first value
+
         resolved = engine.resolve("light.x")
         assert resolved is not None
         assert resolved.animation is not None
-        # Tick to advance the animation
-        engine.tick(0)  # t=0 relative
-        engine.tick(500)  # halfway through the cycle
-        # The animation should report a mid-cycle value
-        # (We don't assert exact value here — that's covered by animation tests)
+        assert resolved.value == {"brightness_pct": 0, "color_temp_k": 2700}
 
-    def test_animation_finished_flag(self) -> None:
-        engine = Engine()
+        engine.advance_clock(500)
+        resolved = engine.resolve("light.x")
+        assert resolved is not None
+        assert resolved.value["brightness_pct"] == 50
+        assert resolved.value["color_temp_k"] == 2700
+
+    def test_resolve_uses_finished_animation_frame(self) -> None:
+        engine = Engine(clock_fn=lambda: 0)
         rule = _rule(
             "r1",
             'sensor.x.state == "on"',
+            set={"brightness_pct": 0},
             animation=_make_pulse_anim(repeat=1),
         )
         engine.load_rules([rule])
         engine.update_state("sensor.x", "on")
         engine.evaluate_all()
-        # After enough ticks, the animation should report finished
-        engine.tick(0)
-        engine.tick(0)
-        # Animation duration is 2s, repeat 1 — so at t=2500 it should be done
-        # (this is implementation-dependent; the key thing is finished works)
+        engine.advance_clock(2500)
+
+        resolved = engine.resolve("light.x")
+
+        assert resolved is not None
+        assert resolved.value == {"brightness_pct": 50}
 
 
 # ── Manual intent injection ─────────────────────────────────────────
@@ -248,6 +459,33 @@ class TestRuleReload:
 
 
 class TestDiagnostics:
+    def test_public_counts_and_target_lists_exclude_expired_intents(self) -> None:
+        engine = Engine(clock_fn=lambda: 1000)
+        engine.load_rules([
+            _rule("light-rule", 'sensor.x.state == "on"', target="light.x"),
+            _rule("switch-rule", 'sensor.y.state == "on"', target="switch.y"),
+        ])
+        engine.update_state("sensor.x", "on")
+        engine.evaluate_all()
+        engine.emit_user_intent(
+            target="light.manual",
+            set={"state": "on"},
+            ttl_ms=1000,
+        )
+
+        assert engine.rule_count() == 2
+        assert engine.list_known_targets() == ("light.x", "switch.y")
+        assert engine.list_active_targets() == ("light.manual", "light.x")
+        assert engine.has_active_target("light.x") is True
+        assert engine.has_active_target("switch.y") is False
+        assert engine.active_intent_count() == 2
+
+        engine.advance_clock(1000)
+
+        assert engine.list_active_targets() == ("light.x",)
+        assert engine.has_active_target("light.manual") is False
+        assert engine.active_intent_count() == 1
+
     def test_explain_returns_reason_chain(self) -> None:
         engine = Engine()
         engine.load_rules([

@@ -132,8 +132,8 @@ class IntentionalHealthView(HomeAssistantView):
             "status": "ok",
             "version": "0.3.0",
             "rule_dir": entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR),
-            "rule_count": len(engine._rules),  # noqa: SLF001
-            "active_intent_count": len(engine._active_intents),  # noqa: SLF001
+            "rule_count": engine.rule_count(),
+            "active_intent_count": engine.active_intent_count(),
         })
 
 
@@ -250,30 +250,11 @@ class IntentionalReloadView(HomeAssistantView):
         engine = _engine_for(hass)
         return web.json_response({
             "status": "reloaded",
-            "rule_count": len(engine._rules) if engine else 0,  # noqa: SLF001
+            "rule_count": engine.rule_count() if engine else 0,
         })
 
 
 # ── State inspection ──────────────────────────────────────────────
-
-
-def _intent_to_dict(intent: Any) -> dict[str, Any]:
-    """Serialize an Intent to a JSON-friendly dict."""
-    return {
-        "rule_id": intent.rule_id,
-        "target": intent.target,
-        "set": dict(intent.set) if intent.set else {},
-        "cap": dict(intent.cap) if intent.cap else {},
-        "floor": dict(intent.floor) if intent.floor else {},
-        "offset": dict(intent.offset) if intent.offset else {},
-        "multiply": dict(intent.multiply) if intent.multiply else {},
-        "authority": intent.authority.value,
-        "authority_name": intent.authority.name,
-        "confidence": intent.confidence,
-        "ttl_ms": intent.ttl_ms,
-        "reason": intent.reason,
-        "created_at_ms": intent.created_at_ms,
-    }
 
 
 class IntentionalStateView(HomeAssistantView):
@@ -295,10 +276,10 @@ class IntentionalStateView(HomeAssistantView):
         if engine is None:
             return _error("Integration not configured", "not_configured", 503)
 
-        # Group active intents by target
         by_target: dict[str, list[dict[str, Any]]] = {}
-        for intent in engine._active_intents:  # noqa: SLF001
-            by_target.setdefault(intent.target, []).append(_intent_to_dict(intent))
+        for target in engine.list_active_targets():
+            explanation = engine.explain_target(target)
+            by_target[target] = explanation["active_intents"]
 
         # Compute resolved values per target
         resolved: dict[str, dict[str, Any]] = {}
@@ -315,8 +296,8 @@ class IntentionalStateView(HomeAssistantView):
                 pass
 
         return web.json_response({
-            "rule_count": len(engine._rules),  # noqa: SLF001
-            "active_intent_count": len(engine._active_intents),  # noqa: SLF001
+            "rule_count": engine.rule_count(),
+            "active_intent_count": engine.active_intent_count(),
             "by_target": by_target,
             "resolved": resolved,
         })
@@ -343,33 +324,7 @@ class IntentionalExplainView(HomeAssistantView):
         engine = _engine_for(hass)
         if engine is None:
             return _error("Integration not configured", "not_configured", 503)
-        # Look up active intents for this target
-        active = [
-            _intent_to_dict(i) for i in engine._active_intents  # noqa: SLF001
-            if i.target == target
-        ]
-        resolved_obj = engine.resolve(target)
-        resolved = None
-        if resolved_obj is not None:
-            resolved = {
-                "value": dict(resolved_obj.value),
-                "ttl_remaining_ms": resolved_obj.ttl_remaining_ms,
-            }
-        # Find which rules *could* fire for this target
-        firing_rules = []
-        for rule_id, parsed in engine._rules.items():  # noqa: SLF001
-            if parsed.rule.target == target:
-                firing_rules.append({
-                    "rule_id": rule_id,
-                    "firing": parsed.is_firing,
-                })
-        return web.json_response({
-            "target": target,
-            "resolved": resolved,
-            "active_intents": active,
-            "winning_intent": active[0] if active else None,
-            "rules_for_target": firing_rules,
-        })
+        return web.json_response(engine.explain_target(target))
 
 
 # ── Registration ───────────────────────────────────────────────────

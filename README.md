@@ -78,17 +78,25 @@ Home Assistant's `automation:` system is powerful but has a familiar scaling pro
 ## Features
 
 - **Declarative YAML rule format** — no Python, no DSL, designed to be writable by AI agents
+- **Rule inheritance** — share common rule defaults with `extends:` and override per room or mode
+- **Dwell timing** — HA-style `for:` conditions for motion, presence, and spike filtering
+- **Comfort, energy, and cleaning targets** — drive climate, humidifier, fan, water-heater, vacuum, and lawn mower entities from the same intent model
+- **Helper targets** — drive counters, input helpers, number/select entities, and datetime helpers
+- **Security targets** — control locks, valves, sirens, and alarm panels through resolved intents
+- **Notification targets** — send `notify.*` messages from the same intent engine
+- **Action targets** — trigger buttons, input buttons, remotes, scenes, scripts, and automations without repeated service-call churn
+- **Timer targets** — start, pause, cancel, and finish HA timers from resolved intents
 - **Three-tier authority** — `sensor` < `automation` < `user` — with confidence as a tiebreaker
 - **Per-field modifiers** — `set`, `cap`, `floor`, `offset`, `multiply`, with `merge: true` for partial updates
 - **Time** — `transition` and `easing` for smooth changes
 - **Animations** — `pulse`, `breath`, `cycle`, `flash` with device-native fallbacks
-- **Manual override tracking** — wrapped service calls auto-emit user intents with configurable TTL
+- **Manual override tracking** — managed-target HA state drift becomes a user intent with TTL
 - **Hot reload** — edit a rule file, the engine reloads without restarting Home Assistant
 - **UI rule editor** — edit rule files in the HA Configure panel, no SSH needed
 - **HTTP API** — 6 endpoints for external agents (`/api/intentional/*`); auth via HA bearer token
 - **Zero-config** — discover the rule directory, validate on load, log errors clearly
 - **HACS-installable** — one-click install, standard HA integration patterns
-- **CI-tested** — GitHub Actions runs lint, bundle sync check, and 218 tests on every PR
+- **CI-tested** — GitHub Actions runs lint, bundle sync, pure E2E, and Home Assistant integration checks
 
 ## Installation
 

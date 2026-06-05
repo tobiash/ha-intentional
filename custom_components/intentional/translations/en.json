@@ -24,11 +24,419 @@
           "required": true,
           "selector": { "entity": {} }
         },
+        "state": {
+          "name": "State",
+          "description": "Optional target state such as on, off, toggle, open, closed, or stop.",
+          "required": false,
+          "selector": { "text": {} }
+        },
         "brightness_pct": {
           "name": "Brightness (%)",
           "description": "Optional brightness percentage to set.",
           "required": false,
           "selector": { "number": { "min": 0, "max": 100, "unit_of_measurement": "%" } }
+        },
+        "brightness": {
+          "name": "Brightness",
+          "description": "Optional brightness on Home Assistant's 0-255 scale.",
+          "required": false,
+          "selector": { "number": { "min": 0, "max": 255 } }
+        },
+        "color_temp_k": {
+          "name": "Color temperature (K)",
+          "description": "Optional light color temperature in Kelvin.",
+          "required": false,
+          "selector": { "number": { "min": 1000, "max": 10000, "unit_of_measurement": "K" } }
+        },
+        "color_temp_mired": {
+          "name": "Color temperature (mired)",
+          "description": "Optional light color temperature in mireds.",
+          "required": false,
+          "selector": { "number": { "min": 50, "max": 500 } }
+        },
+        "rgb_color": {
+          "name": "RGB color",
+          "description": "Optional light RGB color as [red, green, blue].",
+          "required": false,
+          "selector": { "object": {} }
+        },
+        "rgbw_color": {
+          "name": "RGBW color",
+          "description": "Optional light RGBW color as [red, green, blue, white].",
+          "required": false,
+          "selector": { "object": {} }
+        },
+        "rgbww_color": {
+          "name": "RGBWW color",
+          "description": "Optional light RGBWW color as [red, green, blue, cold white, warm white].",
+          "required": false,
+          "selector": { "object": {} }
+        },
+        "hs_color": {
+          "name": "HS color",
+          "description": "Optional light hue/saturation color as [hue, saturation].",
+          "required": false,
+          "selector": { "object": {} }
+        },
+        "xy_color": {
+          "name": "XY color",
+          "description": "Optional light XY color as [x, y].",
+          "required": false,
+          "selector": { "object": {} }
+        },
+        "effect": {
+          "name": "Light effect",
+          "description": "Optional light effect name.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "flash": {
+          "name": "Flash",
+          "description": "Optional light flash mode such as short or long.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "volume_level": {
+          "name": "Volume level",
+          "description": "Optional media player or siren volume from 0.0 to 1.0.",
+          "required": false,
+          "selector": { "number": { "min": 0, "max": 1, "step": 0.01 } }
+        },
+        "is_volume_muted": {
+          "name": "Muted",
+          "description": "Optional media player mute state.",
+          "required": false,
+          "selector": { "boolean": {} }
+        },
+        "tone": {
+          "name": "Siren tone",
+          "description": "Optional siren tone name or ID for siren.turn_on targets.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "source": {
+          "name": "Source",
+          "description": "Optional media player source.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "sound_mode": {
+          "name": "Sound mode",
+          "description": "Optional media player sound mode.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "media_action": {
+          "name": "Media action",
+          "description": "Optional media player action such as pause, next, play_media, mute, seek, or join.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "media_content_id": {
+          "name": "Media content ID",
+          "description": "Optional media content ID for media_player.play_media.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "media_content_type": {
+          "name": "Media content type",
+          "description": "Optional media content type for media_player.play_media.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "enqueue": {
+          "name": "Enqueue",
+          "description": "Optional enqueue mode for media_player.play_media.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "announce": {
+          "name": "Announce",
+          "description": "Optional media_player.play_media announce flag.",
+          "required": false,
+          "selector": { "boolean": {} }
+        },
+        "extra": {
+          "name": "Media extra data",
+          "description": "Optional extra payload for media_player.play_media.",
+          "required": false,
+          "selector": { "object": {} }
+        },
+        "shuffle": {
+          "name": "Shuffle",
+          "description": "Optional media player shuffle setting.",
+          "required": false,
+          "selector": { "boolean": {} }
+        },
+        "repeat": {
+          "name": "Repeat mode",
+          "description": "Optional media player repeat mode.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "seek_position": {
+          "name": "Seek position",
+          "description": "Optional media player seek position in seconds.",
+          "required": false,
+          "selector": { "number": { "min": 0, "step": 0.1 } }
+        },
+        "group_members": {
+          "name": "Group members",
+          "description": "Optional media player entity IDs to join to this player.",
+          "required": false,
+          "selector": { "object": {} }
+        },
+        "position": {
+          "name": "Position",
+          "description": "Optional cover or valve position from 0 to 100.",
+          "required": false,
+          "selector": { "number": { "min": 0, "max": 100 } }
+        },
+        "tilt_position": {
+          "name": "Tilt position",
+          "description": "Optional cover tilt position from 0 to 100.",
+          "required": false,
+          "selector": { "number": { "min": 0, "max": 100 } }
+        },
+        "percentage": {
+          "name": "Fan percentage",
+          "description": "Optional fan speed percentage from 0 to 100.",
+          "required": false,
+          "selector": { "number": { "min": 0, "max": 100, "unit_of_measurement": "%" } }
+        },
+        "hvac_mode": {
+          "name": "HVAC mode",
+          "description": "Optional climate HVAC mode such as heat, cool, auto, or off.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "temperature": {
+          "name": "Temperature",
+          "description": "Optional climate temperature setpoint.",
+          "required": false,
+          "selector": { "number": { "step": 0.1 } }
+        },
+        "target_temp_low": {
+          "name": "Low temperature",
+          "description": "Optional lower climate setpoint for heat/cool ranges.",
+          "required": false,
+          "selector": { "number": { "step": 0.1 } }
+        },
+        "target_temp_high": {
+          "name": "High temperature",
+          "description": "Optional upper climate setpoint for heat/cool ranges.",
+          "required": false,
+          "selector": { "number": { "step": 0.1 } }
+        },
+        "preset_mode": {
+          "name": "Preset mode",
+          "description": "Optional climate preset mode such as eco, away, comfort, or none.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "fan_mode": {
+          "name": "Fan mode",
+          "description": "Optional climate fan mode such as auto, low, medium, or high.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "direction": {
+          "name": "Fan direction",
+          "description": "Optional fan direction such as forward or reverse.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "oscillating": {
+          "name": "Oscillating",
+          "description": "Optional fan oscillation state.",
+          "required": false,
+          "selector": { "boolean": {} }
+        },
+        "humidity": {
+          "name": "Humidity",
+          "description": "Optional humidifier or climate target humidity percentage.",
+          "required": false,
+          "selector": { "number": { "min": 0, "max": 100, "unit_of_measurement": "%" } }
+        },
+        "swing_mode": {
+          "name": "Swing mode",
+          "description": "Optional climate swing mode.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "swing_horizontal_mode": {
+          "name": "Horizontal swing mode",
+          "description": "Optional climate horizontal swing mode.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "aux_heat": {
+          "name": "Auxiliary heat",
+          "description": "Optional climate auxiliary heat state.",
+          "required": false,
+          "selector": { "boolean": {} }
+        },
+        "mode": {
+          "name": "Mode",
+          "description": "Optional humidifier mode such as normal, eco, away, boost, or sleep.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "operation_mode": {
+          "name": "Operation mode",
+          "description": "Optional water heater operation mode such as eco or performance.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "away_mode": {
+          "name": "Away mode",
+          "description": "Optional water heater away mode flag.",
+          "required": false,
+          "selector": { "boolean": {} }
+        },
+        "fan_speed": {
+          "name": "Vacuum fan speed",
+          "description": "Optional vacuum fan speed such as balanced, turbo, or max.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "command": {
+          "name": "Command",
+          "description": "Optional platform-specific vacuum or remote command.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "params": {
+          "name": "Vacuum command parameters",
+          "description": "Optional parameters for vacuum.send_command.",
+          "required": false,
+          "selector": { "object": {} }
+        },
+        "cleaning_area_id": {
+          "name": "Cleaning area IDs",
+          "description": "Optional Home Assistant area IDs for vacuum.clean_area.",
+          "required": false,
+          "selector": { "object": {} }
+        },
+        "activity": {
+          "name": "Remote activity",
+          "description": "Optional remote activity for remote.turn_on or remote.toggle.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "device": {
+          "name": "Remote device",
+          "description": "Optional remote device name for remote.send_command.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "num_repeats": {
+          "name": "Remote repeat count",
+          "description": "Optional number of times to repeat a remote command.",
+          "required": false,
+          "selector": { "number": { "min": 1 } }
+        },
+        "delay_secs": {
+          "name": "Remote delay",
+          "description": "Optional delay in seconds between repeated remote commands.",
+          "required": false,
+          "selector": { "number": { "min": 0, "step": 0.1 } }
+        },
+        "hold_secs": {
+          "name": "Remote hold duration",
+          "description": "Optional hold duration in seconds for remote commands that support it.",
+          "required": false,
+          "selector": { "number": { "min": 0, "step": 0.1 } }
+        },
+        "value": {
+          "name": "Value",
+          "description": "Optional value for number/input_number/input_text/counter helpers.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "option": {
+          "name": "Option",
+          "description": "Optional option for select/input_select helpers.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "cycle": {
+          "name": "Cycle",
+          "description": "Optional cycle flag for select/input_select next or previous actions.",
+          "required": false,
+          "selector": { "boolean": {} }
+        },
+        "code": {
+          "name": "Code",
+          "description": "Optional alarm control panel code for arm/disarm services.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "message": {
+          "name": "Message",
+          "description": "Optional notification message for notify targets.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "title": {
+          "name": "Title",
+          "description": "Optional notification title for notify targets.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "data": {
+          "name": "Data",
+          "description": "Optional notification data payload for notify targets.",
+          "required": false,
+          "selector": { "object": {} }
+        },
+        "variables": {
+          "name": "Variables",
+          "description": "Optional script variables for script targets.",
+          "required": false,
+          "selector": { "object": {} }
+        },
+        "skip_condition": {
+          "name": "Skip condition",
+          "description": "Whether automation.trigger should skip automation conditions.",
+          "required": false,
+          "selector": { "boolean": {} }
+        },
+        "datetime": {
+          "name": "Date and time",
+          "description": "Optional input_datetime date and time value.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "date": {
+          "name": "Date",
+          "description": "Optional input_datetime date value.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "time": {
+          "name": "Time",
+          "description": "Optional input_datetime time value.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "timestamp": {
+          "name": "Timestamp",
+          "description": "Optional input_datetime Unix timestamp.",
+          "required": false,
+          "selector": { "number": {} }
+        },
+        "duration": {
+          "name": "Duration",
+          "description": "Optional duration for timer.start or siren.turn_on targets.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "update_entity": {
+          "name": "Update entity",
+          "description": "Whether to call homeassistant.update_entity for the target after applying the intent.",
+          "required": false,
+          "selector": { "boolean": {} }
         },
         "ttl": {
           "name": "TTL (seconds)",

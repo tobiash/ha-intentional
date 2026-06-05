@@ -17,6 +17,13 @@ fire:
       example: light.kitchen
       selector:
         entity:
+    state:
+      name: State
+      description: Optional target state such as on, off, toggle, open, closed, or stop.
+      required: false
+      example: "on"
+      selector:
+        text:
     brightness_pct:
       name: Brightness (%)
       description: Target brightness as a percentage (0-100). Optional.
@@ -27,6 +34,505 @@ fire:
           min: 0
           max: 100
           unit_of_measurement: "%"
+    brightness:
+      name: Brightness
+      description: Target brightness on Home Assistant's 0-255 scale.
+      required: false
+      example: 180
+      selector:
+        number:
+          min: 0
+          max: 255
+    color_temp_k:
+      name: Color temperature (K)
+      description: Target light color temperature in Kelvin.
+      required: false
+      example: 2700
+      selector:
+        number:
+          min: 1000
+          max: 10000
+          unit_of_measurement: "K"
+    color_temp_mired:
+      name: Color temperature (mired)
+      description: Target light color temperature in mireds.
+      required: false
+      example: 370
+      selector:
+        number:
+          min: 50
+          max: 500
+    rgb_color:
+      name: RGB color
+      description: Target light RGB color as [red, green, blue].
+      required: false
+      example: "[255, 80, 40]"
+      selector:
+        object:
+    rgbw_color:
+      name: RGBW color
+      description: Target light RGBW color as [red, green, blue, white].
+      required: false
+      example: "[255, 80, 40, 10]"
+      selector:
+        object:
+    rgbww_color:
+      name: RGBWW color
+      description: Target light RGBWW color as [red, green, blue, cold white, warm white].
+      required: false
+      example: "[255, 80, 40, 10, 5]"
+      selector:
+        object:
+    hs_color:
+      name: HS color
+      description: Target light hue/saturation color as [hue, saturation].
+      required: false
+      example: "[24.0, 90.0]"
+      selector:
+        object:
+    xy_color:
+      name: XY color
+      description: Target light XY color as [x, y].
+      required: false
+      example: "[0.45, 0.36]"
+      selector:
+        object:
+    effect:
+      name: Light effect
+      description: Target light effect name.
+      required: false
+      example: colorloop
+      selector:
+        text:
+    flash:
+      name: Flash
+      description: Optional light flash mode such as short or long.
+      required: false
+      example: short
+      selector:
+        text:
+    volume_level:
+      name: Volume level
+      description: Target media player or siren volume from 0.0 to 1.0.
+      required: false
+      example: 0.35
+      selector:
+        number:
+          min: 0
+          max: 1
+          step: 0.01
+    is_volume_muted:
+      name: Muted
+      description: Whether a media player should be muted.
+      required: false
+      example: true
+      selector:
+        boolean:
+    tone:
+      name: Siren tone
+      description: Optional siren tone name or ID for siren.turn_on targets.
+      required: false
+      example: alarm
+      selector:
+        text:
+    source:
+      name: Source
+      description: Target media player source.
+      required: false
+      example: HDMI 2
+      selector:
+        text:
+    sound_mode:
+      name: Sound mode
+      description: Target media player sound mode.
+      required: false
+      example: Movie
+      selector:
+        text:
+    media_action:
+      name: Media action
+      description: Optional media player action such as pause, next, play_media, mute, seek, or join.
+      required: false
+      example: play_media
+      selector:
+        text:
+    media_content_id:
+      name: Media content ID
+      description: Media content ID for media_player.play_media.
+      required: false
+      example: media-source://media_source/local/dinner.mp3
+      selector:
+        text:
+    media_content_type:
+      name: Media content type
+      description: Media content type for media_player.play_media.
+      required: false
+      example: music
+      selector:
+        text:
+    enqueue:
+      name: Enqueue
+      description: Optional enqueue mode for media_player.play_media.
+      required: false
+      example: play
+      selector:
+        text:
+    announce:
+      name: Announce
+      description: Whether media_player.play_media should announce where supported.
+      required: false
+      example: false
+      selector:
+        boolean:
+    extra:
+      name: Media extra data
+      description: Optional extra payload for media_player.play_media.
+      required: false
+      example: '{"metadata": {"title": "Dinner"}}'
+      selector:
+        object:
+    shuffle:
+      name: Shuffle
+      description: Whether media player shuffle should be enabled.
+      required: false
+      example: true
+      selector:
+        boolean:
+    repeat:
+      name: Repeat mode
+      description: Target media player repeat mode such as off, one, or all.
+      required: false
+      example: all
+      selector:
+        text:
+    seek_position:
+      name: Seek position
+      description: Media player seek position in seconds.
+      required: false
+      example: 42.5
+      selector:
+        number:
+          min: 0
+          step: 0.1
+    group_members:
+      name: Group members
+      description: Media player entity IDs to join to this player.
+      required: false
+      example: '["media_player.kitchen"]'
+      selector:
+        object:
+    position:
+      name: Position
+      description: Target cover or valve position from 0 to 100.
+      required: false
+      example: 25
+      selector:
+        number:
+          min: 0
+          max: 100
+    tilt_position:
+      name: Tilt position
+      description: Target cover tilt position from 0 to 100.
+      required: false
+      example: 75
+      selector:
+        number:
+          min: 0
+          max: 100
+    percentage:
+      name: Fan percentage
+      description: Target fan speed percentage from 0 to 100.
+      required: false
+      example: 40
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+    hvac_mode:
+      name: HVAC mode
+      description: Target climate HVAC mode such as heat, cool, auto, or off.
+      required: false
+      example: heat
+      selector:
+        text:
+    temperature:
+      name: Temperature
+      description: Target climate temperature setpoint.
+      required: false
+      example: 21.5
+      selector:
+        number:
+          step: 0.1
+    target_temp_low:
+      name: Low temperature
+      description: Target lower climate setpoint for heat/cool ranges.
+      required: false
+      example: 18
+      selector:
+        number:
+          step: 0.1
+    target_temp_high:
+      name: High temperature
+      description: Target upper climate setpoint for heat/cool ranges.
+      required: false
+      example: 23
+      selector:
+        number:
+          step: 0.1
+    preset_mode:
+      name: Preset mode
+      description: Target climate preset mode such as eco, away, comfort, or none.
+      required: false
+      example: eco
+      selector:
+        text:
+    fan_mode:
+      name: Fan mode
+      description: Target climate fan mode such as auto, low, medium, or high.
+      required: false
+      example: auto
+      selector:
+        text:
+    direction:
+      name: Fan direction
+      description: Target fan direction such as forward or reverse.
+      required: false
+      example: forward
+      selector:
+        text:
+    oscillating:
+      name: Oscillating
+      description: Whether fan oscillation should be enabled.
+      required: false
+      example: true
+      selector:
+        boolean:
+    humidity:
+      name: Humidity
+      description: Target humidifier or climate humidity percentage.
+      required: false
+      example: 55
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+    swing_mode:
+      name: Swing mode
+      description: Target climate swing mode.
+      required: false
+      example: vertical
+      selector:
+        text:
+    swing_horizontal_mode:
+      name: Horizontal swing mode
+      description: Target climate horizontal swing mode.
+      required: false
+      example: wide
+      selector:
+        text:
+    aux_heat:
+      name: Auxiliary heat
+      description: Whether climate auxiliary heat should be enabled.
+      required: false
+      example: true
+      selector:
+        boolean:
+    mode:
+      name: Mode
+      description: Target humidifier mode such as normal, eco, away, boost, or sleep.
+      required: false
+      example: sleep
+      selector:
+        text:
+    operation_mode:
+      name: Operation mode
+      description: Target water heater operation mode such as eco or performance.
+      required: false
+      example: eco
+      selector:
+        text:
+    away_mode:
+      name: Away mode
+      description: Whether to enable water heater away mode.
+      required: false
+      example: true
+      selector:
+        boolean:
+    fan_speed:
+      name: Vacuum fan speed
+      description: Target vacuum fan speed such as balanced, turbo, or max.
+      required: false
+      example: turbo
+      selector:
+        text:
+    command:
+      name: Command
+      description: Platform-specific vacuum or remote command.
+      required: false
+      example: KEY_HOME
+      selector:
+        text:
+    params:
+      name: Vacuum command parameters
+      description: Optional parameters for vacuum.send_command.
+      required: false
+      example: '{"segments": [1, 2]}'
+      selector:
+        object:
+    cleaning_area_id:
+      name: Cleaning area IDs
+      description: Home Assistant area IDs for vacuum.clean_area.
+      required: false
+      example: '["kitchen"]'
+      selector:
+        object:
+    activity:
+      name: Remote activity
+      description: Optional remote activity for remote.turn_on or remote.toggle.
+      required: false
+      example: Watch TV
+      selector:
+        text:
+    device:
+      name: Remote device
+      description: Optional remote device name for remote.send_command.
+      required: false
+      example: Android TV
+      selector:
+        text:
+    num_repeats:
+      name: Remote repeat count
+      description: Optional number of times to repeat a remote command.
+      required: false
+      example: 1
+      selector:
+        number:
+          min: 1
+    delay_secs:
+      name: Remote delay
+      description: Optional delay in seconds between repeated remote commands.
+      required: false
+      example: 0.4
+      selector:
+        number:
+          min: 0
+          step: 0.1
+    hold_secs:
+      name: Remote hold duration
+      description: Optional hold duration in seconds for remote commands that support it.
+      required: false
+      example: 0.1
+      selector:
+        number:
+          min: 0
+          step: 0.1
+    value:
+      name: Value
+      description: Target value for number/input_number/input_text/counter helpers.
+      required: false
+      example: 42
+      selector:
+        text:
+    option:
+      name: Option
+      description: Target option for select/input_select helpers.
+      required: false
+      example: Guest
+      selector:
+        text:
+    cycle:
+      name: Cycle
+      description: Whether select/input_select next or previous actions should cycle at the end.
+      required: false
+      example: true
+      selector:
+        boolean:
+    code:
+      name: Code
+      description: Optional alarm control panel code for arm/disarm services.
+      required: false
+      example: "1234"
+      selector:
+        text:
+    message:
+      name: Message
+      description: Notification message for notify targets.
+      required: false
+      example: Front door opened
+      selector:
+        text:
+    title:
+      name: Title
+      description: Optional notification title for notify targets.
+      required: false
+      example: Security
+      selector:
+        text:
+    data:
+      name: Data
+      description: Optional notification data payload for notify targets.
+      required: false
+      example: '{"tag": "front-door"}'
+      selector:
+        object:
+    variables:
+      name: Variables
+      description: Optional script variables for script targets.
+      required: false
+      example: '{"mode": "movie"}'
+      selector:
+        object:
+    skip_condition:
+      name: Skip condition
+      description: Whether automation.trigger should skip automation conditions.
+      required: false
+      example: false
+      selector:
+        boolean:
+    datetime:
+      name: Date and time
+      description: Target input_datetime date and time value.
+      required: false
+      example: "2026-06-05 22:30:00"
+      selector:
+        text:
+    date:
+      name: Date
+      description: Target input_datetime date value.
+      required: false
+      example: "2026-06-05"
+      selector:
+        text:
+    time:
+      name: Time
+      description: Target input_datetime time value.
+      required: false
+      example: "22:30:00"
+      selector:
+        text:
+    timestamp:
+      name: Timestamp
+      description: Target input_datetime Unix timestamp.
+      required: false
+      example: 1780691400
+      selector:
+        number:
+    duration:
+      name: Duration
+      description: Optional duration for timer.start or siren.turn_on targets.
+      required: false
+      example: "00:10:00"
+      selector:
+        text:
+    update_entity:
+      name: Update entity
+      description: Whether to call homeassistant.update_entity for the target after applying the intent.
+      required: false
+      example: true
+      selector:
+        boolean:
     ttl:
       name: TTL (seconds)
       description: How long the intent should remain active before expiring.

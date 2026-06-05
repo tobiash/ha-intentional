@@ -16,10 +16,9 @@ This test is the "best" check in the v0.1.4 release-checklist
 postmortem: a 30-second test that catches the bug class that
 otherwise slips through 178 passing pytest assertions.
 
-If you can run it without homeassistant installed, the test
-will use a minimal stub for HA modules. If HA is installed, the
-test uses the real modules so the import path is identical to
-what HACS users see in production.
+This test requires homeassistant to be installed. Without it, the
+HACS path assertion would fail before it reaches the import class
+it is meant to guard.
 """
 
 from __future__ import annotations
@@ -28,6 +27,10 @@ import subprocess as sp
 import sys
 import textwrap
 from pathlib import Path
+
+import pytest
+
+pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
 REPO_ROOT = Path(__file__).parent.parent
 CUSTOM_COMPONENTS_DIR = REPO_ROOT / "custom_components"

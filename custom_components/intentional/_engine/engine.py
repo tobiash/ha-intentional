@@ -16,11 +16,13 @@ The engine's public API is small:
 - update_state(entity_id, value, field='state'): inject a state change
 - load_rules(rules): replace the rule set
 - emit_user_intent(target, set, ...): inject a manual intent
+- activate_scene_rule(rule_id, ...): force a scene rule intent
 - evaluate_all(): re-evaluate `when` clauses, emit/drop intents
 - resolve(target): get the ResolvedIntent for a target
 - list_active_intents(target): get the raw Intent list
 - tick(t_ms): advance animation timing
 - explain(target): human-readable explanation of why a target has its value
+- explain_target(target): JSON-friendly explanation for APIs and tooling
 - on_state_change(callback): subscribe to state changes
 - set_time_of_day(bucket): for `time_of_day` in expressions
 - advance_clock(ms): for tests, advance the engine's internal clock
@@ -42,7 +44,7 @@ from typing import Any
 
 from .compositor import ResolvedIntent, resolve_intents
 from .intent import Authority, Intent
-from .when_parser import WhenAST, evaluate_when, parse_when
+from .when_parser import TimeOfDay, WhenAST, evaluate_when, parse_when
 from .yaml_loader import Rule
 
 StateChangeCallback = Callable[[str, Any], None]
@@ -68,10 +70,11 @@ class Engine:
         self._rules: dict[str, _ParsedRule] = {}
         self.state: dict[str, Any] = {}
         self._active_intents: list[Intent] = []
-        self._time_of_day: str | None = None
+        self._time_of_day: str | TimeOfDay | None = None
         self._clock_fn = clock_fn or (lambda: int(time.time() * 1000))
         self._clock_offset_ms: int = 0  # for tests: advance_clock adds to this
         self._animation_started_at: dict[str, int] = {}  # rule_id → ms
+        self._condition_true_since: dict[str, int] = {}  # rule_id → ms
         self._state_change_callbacks: list[StateChangeCallback] = []
         self._log: list[str] = []  # last N log lines for diagnostics
 
@@ -85,9 +88,9 @@ class Engine:
         """Advance the engine's clock by delta_ms. For tests only."""
         self._clock_offset_ms += delta_ms
 
-    def set_time_of_day(self, bucket: str) -> None:
-        """Set the current time-of-day bucket for `time_of_day` references."""
-        self._time_of_day = bucket
+    def set_time_of_day(self, bucket: str, *, clock: str | None = None) -> None:
+        """Set the current time helper for `time_of_day` references."""
+        self._time_of_day = TimeOfDay(bucket=bucket, clock=clock)
 
     # ── State ───────────────────────────────────────────────────────
 
@@ -128,6 +131,11 @@ class Engine:
             i for i in self._active_intents
             if not i.rule_id or i.rule_id in self._rules
         ]
+        self._condition_true_since = {
+            rule_id: since
+            for rule_id, since in self._condition_true_since.items()
+            if rule_id in self._rules
+        }
 
     def add_rule(self, rule: Rule) -> None:
         """Add or replace a single rule."""
@@ -159,6 +167,29 @@ class Engine:
         self._active_intents.append(intent)
         return intent
 
+    def activate_scene_rule(
+        self,
+        rule_id: str,
+        *,
+        ttl_ms: int | None = None,
+        reason: str = "Manual activate_scene service",
+    ) -> Intent | None:
+        """Force a scene rule to fire, ignoring its when condition until TTL expiry."""
+        parsed = self._rules.get(rule_id)
+        if parsed is None or parsed.rule.scene is None:
+            return None
+        intent = Intent(
+            target="",
+            ttl_ms=parsed.rule.ttl_ms if ttl_ms is None else ttl_ms,
+            authority=Authority.USER,
+            rule_id=rule_id,
+            ignore_when=True,
+            reason=reason,
+            created_at_ms=self.now_ms(),
+        )
+        self._active_intents.append(intent)
+        return intent
+
     # ── Evaluation ─────────────────────────────────────────────────
 
     def evaluate_all(self) -> None:
@@ -171,11 +202,9 @@ class Engine:
         Also drops intents whose rules no longer exist.
         """
         now = self.now_ms()
-        # Collect currently-firing rule IDs (and which target they affect)
-        firing: dict[str, str] = {}  # rule_id → target
-        for rule_id, parsed in self._rules.items():
-            if self._eval_when(parsed.when_ast):
-                firing[rule_id] = parsed.rule.target
+        firing, _condition_firing, _blocked_by, _for_remaining = (
+            self._firing_rule_diagnostics(update_timers=True)
+        )
 
         # Filter active intents:
         # - Drop rule-bound intents whose rule is no longer firing
@@ -185,6 +214,10 @@ class Engine:
         # - Keep user/manual intents (no rule_id) until their TTL expires
         new_active: list[Intent] = []
         for intent in self._active_intents:
+            if intent.ignore_when:
+                if not intent.is_expired(into_the_future_ms=now):
+                    new_active.append(intent)
+                continue
             if not intent.rule_id:
                 # Manual user intent — keep until TTL expires
                 if not intent.is_expired(into_the_future_ms=now):
@@ -211,6 +244,42 @@ class Engine:
     def _eval_when(self, ast: WhenAST) -> bool:
         return evaluate_when(ast, self.state, time_of_day=self._time_of_day)
 
+    def _firing_rule_diagnostics(
+        self,
+        *,
+        update_timers: bool = False,
+    ) -> tuple[dict[str, str], set[str], dict[str, list[str]], dict[str, int]]:
+        """Return effective firing rules plus raw condition and blocking details."""
+        now = self.now_ms()
+        firing: dict[str, str] = {}
+        for_remaining: dict[str, int] = {}
+        for rule_id, parsed in self._rules.items():
+            if self._eval_when(parsed.when_ast):
+                since = self._condition_true_since.get(rule_id)
+                if since is None:
+                    since = now
+                    if update_timers:
+                        self._condition_true_since[rule_id] = since
+                elapsed_ms = now - since
+                remaining_ms = max(0, parsed.rule.for_ms - elapsed_ms)
+                if remaining_ms:
+                    for_remaining[rule_id] = remaining_ms
+                else:
+                    firing[rule_id] = parsed.rule.target
+            elif update_timers:
+                self._condition_true_since.pop(rule_id, None)
+        condition_firing = set(firing)
+        condition_firing.update(for_remaining)
+
+        blocked_by: dict[str, list[str]] = {}
+        for rule_id in firing:
+            for blocked_rule_id in self._rules[rule_id].rule.blocks:
+                blocked_by.setdefault(blocked_rule_id, []).append(rule_id)
+        for rule_id in blocked_by:
+            firing.pop(rule_id, None)
+
+        return firing, condition_firing, blocked_by, for_remaining
+
     def _spawn_intent_from_rule(self, rule: Rule, now: int) -> Intent:
         # Scene rules: target is empty, intent carries scene reference.
         # The integration layer discovers these via list_active_scene_intents()
@@ -235,6 +304,27 @@ class Engine:
 
     # ── Resolution ─────────────────────────────────────────────────
 
+    def rule_count(self) -> int:
+        """Return the number of loaded, parsed rules."""
+        return len(self._rules)
+
+    def list_known_targets(self) -> tuple[str, ...]:
+        """Return sorted target entity IDs referenced by loaded target rules."""
+        return tuple(sorted({
+            parsed.rule.target
+            for parsed in self._rules.values()
+            if parsed.rule.target
+        }))
+
+    def active_intent_count(self) -> int:
+        """Return the number of currently active, non-expired intents."""
+        now = self.now_ms()
+        return sum(
+            1
+            for intent in self._active_intents
+            if not intent.is_expired(into_the_future_ms=now)
+        )
+
     def list_active_intents(self, target: str) -> list[Intent]:
         """Return a copy of the active intents for a target.
 
@@ -245,6 +335,23 @@ class Engine:
             i for i in self._active_intents
             if i.target == target and not i.is_expired(into_the_future_ms=now)
         ]
+
+    def list_active_targets(self) -> tuple[str, ...]:
+        """Return sorted target entity IDs with at least one active intent."""
+        now = self.now_ms()
+        return tuple(sorted({
+            intent.target
+            for intent in self._active_intents
+            if intent.target and not intent.is_expired(into_the_future_ms=now)
+        }))
+
+    def has_active_target(self, target: str) -> bool:
+        """Return whether a target has at least one active, non-expired intent."""
+        now = self.now_ms()
+        return any(
+            intent.target == target and not intent.is_expired(into_the_future_ms=now)
+            for intent in self._active_intents
+        )
 
     def list_active_scene_intents(
         self, return_intents: bool = False
@@ -283,7 +390,33 @@ class Engine:
         intents = self.list_active_intents(target)
         if not intents:
             return None
-        return resolve_intents(target, intents, into_the_future_ms=self.now_ms())
+        resolved = resolve_intents(target, intents, into_the_future_ms=self.now_ms())
+        if resolved is None:
+            return None
+        return self._with_animation_frame(resolved)
+
+    def _with_animation_frame(self, resolved: ResolvedIntent) -> ResolvedIntent:
+        """Overlay the winning intent's current animation frame, if any."""
+        intent = resolved.winning_intent
+        if intent is None or intent.animation is None:
+            return resolved
+
+        started_at = self._animation_started_at.get(intent.rule_id)
+        if started_at is None:
+            started_at = intent.created_at_ms
+        frame = intent.animation.evaluate(max(0, self.now_ms() - started_at))
+        value = dict(resolved.value)
+        value[intent.animation.parameter] = frame.value
+        return ResolvedIntent(
+            target=resolved.target,
+            value=value,
+            winning_intent=resolved.winning_intent,
+            transition_ms=resolved.transition_ms,
+            easing=resolved.easing,
+            animation=resolved.animation,
+            ttl_remaining_ms=resolved.ttl_remaining_ms,
+            all_active_intents=resolved.all_active_intents,
+        )
 
     # ── Animation ticking ─────────────────────────────────────────
 
@@ -302,6 +435,45 @@ class Engine:
 
     # ── Diagnostics ────────────────────────────────────────────────
 
+    def explain_target(self, target: str) -> dict[str, Any]:
+        """Return a JSON-friendly explanation of a target's resolved state."""
+        resolved_obj = self.resolve(target)
+        resolved = None
+        winning_intent = None
+        if resolved_obj is not None:
+            resolved = {
+                "value": dict(resolved_obj.value),
+                "ttl_remaining_ms": resolved_obj.ttl_remaining_ms,
+            }
+            winning_intent = _intent_to_diagnostic_dict(resolved_obj.winning_intent)
+
+        active = sorted(
+            self.list_active_intents(target),
+            key=lambda intent: intent.priority,
+            reverse=True,
+        )
+        firing, condition_firing, blocked_by, for_remaining = self._firing_rule_diagnostics()
+
+        rules_for_target = []
+        for rule_id, parsed in self._rules.items():
+            if parsed.rule.target != target:
+                continue
+            rules_for_target.append({
+                "rule_id": rule_id,
+                "firing": rule_id in firing,
+                "condition_firing": rule_id in condition_firing,
+                "blocked_by": sorted(blocked_by.get(rule_id, [])),
+                "for_remaining_ms": for_remaining.get(rule_id),
+            })
+
+        return {
+            "target": target,
+            "resolved": resolved,
+            "active_intents": [_intent_to_diagnostic_dict(intent) for intent in active],
+            "winning_intent": winning_intent,
+            "rules_for_target": rules_for_target,
+        }
+
     def explain(self, target: str) -> str:
         """Return a human-readable explanation of a target's resolved value."""
         intents = self.list_active_intents(target)
@@ -318,11 +490,6 @@ class Engine:
                 ttl_info = f" (ttl: {i.ttl_ms}ms)"
             lines.append(f"    - {i.rule_id or '<manual>'}: {i.authority.value}{ttl_info} — {i.reason}")
         return "\n".join(lines)
-
-    @property
-    def log(self) -> list[str]:
-        """Last few log lines for diagnostics."""
-        return list(self._log)
 
     def explain_scenes(self) -> str:
         """Return a human-readable explanation of currently-active scene rules.
@@ -343,3 +510,30 @@ class Engine:
                 f"authority={intent.authority.value}{ttl_info} — {intent.reason}"
             )
         return "\n".join(lines)
+
+    @property
+    def log(self) -> list[str]:
+        """Last few log lines for diagnostics."""
+        return list(self._log)
+
+
+def _intent_to_diagnostic_dict(intent: Intent | None) -> dict[str, Any] | None:
+    """Serialize an intent for pure-engine diagnostics."""
+    if intent is None:
+        return None
+    return {
+        "rule_id": intent.rule_id,
+        "target": intent.target,
+        "set": dict(intent.set) if intent.set else {},
+        "cap": dict(intent.cap) if intent.cap else {},
+        "floor": dict(intent.floor) if intent.floor else {},
+        "offset": dict(intent.offset) if intent.offset else {},
+        "multiply": dict(intent.multiply) if intent.multiply else {},
+        "authority": intent.authority.value,
+        "authority_name": intent.authority.name,
+        "confidence": intent.confidence,
+        "ttl_ms": intent.ttl_ms,
+        "reason": intent.reason,
+        "created_at_ms": intent.created_at_ms,
+        "ignore_when": intent.ignore_when,
+    }

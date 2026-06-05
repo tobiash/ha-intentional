@@ -12,7 +12,7 @@ Supported syntax:
 - String literals: "on", 'off'
 - Numeric literals: 42, 3.14
 - Boolean literals: true, false
-- Time helper: time_of_day (one of: morning, afternoon, evening, night)
+- Time helper: time_of_day (bucket names or exact HH:MM clock values)
 - Parentheses for grouping
 
 This is intentionally NOT a Python expression evaluator. We parse to
@@ -49,6 +49,14 @@ class EntityRef:
 
     def __str__(self) -> str:
         return f"{self.entity_id}.{self.field}"
+
+
+@dataclass(frozen=True)
+class TimeOfDay:
+    """Current time helper value for bucket and exact clock comparisons."""
+
+    bucket: str
+    clock: str | None = None
 
 
 @dataclass(frozen=True)
@@ -312,7 +320,7 @@ def evaluate_when(
     ast: WhenAST,
     state: dict[str, Any],
     *,
-    time_of_day: str | None = None,
+    time_of_day: str | TimeOfDay | None = None,
 ) -> bool:
     """Evaluate a parsed when-AST against the given state.
 
@@ -324,8 +332,8 @@ def evaluate_when(
         Dict of {entity_field: value}, e.g. {"sensor.x.state": "on"}.
         Missing keys are treated as None.
     time_of_day
-        Current time-of-day bucket: "morning", "afternoon", "evening",
-        "night". Used when the expression references `time_of_day`.
+        Current time context. A plain string is treated as a bucket name.
+        TimeOfDay values support both bucket and exact HH:MM comparisons.
     """
     if isinstance(ast, LogicalOp):
         return _eval_logical(ast, state, time_of_day)
@@ -342,7 +350,7 @@ def evaluate_when(
 def _eval_logical(
     op: LogicalOp,
     state: dict[str, Any],
-    time_of_day: str | None,
+    time_of_day: str | TimeOfDay | None,
 ) -> bool:
     if op.op == "not":
         return not evaluate_when(op.left, state, time_of_day=time_of_day)
@@ -362,12 +370,16 @@ def _eval_logical(
 def _eval_comparison(
     comp: Comparison,
     state: dict[str, Any],
-    time_of_day: str | None,
+    time_of_day: str | TimeOfDay | None,
 ) -> bool:
     left = _resolve(comp.left, state, time_of_day) if isinstance(comp.left, EntityRef) else comp.left.value
     if comp.right is None:
         return bool(left)
     right = _resolve(comp.right, state, time_of_day) if isinstance(comp.right, EntityRef) else comp.right.value
+
+    time_comparison = _compare_time_of_day(left, right, comp.op)
+    if time_comparison is not None:
+        return time_comparison
 
     try:
         if comp.op == "==":
@@ -391,10 +403,73 @@ def _eval_comparison(
 def _resolve(
     ref: EntityRef,
     state: dict[str, Any],
-    time_of_day: str | None,
+    time_of_day: str | TimeOfDay | None,
 ) -> Any:
     """Resolve an entity reference to its current value."""
     if ref.entity_id == "__time__":
         return time_of_day
     key = f"{ref.entity_id}.{ref.field}"
     return state.get(key)
+
+
+_CLOCK_RE = re.compile(r"^(?P<hour>[0-1]?\d|2[0-3]):(?P<minute>[0-5]\d)$")
+
+
+def _compare_time_of_day(left: Any, right: Any, op: str) -> bool | None:
+    """Compare TimeOfDay values with bucket names or HH:MM strings."""
+    if isinstance(left, TimeOfDay):
+        return _compare_time_value(left, right, op)
+    if isinstance(right, TimeOfDay):
+        reversed_op = {
+            "==": "==",
+            "!=": "!=",
+            "<": ">",
+            "<=": ">=",
+            ">": "<",
+            ">=": "<=",
+        }[op]
+        return _compare_time_value(right, left, reversed_op)
+    return None
+
+
+def _compare_time_value(value: TimeOfDay, other: Any, op: str) -> bool:
+    if not isinstance(other, str):
+        return False
+
+    other_minutes = _clock_minutes(other)
+    if other_minutes is not None:
+        if value.clock is None:
+            return op == "!="
+        value_minutes = _clock_minutes(value.clock)
+        if value_minutes is None:
+            return op == "!="
+        return _compare_ordered(value_minutes, other_minutes, op)
+
+    if op == "==":
+        return value.bucket == other
+    if op == "!=":
+        return value.bucket != other
+    return False
+
+
+def _compare_ordered(left: int, right: int, op: str) -> bool:
+    if op == "==":
+        return left == right
+    if op == "!=":
+        return left != right
+    if op == "<":
+        return left < right
+    if op == "<=":
+        return left <= right
+    if op == ">":
+        return left > right
+    if op == ">=":
+        return left >= right
+    raise WhenSyntaxError(f"unknown comparison op: {op}")
+
+
+def _clock_minutes(value: str) -> int | None:
+    match = _CLOCK_RE.match(value)
+    if match is None:
+        return None
+    return int(match.group("hour")) * 60 + int(match.group("minute"))

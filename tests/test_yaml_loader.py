@@ -22,6 +22,7 @@ from intentional.yaml_loader import (
     load_rules,
     load_rules_from_string,
     parse_duration,
+    rule_dir_fingerprint,
 )
 
 # ── Duration parsing ─────────────────────────────────────────────────
@@ -177,6 +178,17 @@ class TestYAMLFeatures:
 """)
         assert rules[0].ttl_ms == 7_200_000
 
+    def test_omitted_ttl_is_unbounded(self) -> None:
+        rules = load_rules_from_string("""
+- id: without-ttl
+  when: sensor.x.state == "on"
+  emit:
+    target: light.y
+""")
+        assert rules[0].ttl_ms is None
+        assert rules[0].for_ms == 0
+        assert rules[0].transition_ms == 0
+
     def test_transition_with_duration_shorthand(self) -> None:
         rules = load_rules_from_string("""
 - id: with-transition
@@ -186,6 +198,17 @@ class TestYAMLFeatures:
     transition: 1.5s
 """)
         assert rules[0].transition_ms == 1500
+
+    def test_for_with_duration_shorthand(self) -> None:
+        rules = load_rules_from_string("""
+- id: motion-held
+  when: binary_sensor.motion == "on"
+  for: 2m
+  emit:
+    target: light.hall
+""")
+
+        assert rules[0].for_ms == 120_000
 
     def test_blocked_rules_parsed(self) -> None:
         rules = load_rules_from_string("""
@@ -238,6 +261,114 @@ class TestYAMLFeatures:
         assert rule.offset == {"brightness_pct": -10}
         assert rule.multiply == {"brightness_pct": 0.9}
         assert rule.merge is True
+
+    def test_unquoted_on_off_states_are_normalized(self) -> None:
+        rules = load_rules_from_string("""
+- id: yaml-bool-state
+  when: sensor.x.state == "on"
+  emit:
+    target: light.y
+    set: { state: on }
+- id: yaml-bool-off-state
+  when: sensor.x.state == "off"
+  emit:
+    target: light.z
+    set: { state: off }
+""")
+
+        assert rules[0].set == {"state": "on"}
+        assert rules[1].set == {"state": "off"}
+
+    def test_extends_inherits_and_merges_emit_fields(self) -> None:
+        rules = load_rules_from_string("""
+- id: living-room-default
+  when: sensor.dark == "on"
+  emit:
+    target: light.living_room
+    set: { state: on, brightness_pct: 70, color_temp_k: 2700 }
+    cap: { brightness_pct: 90 }
+    transition: 1s
+  authority: automation
+  confidence: 0.5
+  reason: "Default room lighting"
+
+- id: living-room-tv
+  extends: living-room-default
+  when: media_player.tv == "on"
+  emit:
+    set: { brightness_pct: 25 }
+    cap: { brightness_pct: 40 }
+    ttl: 10m
+  confidence: 0.9
+  reason: "TV lighting"
+""")
+
+        rule = rules[1]
+        assert rule.id == "living-room-tv"
+        assert rule.when == 'media_player.tv == "on"'
+        assert rule.target == "light.living_room"
+        assert rule.set == {
+            "state": "on",
+            "brightness_pct": 25,
+            "color_temp_k": 2700,
+        }
+        assert rule.cap == {"brightness_pct": 40}
+        assert rule.transition_ms == 1000
+        assert rule.ttl_ms == 600_000
+        assert rule.for_ms == 0
+        assert rule.confidence == 0.9
+        assert rule.reason == "TV lighting"
+
+    def test_extends_can_reference_rules_from_earlier_files(self, tmp_path: Path) -> None:
+        (tmp_path / "01-base.yaml").write_text("""
+- id: default-light
+  when: sensor.dark == "on"
+  emit:
+    target: light.office
+    set: { state: on, brightness_pct: 75 }
+""")
+        (tmp_path / "02-child.yaml").write_text("""
+- id: focus-light
+  extends: default-light
+  when: input_boolean.focus == "on"
+  emit:
+    set: { brightness_pct: 95 }
+""")
+
+        rules = load_rules(tmp_path)
+
+        assert rules[1].id == "focus-light"
+        assert rules[1].target == "light.office"
+        assert rules[1].set == {"state": "on", "brightness_pct": 95}
+
+    def test_extends_missing_parent_raises(self) -> None:
+        with pytest.raises(RuleLoadError) as exc:
+            load_rules_from_string("""
+- id: child
+  extends: missing-parent
+  when: sensor.x == "on"
+  emit:
+    target: light.x
+""")
+
+        assert "missing-parent" in str(exc.value)
+
+    def test_extends_cycle_raises(self) -> None:
+        with pytest.raises(RuleLoadError) as exc:
+            load_rules_from_string("""
+- id: a
+  extends: b
+  when: sensor.a == "on"
+  emit:
+    target: light.a
+- id: b
+  extends: a
+  when: sensor.b == "on"
+  emit:
+    target: light.b
+""")
+
+        assert "cycle" in str(exc.value).lower()
 
 
 # ── Error reporting ──────────────────────────────────────────────────
@@ -335,3 +466,41 @@ class TestFileLoading:
 """)
         with pytest.raises(RuleLoadError):
             load_rules(tmp_path)
+
+    def test_rule_dir_fingerprint_tracks_yaml_files(self, tmp_path: Path) -> None:
+        rule_file = tmp_path / "rules.yaml"
+        rule_file.write_text("""
+- id: first
+  when: sensor.x == "on"
+  emit:
+    target: light.x
+""")
+
+        before = rule_dir_fingerprint(tmp_path)
+        (tmp_path / "README.md").write_text("ignored")
+        after_ignored = rule_dir_fingerprint(tmp_path)
+        rule_file.write_text("""
+- id: first
+  when: sensor.x == "off"
+  emit:
+    target: light.x
+""")
+        after_edit = rule_dir_fingerprint(tmp_path)
+        (tmp_path / "second.yml").write_text("""
+- id: second
+  when: sensor.y == "on"
+  emit:
+    target: light.y
+""")
+        after_add = rule_dir_fingerprint(tmp_path)
+
+        assert before == after_ignored
+        assert after_edit != before
+        assert after_add != after_edit
+        assert [name for name, _mtime, _size in after_add] == [
+            "rules.yaml",
+            "second.yml",
+        ]
+
+    def test_rule_dir_fingerprint_missing_directory_is_empty(self, tmp_path: Path) -> None:
+        assert rule_dir_fingerprint(tmp_path / "missing") == ()

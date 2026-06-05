@@ -115,6 +115,10 @@ class Intent:
         Identifier of the rule that emitted this intent. Used for debugging,
         blocking relationships, and event attribution. May be empty for
         ad-hoc user intents spawned outside a rule.
+    ignore_when
+        If True, the engine keeps this intent alive until its TTL expires even
+        when the associated rule's ``when`` expression is false. Used for
+        explicit service-triggered activations such as ``activate_scene``.
     created_at_ms
         When this intent was created. Used as a deterministic tiebreaker
         when authority and confidence are equal. Set automatically; pass
@@ -135,6 +139,7 @@ class Intent:
     ttl_ms: int | None = None
     reason: str = ""
     rule_id: str = ""
+    ignore_when: bool = False
     created_at_ms: int = field(default_factory=_now_ms)
     animation: AnimationSpec | None = None
 

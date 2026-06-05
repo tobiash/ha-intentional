@@ -70,6 +70,7 @@ the real run is in CI where HA is installed.
 from __future__ import annotations
 
 import sys
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -85,7 +86,7 @@ REPO_ROOT = Path(__file__).parent.parent
 INTEGRATION_DIR = REPO_ROOT / "custom_components" / "intentional"
 sys.path.insert(0, str(INTEGRATION_DIR))
 
-from homeassistant import config_entries, setup  # noqa: E402
+from homeassistant import config_entries  # noqa: E402
 from homeassistant.config_entries import ConfigEntryState  # noqa: E402
 from homeassistant.core import HomeAssistant  # noqa: E402
 from homeassistant.data_entry_flow import FlowResultType  # noqa: E402
@@ -97,7 +98,6 @@ from custom_components.intentional.const import (  # noqa: E402
     CONF_RULE_DIR,
     DOMAIN,
 )
-
 
 # ── Fixtures ───────────────────────────────────────────────────────
 
@@ -127,18 +127,13 @@ async def auto_unload_entries(hass: HomeAssistant):
     translation cache.
     """
     yield
-    from homeassistant.config_entries import ConfigEntryState
 
     for entry in list(hass.config_entries.async_entries()):
         if entry.state is ConfigEntryState.LOADED:
-            try:
+            with suppress(Exception):
                 await hass.config_entries.async_unload(entry.entry_id)
-            except Exception:
-                pass
-    try:
+    with suppress(Exception):
         hass.config_entries.flow.async_abort_all()
-    except Exception:
-        pass
 
 
 @pytest.fixture
@@ -606,8 +601,6 @@ async def test_options_flow_uses_executor_for_io(
     the executor wrapper with a no-op or sync fallback "because it's
     faster" without realizing it reintroduces blocking-I/O.
     """
-    import asyncio
-
     # Wrap the executor to count calls
     original_executor_job = hass.async_add_executor_job
     executor_calls: list[tuple[str, tuple]] = []

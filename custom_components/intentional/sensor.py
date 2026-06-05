@@ -48,11 +48,10 @@ async def async_setup_entry(
     async_add_entities([summary])
 
     # Per-target sensors — one per known target
-    targets: set[str] = set()
-    for parsed in engine._rules.values():  # noqa: SLF001 (intentional access)
-        targets.add(parsed.rule.target)
-
-    target_entities = [IntentionalTargetSensor(hass, engine, entry, t) for t in sorted(targets)]
+    target_entities = [
+        IntentionalTargetSensor(hass, engine, entry, target)
+        for target in engine.list_known_targets()
+    ]
     async_add_entities(target_entities)
 
     # Listen for refresh events from __init__.py and call async_write_ha_state
@@ -166,14 +165,14 @@ class IntentionalSummarySensor(SensorEntity):
     @property
     def native_value(self) -> int:
         """Total number of active intents across all targets."""
-        return len(self._engine._active_intents)
+        return self._engine.active_intent_count()
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        targets = {i.target for i in self._engine._active_intents}
+        active_targets = self._engine.list_active_targets()
         return {
-            "rule_count": len(self._engine._rules),
-            "active_intent_count": len(self._engine._active_intents),
-            "target_count": len(targets),
-            "active_targets": sorted(targets),
+            "rule_count": self._engine.rule_count(),
+            "active_intent_count": self._engine.active_intent_count(),
+            "target_count": len(active_targets),
+            "active_targets": list(active_targets),
         }

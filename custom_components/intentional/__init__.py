@@ -27,8 +27,17 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
 from ._engine import Engine, RuleLoadError, load_rules
-from ._engine.intent import Authority, Intent
-from ._engine.yaml_loader import Rule
+from ._engine.ha_adapter import (
+    ServicePlanSignature,
+    emit_manual_override_for_state_drift,
+    manual_set_from_service_data,
+    scene_activation_plan,
+    service_calls_for_resolved_target,
+    service_plan_signature,
+    sync_state_object_into_engine,
+    sync_time_context_into_engine,
+)
+from ._engine.yaml_loader import Rule, RuleDirFingerprint, rule_dir_fingerprint
 from .const import (
     ATTR_TARGET,
     ATTR_TICK_INTERVAL_MS,
@@ -46,6 +55,8 @@ from .sensor import IntentionalSummarySensor, IntentionalTargetSensor
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
+MANUAL_OVERRIDE_TTL_SECONDS = 7200
+RULE_RELOAD_POLL_INTERVAL_MS = 2_000
 
 # Declaring http as a dependency tells HA to ensure hass.http is
 # available before this integration's setup runs. This is the
@@ -58,7 +69,75 @@ DEPENDENCIES = ["http"]
 FIRE_SERVICE_SCHEMA = vol.Schema(
     {
         vol.Required(ATTR_TARGET): cv.entity_id,
+        vol.Optional("state"): cv.string,
         vol.Optional("brightness_pct"): vol.All(int, vol.Range(min=0, max=100)),
+        vol.Optional("brightness"): vol.All(int, vol.Range(min=0, max=255)),
+        vol.Optional("color_temp_k"): vol.All(int, vol.Range(min=1000, max=10000)),
+        vol.Optional("color_temp_mired"): vol.All(int, vol.Range(min=50, max=500)),
+        vol.Optional("rgb_color"): vol.All([vol.All(int, vol.Range(min=0, max=255))], vol.Length(min=3, max=3)),
+        vol.Optional("rgbw_color"): vol.All([vol.All(int, vol.Range(min=0, max=255))], vol.Length(min=4, max=4)),
+        vol.Optional("rgbww_color"): vol.All([vol.All(int, vol.Range(min=0, max=255))], vol.Length(min=5, max=5)),
+        vol.Optional("hs_color"): vol.All([vol.Coerce(float)], vol.Length(min=2, max=2)),
+        vol.Optional("xy_color"): vol.All([vol.Coerce(float)], vol.Length(min=2, max=2)),
+        vol.Optional("effect"): cv.string,
+        vol.Optional("flash"): cv.string,
+        vol.Optional("volume_level"): vol.All(vol.Coerce(float), vol.Range(min=0, max=1)),
+        vol.Optional("is_volume_muted"): cv.boolean,
+        vol.Optional("tone"): cv.string,
+        vol.Optional("source"): cv.string,
+        vol.Optional("sound_mode"): cv.string,
+        vol.Optional("media_action"): cv.string,
+        vol.Optional("media_content_id"): cv.string,
+        vol.Optional("media_content_type"): cv.string,
+        vol.Optional("enqueue"): cv.string,
+        vol.Optional("announce"): cv.boolean,
+        vol.Optional("extra"): dict,
+        vol.Optional("shuffle"): cv.boolean,
+        vol.Optional("repeat"): cv.string,
+        vol.Optional("seek_position"): vol.Coerce(float),
+        vol.Optional("group_members"): vol.Any(cv.entity_ids, [cv.entity_id]),
+        vol.Optional("position"): vol.All(int, vol.Range(min=0, max=100)),
+        vol.Optional("tilt_position"): vol.All(int, vol.Range(min=0, max=100)),
+        vol.Optional("percentage"): vol.All(int, vol.Range(min=0, max=100)),
+        vol.Optional("hvac_mode"): cv.string,
+        vol.Optional("temperature"): vol.Coerce(float),
+        vol.Optional("target_temp_low"): vol.Coerce(float),
+        vol.Optional("target_temp_high"): vol.Coerce(float),
+        vol.Optional("preset_mode"): cv.string,
+        vol.Optional("fan_mode"): cv.string,
+        vol.Optional("direction"): cv.string,
+        vol.Optional("oscillating"): cv.boolean,
+        vol.Optional("humidity"): vol.All(int, vol.Range(min=0, max=100)),
+        vol.Optional("swing_mode"): cv.string,
+        vol.Optional("swing_horizontal_mode"): cv.string,
+        vol.Optional("aux_heat"): cv.boolean,
+        vol.Optional("mode"): cv.string,
+        vol.Optional("operation_mode"): cv.string,
+        vol.Optional("away_mode"): cv.boolean,
+        vol.Optional("fan_speed"): cv.string,
+        vol.Optional("command"): vol.Any(cv.string, [cv.string]),
+        vol.Optional("params"): dict,
+        vol.Optional("cleaning_area_id"): vol.Any(cv.string, [cv.string]),
+        vol.Optional("activity"): cv.string,
+        vol.Optional("device"): cv.string,
+        vol.Optional("num_repeats"): vol.All(int, vol.Range(min=1)),
+        vol.Optional("delay_secs"): vol.All(vol.Coerce(float), vol.Range(min=0)),
+        vol.Optional("hold_secs"): vol.All(vol.Coerce(float), vol.Range(min=0)),
+        vol.Optional("value"): vol.Any(vol.Coerce(float), cv.string),
+        vol.Optional("option"): cv.string,
+        vol.Optional("cycle"): cv.boolean,
+        vol.Optional("code"): cv.string,
+        vol.Optional("message"): cv.string,
+        vol.Optional("title"): cv.string,
+        vol.Optional("data"): dict,
+        vol.Optional("variables"): dict,
+        vol.Optional("skip_condition"): cv.boolean,
+        vol.Optional("datetime"): cv.string,
+        vol.Optional("date"): cv.string,
+        vol.Optional("time"): cv.string,
+        vol.Optional("timestamp"): vol.Coerce(float),
+        vol.Optional("duration"): cv.string,
+        vol.Optional("update_entity"): cv.boolean,
         vol.Optional("ttl"): vol.All(int, vol.Range(min=0, max=86400)),
     }
 )
@@ -106,18 +185,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as err:
         raise ConfigEntryNotReady(f"Failed to load rules: {err}") from err
 
-    engine.load_rules(initial_rules)
-    _LOGGER.info("Loaded %d rules from %s", len(initial_rules), rule_dir)
-
     # Copy the starter rule pack on first install (zero rules loaded).
     # This makes the integration useful out of the box — the user sees
     # the summary sensor flip to >0 intents the moment setup completes.
     if not initial_rules:
-        await _maybe_install_starter_rules(hass, rule_dir)
+        copied = await _maybe_install_starter_rules(hass, rule_dir)
+        if copied:
+            try:
+                initial_rules = await hass.async_add_executor_job(load_rules, rule_dir)
+            except RuleLoadError as err:
+                _LOGGER.error("Could not load starter rules from %s: %s", rule_dir, err)
 
-    # We don't watch the rule directory for changes — that's a v0.2
-    # polish. The `intentional.reload` service is the supported way to
-    # pick up rule edits for now.
+    engine.load_rules(initial_rules)
+    _LOGGER.info("Loaded %d rules from %s", len(initial_rules), rule_dir)
+
+    rule_fingerprint = await hass.async_add_executor_job(
+        rule_dir_fingerprint,
+        rule_dir,
+    )
+    next_rule_check_ms = engine.now_ms() + RULE_RELOAD_POLL_INTERVAL_MS
 
     # Set up platforms (sensors)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -128,6 +214,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # firing scene.turn_on on every tick. Cleared when a scene rule stops
     # firing, so the next activation re-fires.
     _active_scenes: set[str] = set()
+    # Track resolved target payloads we've already applied. The tick loop runs
+    # frequently, so identical resolved values should not produce repeated HA
+    # service calls.
+    _last_applied_targets: dict[str, ServicePlanSignature] = {}
     # Event used to signal the tick loop to stop. We use an event rather
     # than ``while True:`` + ``task.cancel()`` because cancellation only
     # takes effect at the next ``await``; if a slow ``_refresh_entities``
@@ -137,7 +227,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     stop_event = asyncio.Event()
 
     async def _tick_loop() -> None:
-        nonlocal _active_scenes
+        nonlocal _active_scenes, next_rule_check_ms, rule_fingerprint
         while not stop_event.is_set():
             # Sleep with a timeout so we can react to stop_event promptly.
             try:
@@ -147,6 +237,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             except TimeoutError:
                 pass  # normal tick interval
             # Drive the engine's evaluation cycle
+            if engine.now_ms() >= next_rule_check_ms:
+                rule_fingerprint = await _maybe_reload_rules_for_changed_files(
+                    hass,
+                    engine,
+                    rule_dir,
+                    rule_fingerprint,
+                )
+                next_rule_check_ms = engine.now_ms() + RULE_RELOAD_POLL_INTERVAL_MS
+            sync_time_context_into_engine(engine)
             _sync_state_into_engine(hass, engine)
             engine.evaluate_all()
             engine.tick(tick_interval_ms)
@@ -154,6 +253,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _active_scenes = await _activate_scene_rules(
                 hass, engine, _active_scenes
             )
+            # Apply resolved target intents to HA entities.
+            await _apply_resolved_targets(hass, engine, _last_applied_targets)
             # Push resolved values to entities
             await _refresh_entities(hass, entry)
 
@@ -166,7 +267,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(_stop_tick_loop)
 
     # Set up services
-    await _register_services(hass, engine, rule_dir, entry)
+    async def _set_rule_fingerprint(value: RuleDirFingerprint) -> None:
+        nonlocal rule_fingerprint
+        rule_fingerprint = value
+
+    await _register_services(hass, engine, rule_dir, entry, _set_rule_fingerprint)
 
     # Register HTTP API views. Guarded for test environments where the
     # http component may not be loaded (e.g. tests that don't exercise
@@ -181,7 +286,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Subscribe to state changes to keep engine in sync
     entry.async_on_unload(
-        hass.bus.async_listen("state_changed", _on_ha_state_change_factory(hass, engine))
+        hass.bus.async_listen(
+            "state_changed",
+            _on_ha_state_change_factory(hass, engine, _last_applied_targets),
+        )
     )
 
     return True
@@ -195,7 +303,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return unload_ok
 
 
-async def _maybe_install_starter_rules(hass: HomeAssistant, rule_dir: str) -> None:
+async def _maybe_install_starter_rules(hass: HomeAssistant, rule_dir: str) -> int:
     """Copy the starter rule pack to ``rule_dir`` on first install.
 
     Looks for ``starter_rules/welcome.yaml`` packaged alongside this
@@ -217,7 +325,7 @@ async def _maybe_install_starter_rules(hass: HomeAssistant, rule_dir: str) -> No
     starter_source = integration_dir / "starter_rules"
     if not starter_source.exists():
         _LOGGER.debug("No starter rule pack found at %s", starter_source)
-        return
+        return 0
 
     rule_path = Path(rule_dir)
     try:
@@ -251,8 +359,37 @@ async def _maybe_install_starter_rules(hass: HomeAssistant, rule_dir: str) -> No
                 "to see them in action.",
                 copied, rule_dir,
             )
+        return copied
     except OSError as err:
         _LOGGER.warning("Could not install starter rules: %s", err)
+        return 0
+
+
+async def _maybe_reload_rules_for_changed_files(
+    hass: HomeAssistant,
+    engine: Engine,
+    rule_dir: str,
+    previous_fingerprint: RuleDirFingerprint,
+) -> RuleDirFingerprint:
+    """Reload rules when the rule directory fingerprint changes."""
+    current_fingerprint = await hass.async_add_executor_job(
+        rule_dir_fingerprint,
+        rule_dir,
+    )
+    if current_fingerprint == previous_fingerprint:
+        return previous_fingerprint
+
+    try:
+        new_rules = await hass.async_add_executor_job(load_rules, rule_dir)
+    except RuleLoadError as err:
+        _LOGGER.error("Rule auto-reload failed: %s", err)
+        return previous_fingerprint
+
+    engine.load_rules(new_rules)
+    sync_time_context_into_engine(engine)
+    engine.evaluate_all()
+    _LOGGER.info("Auto-reloaded %d rules from %s", len(new_rules), rule_dir)
+    return current_fingerprint
 
 
 def _sync_state_into_engine(hass: HomeAssistant, engine: Engine) -> None:
@@ -265,19 +402,30 @@ def _sync_state_into_engine(hass: HomeAssistant, engine: Engine) -> None:
     # by rules. For now, we sync ALL light.* and sensor.* states —
     # cheap, since most homes have a few hundred at most.
     for state in hass.states.async_all():
-        entity_id = state.entity_id
-        engine.update_state(entity_id, state.state)
+        sync_state_object_into_engine(engine, state)
 
 
-def _on_ha_state_change_factory(hass: HomeAssistant, engine: Engine):
+def _on_ha_state_change_factory(
+    hass: HomeAssistant,
+    engine: Engine,
+    last_applied: dict[str, ServicePlanSignature] | None = None,
+):
     """Return a state_changed listener that pushes updates into the engine."""
 
     def _listener(event) -> None:
         new_state: State | None = event.data.get("new_state")
         if new_state is None:
             return
-        engine.update_state(new_state.entity_id, new_state.state)
+        sync_state_object_into_engine(engine, new_state)
+        if last_applied is not None:
+            emit_manual_override_for_state_drift(
+                engine,
+                last_applied,
+                new_state,
+                ttl_ms=MANUAL_OVERRIDE_TTL_SECONDS * 1000,
+            )
         # Re-evaluate immediately for snappy response
+        sync_time_context_into_engine(engine)
         engine.evaluate_all()
 
     return _listener
@@ -301,36 +449,20 @@ async def _activate_scene_rules(
     Transition from the rule is passed through to scene.turn_on as
     `transition`, which HA's scene service accepts.
     """
-    active = set(engine.list_active_scene_intents())
-    new_or_changed = active - already_activated
-    no_longer_active = already_activated - active
+    calls, active, no_longer_active = scene_activation_plan(engine, already_activated)
 
-    if not new_or_changed and not no_longer_active:
-        # No change — return the same set (no-op for the caller)
+    if not calls and not no_longer_active:
         return already_activated
 
-    # Build a lookup of (scene_id → intent) so we can pull transition/easing
-    scene_intent_map = {
-        scene: intent
-        for intent, scene in engine.list_active_scene_intents(return_intents=True)
-    }
-
-    for scene_id in new_or_changed:
-        intent = scene_intent_map.get(scene_id)
-        if intent is None:
-            continue
-        # Transition is in ms; HA's scene.turn_on expects seconds
-        transition_s = intent.transition_ms / 1000.0 if intent.transition_ms else None
-        service_data: dict[str, Any] = {"entity_id": scene_id}
-        if transition_s:
-            service_data["transition"] = transition_s
+    for domain, service, service_data in calls:
+        scene_id = service_data["entity_id"]
         _LOGGER.info(
-            "Activating scene %s (rule=%s, transition=%ss)",
-            scene_id, intent.rule_id, transition_s,
+            "Activating scene %s (transition=%ss)",
+            scene_id, service_data.get("transition"),
         )
         try:
             await hass.services.async_call(
-                "scene", "turn_on",
+                domain, service,
                 service_data,
                 blocking=False,
             )
@@ -344,6 +476,49 @@ async def _activate_scene_rules(
         )
 
     return active
+
+
+async def _apply_resolved_targets(
+    hass: HomeAssistant,
+    engine: Engine,
+    last_applied: dict[str, ServicePlanSignature],
+) -> None:
+    """Apply resolved target intents to HA entities via service calls."""
+    active_targets = set(engine.list_active_targets())
+    for target in sorted(active_targets):
+        resolved = engine.resolve(target)
+        if resolved is None:
+            last_applied.pop(target, None)
+            continue
+        calls = service_calls_for_resolved_target(
+            target,
+            dict(resolved.value),
+            transition_ms=resolved.transition_ms,
+        )
+        if not calls:
+            continue
+        signature = service_plan_signature(calls)
+        if last_applied.get(target) == signature:
+            continue
+        for domain, service, service_data in calls:
+            try:
+                await hass.services.async_call(
+                    domain,
+                    service,
+                    service_data,
+                    blocking=False,
+                )
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning(
+                    "Failed to apply resolved intent to %s via %s.%s: %s",
+                    target, domain, service, err,
+                )
+                break
+        else:
+            last_applied[target] = signature
+
+    for stale_target in set(last_applied) - active_targets:
+        last_applied.pop(stale_target, None)
 
 
 async def _refresh_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -361,6 +536,7 @@ async def _register_services(
     engine: Engine,
     rule_dir: str,
     entry: ConfigEntry,
+    set_rule_fingerprint,
 ) -> None:
     """Register the fire and reload services."""
 
@@ -372,10 +548,8 @@ async def _register_services(
         control from automations or scripts.
         """
         target = call.data[ATTR_TARGET]
-        set_dict: dict[str, Any] = {}
-        if "brightness_pct" in call.data:
-            set_dict["brightness_pct"] = call.data["brightness_pct"]
-        ttl_seconds = call.data.get("ttl", 7200)
+        set_dict = manual_set_from_service_data(dict(call.data))
+        ttl_seconds = call.data.get("ttl", MANUAL_OVERRIDE_TTL_SECONDS)
         ttl_ms = ttl_seconds * 1000
 
         engine.emit_user_intent(
@@ -397,35 +571,19 @@ async def _register_services(
         rule_id = call.data["rule_id"]
         ttl_override = call.data.get("ttl", 0)
 
-        parsed = engine._rules.get(rule_id)  # noqa: SLF001 (intentional access)
-        if parsed is None:
-            _LOGGER.error("No rule found with id %r", rule_id)
-            return
-        if parsed.rule.scene is None:
-            _LOGGER.error(
-                "Rule %r is not a scene rule (no `scene:` in emit)",
-                rule_id,
-            )
-            return
-
-        # Emit a user intent for this scene with the configured TTL
-        ttl_ms = ttl_override * 1000 if ttl_override else parsed.rule.ttl_ms
-        # Build an intent and append it directly (bypasses when evaluation)
-        intent = Intent(
-            target="",  # marks this as a scene intent
-            ttl_ms=ttl_ms,
-            authority=Authority.USER,
-            rule_id=rule_id,
-            reason="Manual activate_scene service",
-            created_at_ms=engine.now_ms(),
+        intent = engine.activate_scene_rule(
+            rule_id,
+            ttl_ms=ttl_override * 1000 if ttl_override else None,
         )
-        engine._active_intents.append(intent)  # noqa: SLF001 (intentional access)
+        if intent is None:
+            _LOGGER.error("No scene rule found with id %r", rule_id)
+            return
         # Re-evaluate so the activation path picks it up
         engine.evaluate_all()
         await _refresh_entities(hass, entry)
         _LOGGER.info(
-            "Scene rule %r activated manually (scene=%s, ttl=%sms)",
-            rule_id, parsed.rule.scene, ttl_ms,
+            "Scene rule %r activated manually (ttl=%sms)",
+            rule_id, intent.ttl_ms,
         )
 
     async def _reload_service(_call: ServiceCall) -> None:
@@ -440,7 +598,11 @@ async def _register_services(
             _LOGGER.error("Rule reload failed: %s", err)
             return
         engine.load_rules(new_rules)
+        sync_time_context_into_engine(engine)
         engine.evaluate_all()
+        await set_rule_fingerprint(
+            await hass.async_add_executor_job(rule_dir_fingerprint, rule_dir)
+        )
         await _refresh_entities(hass, entry)
 
     hass.services.async_register(DOMAIN, SERVICE_FIRE, _fire_service, schema=FIRE_SERVICE_SCHEMA)

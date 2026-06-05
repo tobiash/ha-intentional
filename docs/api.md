@@ -126,7 +126,7 @@ Engine state snapshot: all active intents grouped by target, with the resolved v
         "floor": {},
         "offset": {},
         "multiply": {},
-        "authority": 100,
+        "authority": "user",
         "authority_name": "USER",
         "confidence": 100,
         "ttl_ms": 7200000,
@@ -161,14 +161,14 @@ Detailed explanation of why a target is in its current state. Useful for debuggi
   "active_intents": [
     {
       "rule_id": "movie-button",
-      "authority": 100,
+      "authority": "user",
       "authority_name": "USER",
       "reason": "manual override",
       "set": {"brightness_pct": 30}
     },
     {
       "rule_id": "energy-cap",
-      "authority": 50,
+      "authority": "automation",
       "authority_name": "AUTOMATION",
       "reason": "evening energy cap",
       "cap": {"brightness_pct": 50}
@@ -176,13 +176,26 @@ Detailed explanation of why a target is in its current state. Useful for debuggi
   ],
   "winning_intent": { ... },
   "rules_for_target": [
-    {"rule_id": "movie-button", "firing": true},
-    {"rule_id": "energy-cap", "firing": true}
+    {
+      "rule_id": "movie-button",
+      "firing": true,
+      "condition_firing": true,
+      "blocked_by": [],
+      "for_remaining_ms": null
+    },
+    {
+      "rule_id": "energy-cap",
+      "firing": true,
+      "condition_firing": true,
+      "blocked_by": [],
+      "for_remaining_ms": null
+    }
   ]
 }
 ```
 
 The `winning_intent` is the highest-priority active intent — that's the rule whose `set:` block determined the final value. The `cap:` from the lower-priority rule still applied (as a modifier), which is why the final value is 30 (the manual set) even though the cap is 50.
+For each rule, `condition_firing` reports whether the `when` expression matched before `for:` dwell timing and `blocks:` suppression; `firing` reports whether the rule is effective after both. `for_remaining_ms` is the remaining dwell time before a matching rule becomes effective, or `null` when no dwell wait is pending.
 
 ## Error format
 

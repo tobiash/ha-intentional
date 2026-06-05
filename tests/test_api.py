@@ -33,7 +33,9 @@ you can do it manually:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -99,6 +101,47 @@ def test_explain_view_supports_target_param() -> None:
     assert hasattr(IntentionalExplainView, "get")
 
 
+async def test_explain_view_reports_rule_firing_status() -> None:
+    from custom_components.intentional._engine import Engine
+    from custom_components.intentional._engine.yaml_loader import Rule
+    from custom_components.intentional.api import IntentionalExplainView
+    from custom_components.intentional.const import CONF_RULE_DIR, DOMAIN
+
+    engine = Engine(clock_fn=lambda: 1000)
+    engine.load_rules([
+        Rule(
+            id="rule-on",
+            when="input_boolean.test == 'on'",
+            target="light.test",
+            set={"state": "on"},
+        )
+    ])
+    engine.update_state("input_boolean.test", "on")
+    engine.evaluate_all()
+
+    entry = SimpleNamespace(entry_id="entry-1", data={CONF_RULE_DIR: "/tmp/rules"})
+    hass = SimpleNamespace(
+        config_entries=SimpleNamespace(async_entries=lambda domain: [entry]),
+        data={DOMAIN: {"entry-1": engine}},
+    )
+    request = SimpleNamespace(app={"hass": hass})
+
+    response = await IntentionalExplainView().get(request, "light.test")
+    body = json.loads(response.body.decode())
+
+    assert response.status == 200
+    assert body["target"] == "light.test"
+    assert body["rules_for_target"] == [
+        {
+            "rule_id": "rule-on",
+            "firing": True,
+            "condition_firing": True,
+            "blocked_by": [],
+            "for_remaining_ms": None,
+        },
+    ]
+
+
 def test_all_views_require_auth() -> None:
     """All API views must require authentication."""
     from custom_components.intentional.api import (
@@ -153,63 +196,6 @@ def test_error_custom_status() -> None:
     for status in [400, 404, 500, 503]:
         resp = _error("test", "test_code", status)
         assert resp.status == status
-
-
-# ── Intent serialization ───────────────────────────────────────────
-
-
-def test_intent_to_dict_basic() -> None:
-    from custom_components.intentional._engine.intent import Authority, Intent
-    from custom_components.intentional.api import _intent_to_dict
-
-    intent = Intent(
-        target="light.x",
-        set={"brightness_pct": 50},
-        rule_id="r1",
-        authority=Authority.AUTOMATION,
-        confidence=80,
-        reason="test reason",
-        created_at_ms=1000,
-        ttl_ms=5000,
-    )
-    d = _intent_to_dict(intent)
-    assert d["target"] == "light.x"
-    assert d["set"] == {"brightness_pct": 50}
-    assert d["rule_id"] == "r1"
-    # ``authority`` is the enum's string value (e.g. "automation"). The
-    # numeric priority used for comparison lives in ``value_index`` on
-    # the enum; the API exposes the string form because it's stable across
-    # version changes to the priority table and is human-readable.
-    assert d["authority"] == "automation"
-    assert d["authority_name"] == "AUTOMATION"
-    assert d["confidence"] == 80
-    assert d["reason"] == "test reason"
-    assert d["created_at_ms"] == 1000
-    assert d["ttl_ms"] == 5000
-
-
-def test_intent_to_dict_with_modifiers() -> None:
-    from custom_components.intentional._engine.intent import Authority, Intent
-    from custom_components.intentional.api import _intent_to_dict
-
-    intent = Intent(
-        target="light.x",
-        set={"brightness_pct": 50},
-        cap={"brightness_pct": 80},
-        floor={"brightness_pct": 20},
-        offset={"color_temp_k": 200},
-        multiply={"brightness_pct": 0.5},
-        rule_id="r1",
-        authority=Authority.AUTOMATION,
-        confidence=80,
-        reason="",
-        created_at_ms=0,
-    )
-    d = _intent_to_dict(intent)
-    assert d["cap"] == {"brightness_pct": 80}
-    assert d["floor"] == {"brightness_pct": 20}
-    assert d["offset"] == {"color_temp_k": 200}
-    assert d["multiply"] == {"brightness_pct": 0.5}
 
 
 # ── Register API ────────────────────────────────────────────────────
