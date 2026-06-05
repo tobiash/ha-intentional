@@ -390,6 +390,114 @@
           "required": false,
           "selector": { "object": {} }
         },
+        "service": {
+          "name": "Service",
+          "description": "Optional service override for service-style action targets.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "service_data": {
+          "name": "Service data",
+          "description": "Additional service data for browser_mod, telegram_bot, tts, or other service-style action targets.",
+          "required": false,
+          "selector": { "object": {} }
+        },
+        "media_player_entity_id": {
+          "name": "Media player entity ID",
+          "description": "Media player entity for tts.speak or tts.cloud_say.",
+          "required": false,
+          "selector": { "entity": {} }
+        },
+        "cache": {
+          "name": "Cache",
+          "description": "Whether TTS output should be cached where supported.",
+          "required": false,
+          "selector": { "boolean": {} }
+        },
+        "language": {
+          "name": "Language",
+          "description": "Optional TTS language code.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "options": {
+          "name": "Options",
+          "description": "Optional TTS provider options.",
+          "required": false,
+          "selector": { "object": {} }
+        },
+        "browser_id": {
+          "name": "Browser ID",
+          "description": "Browser Mod target browser ID or IDs.",
+          "required": false,
+          "selector": { "object": {} }
+        },
+        "user_id": {
+          "name": "User ID",
+          "description": "Browser Mod target user ID or IDs.",
+          "required": false,
+          "selector": { "object": {} }
+        },
+        "path": {
+          "name": "Path",
+          "description": "Browser Mod navigation path.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "action_text": {
+          "name": "Action text",
+          "description": "Browser Mod notification action button text.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "action": {
+          "name": "Action",
+          "description": "Browser Mod notification action payload.",
+          "required": false,
+          "selector": { "object": {} }
+        },
+        "parse_mode": {
+          "name": "Parse mode",
+          "description": "Telegram parse mode such as html, markdown, markdownv2, or plain_text.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "disable_notification": {
+          "name": "Disable notification",
+          "description": "Whether Telegram should send the message silently.",
+          "required": false,
+          "selector": { "boolean": {} }
+        },
+        "disable_web_page_preview": {
+          "name": "Disable web page preview",
+          "description": "Whether Telegram should disable link previews.",
+          "required": false,
+          "selector": { "boolean": {} }
+        },
+        "keyboard": {
+          "name": "Keyboard",
+          "description": "Optional Telegram custom keyboard.",
+          "required": false,
+          "selector": { "object": {} }
+        },
+        "inline_keyboard": {
+          "name": "Inline keyboard",
+          "description": "Optional Telegram inline keyboard.",
+          "required": false,
+          "selector": { "object": {} }
+        },
+        "message_tag": {
+          "name": "Message tag",
+          "description": "Optional Telegram message tag for later edits.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "chat_id": {
+          "name": "Chat ID",
+          "description": "Optional Telegram chat ID or IDs.",
+          "required": false,
+          "selector": { "object": {} }
+        },
         "todo_action": {
           "name": "To-do action",
           "description": "Optional todo action such as add_item, update_item, remove_item, clear_completed, or get_items.",

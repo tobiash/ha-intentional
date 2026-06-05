@@ -74,6 +74,24 @@ MANUAL_SET_FIELDS = (
     "message",
     "title",
     "data",
+    "service",
+    "service_data",
+    "media_player_entity_id",
+    "cache",
+    "language",
+    "options",
+    "browser_id",
+    "user_id",
+    "path",
+    "action_text",
+    "action",
+    "parse_mode",
+    "disable_notification",
+    "disable_web_page_preview",
+    "keyboard",
+    "inline_keyboard",
+    "message_tag",
+    "chat_id",
     "todo_action",
     "item",
     "rename",
@@ -254,6 +272,29 @@ MEDIA_PLAYER_ACTION_SERVICES = {
     "media_seek": "media_seek",
     "join": "join",
 }
+ACTION_SERVICE_FIELDS = frozenset({
+    "message",
+    "title",
+    "data",
+    "media_player_entity_id",
+    "cache",
+    "language",
+    "options",
+    "browser_id",
+    "user_id",
+    "path",
+    "action_text",
+    "action",
+    "parse_mode",
+    "disable_notification",
+    "disable_web_page_preview",
+    "keyboard",
+    "inline_keyboard",
+    "message_tag",
+    "chat_id",
+    "duration",
+})
+TTS_SERVICE_TARGETS = frozenset({"speak", "cloud_say", "clear_cache"})
 
 
 def manual_set_from_service_data(data: dict[str, Any]) -> dict[str, Any]:
@@ -1001,6 +1042,27 @@ def _service_calls_without_update_entity(
             notify_data["data"] = value["data"]
         return ((domain, _object_id, notify_data),)
 
+    if domain == "browser_mod":
+        service = str(value.get("service", state or _object_id))
+        data = _action_service_data(value)
+        return ((domain, service, data),)
+
+    if domain == "telegram_bot":
+        service = str(value.get("service", state or _object_id))
+        data = _action_service_data(value)
+        return ((domain, service, data),)
+
+    if domain == "tts":
+        service = str(value.get("service", state or "speak"))
+        if _object_id in TTS_SERVICE_TARGETS and "service" not in value and state is None:
+            service = _object_id
+        data = _action_service_data(value)
+        if service == "speak":
+            data["entity_id"] = target
+        elif service == "cloud_say" and "media_player_entity_id" in data:
+            data["entity_id"] = data.pop("media_player_entity_id")
+        return ((domain, service, data),)
+
     if domain == "button":
         return ((domain, "press", service_data),)
 
@@ -1041,6 +1103,15 @@ def _service_calls_without_update_entity(
         return ((domain, service, data),)
 
     return ()
+
+
+def _action_service_data(value: dict[str, Any]) -> dict[str, Any]:
+    """Return data for service-style action targets."""
+    data = dict(value.get("service_data") or {})
+    for field in ACTION_SERVICE_FIELDS:
+        if field in value:
+            data[field] = value[field]
+    return data
 
 
 def scene_activation_plan(
@@ -1173,7 +1244,16 @@ def _service_plan_matches_state(plan: ServicePlanSignature, state: Any) -> bool:
 
 def _expected_states_for_service(domain: str, service: str) -> set[str] | None:
     """Return the HA states implied by a service call, when there are any."""
-    if domain in {"button", "input_button", "notify", "scene", "siren"}:
+    if domain in {
+        "button",
+        "input_button",
+        "notify",
+        "browser_mod",
+        "telegram_bot",
+        "tts",
+        "scene",
+        "siren",
+    }:
         return None
     if domain == "script" and service == "turn_on":
         return None

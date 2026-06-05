@@ -130,13 +130,15 @@ The integration currently supports:
 | `select.*`, `input_select.*` | `select_option`, `select_next`, `select_previous`; `input_select` also supports `select_first`, `select_last` |
 | `text.*`, `input_text.*` | `set_value`                                  |
 | `todo.*`       | `add_item`, `update_item`, `remove_item`, `remove_completed_items`, `get_items` |
-| `input_text.*`  | `set_value`                                            |
 | `input_datetime.*` | `set_datetime`                                     |
 | `lock.*`        | `lock`, `unlock`                                       |
 | `alarm_control_panel.*` | `alarm_arm_home`, `alarm_arm_away`, `alarm_arm_night`, `alarm_arm_vacation`, `alarm_arm_custom_bypass`, `alarm_disarm` |
 | `valve.*`       | `open_valve`, `close_valve`, `stop_valve`, `set_valve_position`, `toggle` |
 | `siren.*`       | `turn_on`, `turn_off`, `toggle`                        |
 | `notify.*`      | calls the matching notify service                      |
+| `browser_mod.*` | calls the matching Browser Mod service                 |
+| `telegram_bot.*` | calls the matching Telegram Bot service               |
+| `tts.*`         | `tts.speak`, `tts.cloud_say`, `tts.clear_cache`         |
 | `button.*`      | `button.press`                                         |
 | `input_button.*` | `input_button.press`                                  |
 | `scene.*`       | `scene.turn_on`                                        |
@@ -198,7 +200,13 @@ Alarm panels support `state` values
 service plans are de-duplicated so the 100ms engine tick does not repeatedly
 call the same HA service. Notify targets use `target: notify.service_name` and
 support `message`, optional `title`, and optional `data`; `state` can be used
-as a shorthand for `message`. Button, scene, script, and automation targets are
+as a shorthand for `message`. Browser Mod targets use the target object as the
+service name, for example `target: browser_mod.notification`; use
+`service_data` for less common Browser Mod fields. Telegram Bot targets work the
+same way, for example `target: telegram_bot.send_message`. TTS provider targets
+such as `target: tts.google_ai_tts` call `tts.speak`; `target: tts.cloud_say`
+calls `tts.cloud_say`.
+Button, scene, script, and automation targets are
 treated as fire-and-forget action targets: once a resolved service plan is
 called, normal HA state settling does not re-trigger the action while the same
 intent remains active. Script targets support optional `variables`. Automation
@@ -389,7 +397,11 @@ payloads: `state`, `brightness_pct`, `brightness`, `color_temp_k`,
 `preset_mode`, `fan_mode`, `direction`, `oscillating`, `value`, `option`, `cycle`,
 `humidity`, `swing_mode`, `swing_horizontal_mode`, `aux_heat`, `code`,
 `message`, `title`,
-`data`, `todo_action`, `item`, `rename`, `status`, `due_date`, `due_datetime`,
+`data`, `service`, `service_data`, `media_player_entity_id`, `cache`,
+`language`, `options`, `browser_id`, `user_id`, `path`, `action_text`, `action`,
+`parse_mode`, `disable_notification`, `disable_web_page_preview`, `keyboard`,
+`inline_keyboard`, `message_tag`, `chat_id`, `todo_action`, `item`, `rename`,
+`status`, `due_date`, `due_datetime`,
 `description`, `variables`, `skip_condition`, `datetime`, `date`, `time`,
 `timestamp`, `duration`, `humidity`, `mode`, `operation_mode`, `away_mode`,
 `fan_speed`, `command`, `params`, `cleaning_area_id`, `activity`, `device`,

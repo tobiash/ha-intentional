@@ -106,6 +106,24 @@ def test_manual_set_from_service_data_supports_helper_fields() -> None:
         "message": "Door opened",
         "title": "Front door",
         "data": {"tag": "door"},
+        "service": "notification",
+        "service_data": {"browser_id": ["office"]},
+        "media_player_entity_id": "media_player.office",
+        "cache": True,
+        "language": "de",
+        "options": {"voice": "default"},
+        "browser_id": ["office"],
+        "user_id": ["person.tobias"],
+        "path": "/lovelace/office",
+        "action_text": "Open",
+        "action": {"action": "navigate", "navigation_path": "/lovelace/office"},
+        "parse_mode": "html",
+        "disable_notification": False,
+        "disable_web_page_preview": True,
+        "keyboard": ["/ack"],
+        "inline_keyboard": [["Acknowledge:/ack"]],
+        "message_tag": "front-door",
+        "chat_id": "12345",
         "todo_action": "add_item",
         "item": "Buy filters",
         "rename": "Buy HVAC filters",
@@ -153,6 +171,24 @@ def test_manual_set_from_service_data_supports_helper_fields() -> None:
         "message": "Door opened",
         "title": "Front door",
         "data": {"tag": "door"},
+        "service": "notification",
+        "service_data": {"browser_id": ["office"]},
+        "media_player_entity_id": "media_player.office",
+        "cache": True,
+        "language": "de",
+        "options": {"voice": "default"},
+        "browser_id": ["office"],
+        "user_id": ["person.tobias"],
+        "path": "/lovelace/office",
+        "action_text": "Open",
+        "action": {"action": "navigate", "navigation_path": "/lovelace/office"},
+        "parse_mode": "html",
+        "disable_notification": False,
+        "disable_web_page_preview": True,
+        "keyboard": ["/ack"],
+        "inline_keyboard": [["Acknowledge:/ack"]],
+        "message_tag": "front-door",
+        "chat_id": "12345",
         "todo_action": "add_item",
         "item": "Buy filters",
         "rename": "Buy HVAC filters",
@@ -2017,6 +2053,127 @@ def test_notify_target_maps_to_notify_service() -> None:
                 "message": "Front door opened",
                 "title": "Security",
                 "data": {"tag": "front-door"},
+            },
+        ),
+    )
+
+
+def test_browser_mod_target_maps_to_named_service() -> None:
+    from intentional.ha_adapter import service_calls_for_resolved_target
+
+    assert service_calls_for_resolved_target(
+        "browser_mod.notification",
+        {
+            "message": "Doorbell",
+            "browser_id": ["office-dashboard"],
+            "duration": 5000,
+            "action_text": "Open camera",
+            "action": {"action": "navigate", "navigation_path": "/lovelace/cameras"},
+        },
+    ) == (
+        (
+            "browser_mod",
+            "notification",
+            {
+                "message": "Doorbell",
+                "browser_id": ["office-dashboard"],
+                "duration": 5000,
+                "action_text": "Open camera",
+                "action": {
+                    "action": "navigate",
+                    "navigation_path": "/lovelace/cameras",
+                },
+            },
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "browser_mod.navigate",
+        {"path": "/lovelace/office", "service_data": {"browser_id": ["office"]}},
+    ) == (
+        (
+            "browser_mod",
+            "navigate",
+            {"browser_id": ["office"], "path": "/lovelace/office"},
+        ),
+    )
+
+
+def test_telegram_bot_target_maps_to_named_service() -> None:
+    from intentional.ha_adapter import service_calls_for_resolved_target
+
+    assert service_calls_for_resolved_target(
+        "telegram_bot.send_message",
+        {
+            "message": "Door opened",
+            "title": "Security",
+            "parse_mode": "html",
+            "disable_notification": False,
+            "disable_web_page_preview": True,
+            "keyboard": ["/ack"],
+            "inline_keyboard": [["Acknowledge:/ack"]],
+            "message_tag": "front-door",
+            "chat_id": "12345",
+        },
+    ) == (
+        (
+            "telegram_bot",
+            "send_message",
+            {
+                "message": "Door opened",
+                "title": "Security",
+                "parse_mode": "html",
+                "disable_notification": False,
+                "disable_web_page_preview": True,
+                "keyboard": ["/ack"],
+                "inline_keyboard": [["Acknowledge:/ack"]],
+                "message_tag": "front-door",
+                "chat_id": "12345",
+            },
+        ),
+    )
+
+
+def test_tts_target_maps_to_speak_and_cloud_say_services() -> None:
+    from intentional.ha_adapter import service_calls_for_resolved_target
+
+    assert service_calls_for_resolved_target(
+        "tts.google_ai_tts",
+        {
+            "message": "Front door",
+            "media_player_entity_id": "media_player.office",
+            "cache": True,
+            "language": "de",
+            "options": {"voice": "default"},
+        },
+    ) == (
+        (
+            "tts",
+            "speak",
+            {
+                "entity_id": "tts.google_ai_tts",
+                "message": "Front door",
+                "media_player_entity_id": "media_player.office",
+                "cache": True,
+                "language": "de",
+                "options": {"voice": "default"},
+            },
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "tts.cloud_say",
+        {
+            "message": "Front door",
+            "media_player_entity_id": "media_player.office",
+            "cache": False,
+        },
+    ) == (
+        (
+            "tts",
+            "cloud_say",
+            {
+                "entity_id": "media_player.office",
+                "message": "Front door",
+                "cache": False,
             },
         ),
     )

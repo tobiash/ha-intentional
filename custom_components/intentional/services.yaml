@@ -477,6 +477,132 @@ fire:
       example: '{"tag": "front-door"}'
       selector:
         object:
+    service:
+      name: Service
+      description: Optional service override for service-style action targets.
+      required: false
+      example: notification
+      selector:
+        text:
+    service_data:
+      name: Service data
+      description: Additional service data for browser_mod, telegram_bot, tts, or other service-style action targets.
+      required: false
+      example: '{"browser_id": ["office-dashboard"]}'
+      selector:
+        object:
+    media_player_entity_id:
+      name: Media player entity ID
+      description: Media player entity for tts.speak or tts.cloud_say.
+      required: false
+      example: media_player.office
+      selector:
+        entity:
+    cache:
+      name: Cache
+      description: Whether TTS output should be cached where supported.
+      required: false
+      example: true
+      selector:
+        boolean:
+    language:
+      name: Language
+      description: Optional TTS language code.
+      required: false
+      example: de
+      selector:
+        text:
+    options:
+      name: Options
+      description: Optional TTS provider options.
+      required: false
+      example: '{"voice": "default"}'
+      selector:
+        object:
+    browser_id:
+      name: Browser ID
+      description: Browser Mod target browser ID or IDs.
+      required: false
+      example: office-dashboard
+      selector:
+        object:
+    user_id:
+      name: User ID
+      description: Browser Mod target user ID or IDs.
+      required: false
+      example: person.tobias
+      selector:
+        object:
+    path:
+      name: Path
+      description: Browser Mod navigation path.
+      required: false
+      example: /lovelace/office
+      selector:
+        text:
+    action_text:
+      name: Action text
+      description: Browser Mod notification action button text.
+      required: false
+      example: Open camera
+      selector:
+        text:
+    action:
+      name: Action
+      description: Browser Mod notification action payload.
+      required: false
+      example: '{"action": "navigate", "navigation_path": "/lovelace/cameras"}'
+      selector:
+        object:
+    parse_mode:
+      name: Parse mode
+      description: Telegram parse mode such as html, markdown, markdownv2, or plain_text.
+      required: false
+      example: html
+      selector:
+        text:
+    disable_notification:
+      name: Disable notification
+      description: Whether Telegram should send the message silently.
+      required: false
+      example: false
+      selector:
+        boolean:
+    disable_web_page_preview:
+      name: Disable web page preview
+      description: Whether Telegram should disable link previews.
+      required: false
+      example: true
+      selector:
+        boolean:
+    keyboard:
+      name: Keyboard
+      description: Optional Telegram custom keyboard.
+      required: false
+      example: '["/ack"]'
+      selector:
+        object:
+    inline_keyboard:
+      name: Inline keyboard
+      description: Optional Telegram inline keyboard.
+      required: false
+      example: '[["Acknowledge:/ack"]]'
+      selector:
+        object:
+    message_tag:
+      name: Message tag
+      description: Optional Telegram message tag for later edits.
+      required: false
+      example: front-door
+      selector:
+        text:
+    chat_id:
+      name: Chat ID
+      description: Optional Telegram chat ID or IDs.
+      required: false
+      example: "12345"
+      selector:
+        object:
     todo_action:
       name: To-do action
       description: Optional todo action such as add_item, update_item, remove_item, clear_completed, or get_items.
