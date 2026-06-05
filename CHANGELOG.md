@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-06-05
+
+### Fixed
+- **CI workflow now stable** — 17 commits hardening `ci/test.yml` against the Home Assistant test harness
+  - Integration tests no longer hang on `async_block_till_done` (tick loop now respects a stop event; autouse fixture unloads entries)
+  - `register_api` is guarded so it doesn't blow up in test environments
+  - `conftest.py` adds `custom_components/intentional/` to `sys.path` (in addition to `src/`) so the integration is loadable as `custom_components.intentional.*`
+  - Integration tests skip cleanly when `homeassistant` isn't installed, instead of erroring
+  - `[all-tests]` extra includes `[dev]` deps (ruff) so lint and tests can share a single `pip install`
+  - `pytest-homeassistant-custom-component` is allowed to pin its own HA version
+  - API tests use `hass_client_no_auth` to exercise the auth requirement
+  - Lint cleanup: import order, unused imports
+- **Bundle sync drift** — `src/intentional/` and the bundled `_engine/` are now cross-checked by `ci/check-bundle-sync.py` in CI, not just locally
+- **CI runs in ~2 minutes** for future PRs (down from the 5-minute initial run that included a full HA install)
+
+### Notes
+- No changes to integration code, the engine, the API, the config flow, or the rule format. Users on v0.3.0 will see no functional difference — this release exists to keep the released tag aligned with a green-CI `main`. Per the v0.1.1 lesson, manifest version must match the git tag or HACS strict-mode refuses to load the integration.
+
 ## [0.3.0] - 2026-06-04
 
 ### Added

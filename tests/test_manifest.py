@@ -57,11 +57,21 @@ def _latest_semver_tag() -> str | None:
 
 
 def test_manifest_version_matches_latest_release() -> None:
-    """manifest.json's version field must match the latest semver tag.
+    """manifest.json's version field must be at or above the latest semver tag.
 
     Catches the v0.1.0 / v0.1.1 mismatch that caused HACS strict-mode
     to refuse loading the integration and HA's config flow to fail
     with 'Invalid handler specified'.
+
+    Invariant: ``manifest_version >= latest_tag``.
+
+    - If manifest < latest_tag: someone released a tag without bumping
+      the manifest first (the v0.1.1 bug). Test fails.
+    - If manifest == latest_tag: everything is in sync. Test passes.
+    - If manifest > latest_tag: a release is in progress (manifest
+      bumped, tag not yet cut). This is the normal "bump then tag"
+      workflow — test passes. The tag MUST be cut before the next
+      release, otherwise HACS will load the wrong version.
     """
     manifest = _read_manifest()
     latest_tag = _latest_semver_tag()
@@ -72,11 +82,24 @@ def test_manifest_version_matches_latest_release() -> None:
 
         pytest.skip("No semver git tags found — skipping version cross-check")
 
-    assert manifest["version"] == latest_tag, (
+    manifest_v = _semver_tuple(manifest["version"])
+    tag_v = _semver_tuple(latest_tag)
+    assert manifest_v >= tag_v, (
         f"manifest.json version is {manifest['version']!r} but the latest "
-        f"git tag is {latest_tag!r}. Bump manifest.json to match before "
-        f"cutting a release, or HACS will refuse to load the integration."
+        f"git tag is {latest_tag!r}. The manifest is BEHIND the latest "
+        f"tag — this is the v0.1.1 bug. Bump manifest.json to match the "
+        f"latest tag, or HACS will refuse to load the integration."
     )
+
+
+def _semver_tuple(version: str) -> tuple[int, int, int]:
+    """Parse a strict 'MAJOR.MINOR.PATCH' string into a comparable tuple."""
+    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+    if not m:
+        # test_manifest_version_is_semver is the canonical guard for this;
+        # if we're here it's because that test is broken, so don't double-fail.
+        return (0, 0, 0)
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
 
 
 def test_manifest_domain_matches_integration() -> None:
