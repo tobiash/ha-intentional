@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-06-05
+
+### Fixed
+- **`rule_files.py` used a bare `from _engine import ...` instead of a relative `from ._engine import ...`** — this is the v0.1.4 bug class (HACS install pattern). The bare import only resolved when the integration's own directory was on `sys.path` (true for our local tests because the conftest added it; not true for HACS user installs). Result: HACS users got `Platform intentional.config_flow not found` on the just-released v0.3.1, exactly the v0.1.4 "Invalid handler specified" failure mode.
+
+### Added
+- **`tests/test_hacs_load.py`** — a smoke-load test that runs the integration import in a fresh subprocess with only `custom_components/` on `sys.path` (the actual HACS contract). This is the test that would have caught the v0.3.1 bug. Uses a subprocess because the HA test harness caches integration state in module namespaces that survives in-process cleanup.
+- **`test_no_bare_engine_imports_in_integration`** — a static check that fails the build if any integration module imports `_engine` as a top-level package. Complements the existing `test_no_absolute_intentional_imports_in_integration` (which only caught `from intentional.X`, not `from _engine`).
+- **Conftest.py comment** updated to document the sys.path entry that's necessary for the HA test harness but masks the v0.3.1 bug class — and pointing future maintainers at the new smoke-load test that compensates for it.
+
+### Notes
+- This is a hotfix release. v0.3.1 was broken for all HACS users on install; v0.3.2 is identical to v0.3.1 except for the `rule_files.py` import fix. No integration code changes.
+- CI is green: 244/244 tests pass locally (was 242 before this fix; +1 for the smoke-load test, +1 for the bare-import check). The new tests run as part of the unit test step in `ci/test.yml` — no workflow changes needed.
+- The full test suite (244 tests) now passes in 6.7s locally, which is a bonus — the v0.3.1 baseline had pre-existing test isolation issues in `test_integration.py` that were hidden by CI's split test execution. The subprocess-based smoke-load test also fixed those.
+
 ## [0.3.1] - 2026-06-05
 
 ### Fixed

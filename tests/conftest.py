@@ -46,16 +46,24 @@ if str(SRC_DIR) not in sys.path:
 #
 #   1. ``custom_components/`` so ``from custom_components.intentional.X``
 #      resolves correctly (used by test_api.py, test_integration.py).
-#   2. ``custom_components/intentional/`` itself, because some integration
-#      modules use BARE absolute imports (e.g. ``from _engine import ...``)
-#      that need ``_engine`` to be a top-level package. The integration's
-#      own dir must be on sys.path for that to work — that's how HA's
-#      loader sets things up in production too.
+#   2. ``custom_components/intentional/`` itself, because the HA test
+#      harness (``pytest-homeassistant-custom-component``) needs the
+#      integration to be importable both as ``custom_components.intentional``
+#      AND as if it were a top-level integration. Adding the integration
+#      dir lets the test harness discover it the way HA does on the
+#      user side.
 #
-# We use ``append`` (not insert at 0) so neither entry shadows the engine
-# ``intentional`` package. Position doesn't matter for the integration
-# tests because they use the fully-qualified name and bare _engine imports
-# are unambiguous.
+# WARNING: This sys.path entry is what hid the v0.3.1 bug, where
+# ``rule_files.py`` had ``from _engine import ...`` (a bare top-level
+# import) that resolved in tests but failed on HACS user installs.
+# We accept that test_integration.py needs this entry, but we ALSO
+# have a dedicated smoke-load test (test_hacs_load.py) that strips
+# this entry from sys.path and verifies the integration still loads.
+# That test is what catches the v0.3.1 bug class going forward.
+#
+# We use ``append`` (not insert at 0) so neither entry shadows the
+# engine ``intentional`` package. Position doesn't matter for the
+# integration tests because they use the fully-qualified name.
 if str(CUSTOM_COMPONENTS_DIR) not in sys.path:
     sys.path.append(str(CUSTOM_COMPONENTS_DIR))
 INTEGRATION_DIR = REPO_ROOT / "custom_components" / "intentional"

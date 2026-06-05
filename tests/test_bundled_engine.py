@@ -112,6 +112,49 @@ def test_no_absolute_intentional_imports_in_integration() -> None:
     )
 
 
+def test_no_bare_engine_imports_in_integration() -> None:
+    """No ``from _engine import ...`` should remain in the integration files.
+
+    This is the v0.3.1 incident (HACS users got "Invalid handler
+    specified" on the just-released v0.3.1). The bundled _engine
+    subpackage must be reached via a relative import (``from ._engine
+    import ...``), not as a top-level package, because HA's loader
+    puts ``custom_components/`` on sys.path — not
+    ``custom_components/intentional/``. A bare ``from _engine import
+    RuleLoadError`` only resolves if the integration's own directory
+    is on sys.path, which is the case for our local tests (conftest
+    adds it) but NOT for HACS installs in production.
+
+    See the v0.1.4 lesson in
+    ``smart-home/ha-custom-component-release-checklist``: any non-stdlib
+    import in the integration must be either relative, or a
+    ``homeassistant.*`` module, or declared in manifest.json
+    ``requirements``. A bare ``_engine`` is none of those.
+    """
+    import re
+    offenders: list[str] = []
+    # Match: from _engine import X, import _engine, from _engine.foo import Y
+    pattern = re.compile(r"^\s*(?:from\s+_engine(?:\.\w+)?\s+import|import\s+_engine(?:\.\w+)?)\b")
+    for py_file in INTEGRATION_DIR.glob("*.py"):
+        if py_file.name.startswith("_"):
+            continue  # skip _engine subpackage
+        text = py_file.read_text()
+        for i, line in enumerate(text.splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if pattern.match(stripped):
+                offenders.append(f"{py_file.name}:{i}: {line}")
+    assert not offenders, (
+        "Integration has bare '_engine' imports; convert to relative "
+        "('from ._engine import ...'). Bare imports of the bundled "
+        "subpackage break in HACS installs (the integration's own "
+        "directory is not on sys.path in production). This is the "
+        "v0.3.1 bug. Offenders:\n"
+        + "\n".join(offenders)
+    )
+
+
 def test_bundled_engine_importable() -> None:
     """The bundled engine should be importable as a subpackage."""
     mod = importlib.import_module("_engine")

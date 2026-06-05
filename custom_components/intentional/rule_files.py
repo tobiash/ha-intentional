@@ -21,8 +21,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from _engine import RuleLoadError
-from _engine.yaml_loader import load_rules_from_string
+from ._engine import RuleLoadError
+from ._engine.yaml_loader import load_rules_from_string
 
 _LOGGER = logging.getLogger(__name__)
 
