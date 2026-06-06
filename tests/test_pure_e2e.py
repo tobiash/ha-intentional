@@ -594,6 +594,37 @@ def test_manual_override_clear_scenario_resolves_intentional_service_call() -> N
     }
 
 
+def test_scheduler_action_scenario_resolves_stateless_service_call() -> None:
+    calls = _service_calls_for_yaml(
+        """
+        - id: run-office-schedule-on-workday
+          when: input_boolean.workday == "on" and time_of_day == "morning"
+          emit:
+            target: scheduler.run_action
+            set:
+              service_data:
+                entity_id: switch.schedule_office_lights
+                skip_conditions: true
+            ttl: 5s
+        """,
+        [_state("input_boolean.workday", "on")],
+        now=datetime(2026, 6, 5, 8, 15, tzinfo=ZoneInfo("Europe/Berlin")),
+    )
+
+    assert calls == {
+        "scheduler.run_action": (
+            (
+                "scheduler",
+                "run_action",
+                {
+                    "entity_id": "switch.schedule_office_lights",
+                    "skip_conditions": True,
+                },
+            ),
+        ),
+    }
+
+
 def test_input_button_scenario_resolves_helper_press_service_call() -> None:
     calls = _service_calls_for_yaml(
         """

@@ -2237,6 +2237,30 @@ def test_stateless_service_targets_map_to_named_services() -> None:
         ("system_log", "write", {"level": "info", "message": "Doorbell rang"}),
     )
     assert service_calls_for_resolved_target(
+        "scheduler.run_action",
+        {
+            "service_data": {
+                "entity_id": "switch.schedule_office_lights",
+                "skip_conditions": True,
+            },
+        },
+    ) == (
+        (
+            "scheduler",
+            "run_action",
+            {
+                "entity_id": "switch.schedule_office_lights",
+                "skip_conditions": True,
+            },
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "scheduler.disable_all",
+        {},
+    ) == (
+        ("scheduler", "disable_all", {}),
+    )
+    assert service_calls_for_resolved_target(
         "intentional.clear",
         {"service_data": {"target": "light.office"}},
     ) == (

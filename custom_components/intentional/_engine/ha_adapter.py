@@ -1130,6 +1130,7 @@ def _service_calls_without_update_entity(
         "persistent_notification",
         "logbook",
         "system_log",
+        "scheduler",
     }:
         service = str(value.get("service", state or _object_id))
         data = _action_service_data(value)
@@ -1373,6 +1374,7 @@ def _expected_states_for_service(domain: str, service: str) -> set[str] | None:
         "persistent_notification",
         "logbook",
         "system_log",
+        "scheduler",
         "shopping_list",
         "intentional",
         "camera",
