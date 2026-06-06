@@ -575,6 +575,47 @@ def test_doorbell_cast_monitor_scenario_resolves_cast_service_call() -> None:
     }
 
 
+def test_doorbell_mqtt_publish_scenario_resolves_publish_service_call() -> None:
+    calls = _service_calls_for_yaml(
+        """
+        - id: publish-doorbell-event
+          when: event.espnow_recv_doorbell.triggered == true and event.espnow_recv_doorbell.event_type == "ringer"
+          emit:
+            target: mqtt.publish
+            set:
+              service_data:
+                topic: intentional/doorbell
+                payload: ringer
+                qos: 1
+                retain: false
+            ttl: 5s
+        """,
+        [
+            _state(
+                "event.espnow_recv_doorbell",
+                "2026-06-07T08:05:00+00:00",
+                triggered=True,
+                event_type="ringer",
+            ),
+        ],
+    )
+
+    assert calls == {
+        "mqtt.publish": (
+            (
+                "mqtt",
+                "publish",
+                {
+                    "topic": "intentional/doorbell",
+                    "payload": "ringer",
+                    "qos": 1,
+                    "retain": False,
+                },
+            ),
+        ),
+    }
+
+
 def test_changed_pulse_scenario_resolves_only_for_one_cycle() -> None:
     from intentional.engine import Engine
     from intentional.ha_adapter import (

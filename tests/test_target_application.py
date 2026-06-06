@@ -2300,6 +2300,32 @@ def test_stateless_service_targets_map_to_named_services() -> None:
         "homeassistant.restart",
         {},
     ) == ()
+    assert service_calls_for_resolved_target(
+        "mqtt.publish",
+        {
+            "service_data": {
+                "topic": "intentional/doorbell",
+                "payload": "ringer",
+                "qos": 1,
+                "retain": False,
+            },
+        },
+    ) == (
+        (
+            "mqtt",
+            "publish",
+            {
+                "topic": "intentional/doorbell",
+                "payload": "ringer",
+                "qos": 1,
+                "retain": False,
+            },
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "mqtt.dump",
+        {"service_data": {"topic": "#"}},
+    ) == ()
 
 
 def test_camera_target_maps_to_camera_services() -> None:
