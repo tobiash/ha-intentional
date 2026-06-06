@@ -584,6 +584,38 @@ def test_changed_pulse_scenario_resolves_only_for_one_cycle() -> None:
     assert engine.resolve("notify.pixel_8_pro") is None
 
 
+def test_update_entity_action_scenario_resolves_homeassistant_service_call() -> None:
+    calls = _service_calls_for_yaml(
+        """
+        - id: refresh-update-sensor-after-update-event
+          when: event.update_event.triggered == true
+          emit:
+            target: homeassistant.update_entity
+            set:
+              service_data:
+                entity_id: update.intentional_update
+            ttl: 5s
+        """,
+        [
+            _state(
+                "event.update_event",
+                "2026-06-06T19:00:00+00:00",
+                triggered=True,
+            ),
+        ],
+    )
+
+    assert calls == {
+        "homeassistant.update_entity": (
+            (
+                "homeassistant",
+                "update_entity",
+                {"entity_id": "update.intentional_update"},
+            ),
+        ),
+    }
+
+
 def test_shopping_list_scenario_resolves_stateless_service_calls() -> None:
     calls = _service_calls_for_yaml(
         """

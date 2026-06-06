@@ -148,6 +148,7 @@ The integration currently supports:
 | `scheduler.*`   | calls the matching Scheduler integration service       |
 | `shopping_list.*` | calls the matching shopping_list service             |
 | `intentional.clear` | clears manual Intentional overrides                 |
+| `homeassistant.update_entity` | refreshes one or more HA entities via `service_data.entity_id` |
 | `tts.*`         | `tts.speak`, `tts.cloud_say`, `tts.clear_cache`         |
 | `button.*`      | `button.press`                                         |
 | `input_button.*` | `input_button.press`                                  |
@@ -231,7 +232,8 @@ support `name` for item services plus `reverse` for `shopping_list.sort`. Use
 `name`, `entity_id`, or `skip_conditions`. Rules can also target
 `intentional.clear`; pass
 `service_data.target` to clear overrides for one entity, or omit it to clear
-all manual overrides. TTS provider targets such as
+all manual overrides. For event-driven entity refreshes, target
+`homeassistant.update_entity` and pass `service_data.entity_id`. TTS provider targets such as
 `target: tts.google_ai_tts` call `tts.speak`; `target: tts.cloud_say` calls
 `tts.cloud_say`.
 Button, scene, script, and automation targets are

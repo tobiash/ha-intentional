@@ -2270,6 +2270,16 @@ def test_stateless_service_targets_map_to_named_services() -> None:
         "intentional.fire",
         {"service_data": {"target": "light.office", "state": "on"}},
     ) == ()
+    assert service_calls_for_resolved_target(
+        "homeassistant.update_entity",
+        {"service_data": {"entity_id": "sensor.travel_time"}},
+    ) == (
+        ("homeassistant", "update_entity", {"entity_id": "sensor.travel_time"}),
+    )
+    assert service_calls_for_resolved_target(
+        "homeassistant.restart",
+        {},
+    ) == ()
 
 
 def test_camera_target_maps_to_camera_services() -> None:
