@@ -459,11 +459,27 @@ def test_doorbell_action_scenario_resolves_stateless_service_calls() -> None:
                 entity_id: binary_sensor.doorbell
                 domain: binary_sensor
             ttl: 5s
+
+        - id: doorbell-camera-snapshot
+          when: binary_sensor.doorbell == "on"
+          emit:
+            target: camera.front_door
+            set:
+              camera_action: snapshot
+              filename: /tmp/doorbell.jpg
+            ttl: 5s
         """,
         [_state("binary_sensor.doorbell", "on")],
     )
 
     assert calls == {
+        "camera.front_door": (
+            (
+                "camera",
+                "snapshot",
+                {"entity_id": "camera.front_door", "filename": "/tmp/doorbell.jpg"},
+            ),
+        ),
         "logbook.log": (
             (
                 "logbook",

@@ -125,6 +125,7 @@ The integration currently supports:
 | `vacuum.*`      | `start`, `pause`, `stop`, `return_to_base`, `locate`, `clean_spot`, `clean_area`, `set_fan_speed`, `send_command`, `turn_on`, `turn_off`, `toggle` |
 | `lawn_mower.*`  | `start_mowing`, `pause`, `dock`                       |
 | `remote.*`      | `turn_on`, `turn_off`, `toggle`, `send_command`       |
+| `camera.*`      | `turn_on`, `turn_off`, `snapshot`, `record`, `play_stream`, motion detection |
 | `number.*`      | `set_value`                                         |
 | `input_number.*` | `set_value`, `increment`, `decrement`              |
 | `counter.*`    | `set_value`, `increment`, `decrement`, `reset`         |
@@ -185,6 +186,11 @@ operation mode is included in the `set_temperature` call. Vacuums support
 `state` values such as `mowing`, `paused`, `returning`, and `dock`. Remotes
 support `state: on`, `state: off`, `state: toggle`, optional `activity`, and
 `command` with optional `device`, `num_repeats`, `delay_secs`, and `hold_secs`.
+Camera targets support `state: on`, `state: off`, `camera_action: snapshot`
+with `filename`, `camera_action: record` with `filename`, optional `duration`,
+and optional `lookback`, `camera_action: play_stream` with `media_player` or
+`media_player_entity_id`, and motion detection actions
+`enable_motion_detection` / `disable_motion_detection`.
 Number helpers and counters support `value`. Input number helpers also support
 `state: increment` and `state: decrement`.
 Counters also support `state: increment`, `state: decrement`, and
@@ -463,7 +469,8 @@ payloads: `state`, `brightness_pct`, `brightness`, `color_temp_k`,
 `description`, `variables`, `skip_condition`, `datetime`, `date`, `time`,
 `timestamp`, `duration`, `humidity`, `mode`, `operation_mode`, `away_mode`,
 `fan_speed`, `command`, `params`, `cleaning_area_id`, `activity`, `device`,
-`num_repeats`, `delay_secs`, `hold_secs`, and `update_entity`.
+`num_repeats`, `delay_secs`, `hold_secs`, `camera_action`, `filename`,
+`media_player`, `format`, `lookback`, and `update_entity`.
 For example, a dashboard button can force TV settings without creating a YAML
 rule:
 

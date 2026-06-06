@@ -59,6 +59,11 @@ MANUAL_SET_FIELDS = (
     "operation_mode",
     "away_mode",
     "fan_speed",
+    "camera_action",
+    "filename",
+    "media_player",
+    "format",
+    "lookback",
     "command",
     "params",
     "cleaning_area_id",
@@ -432,6 +437,8 @@ def manual_set_from_state_object(state: Any) -> dict[str, Any]:
             result["activity"] = attributes["current_activity"]
         elif "activity" in attributes:
             result["activity"] = attributes["activity"]
+    if domain == "camera":
+        result["state"] = state_value
 
     for field in MANUAL_ATTRIBUTE_FIELDS:
         if field in attributes:
@@ -1050,6 +1057,42 @@ def _service_calls_without_update_entity(
             calls.append((domain, "send_command", data))
         return tuple(calls)
 
+    if domain == "camera":
+        if state == "off":
+            return ((domain, "turn_off", service_data),)
+        if state == "on":
+            return ((domain, "turn_on", service_data),)
+        camera_action = value.get("camera_action", state)
+        if camera_action in {"enable_motion_detection", "enable_motion", "motion_on"}:
+            return ((domain, "enable_motion_detection", service_data),)
+        if camera_action in {"disable_motion_detection", "disable_motion", "motion_off"}:
+            return ((domain, "disable_motion_detection", service_data),)
+        if camera_action == "snapshot":
+            if "filename" not in value:
+                return ()
+            return ((
+                domain,
+                "snapshot",
+                {"entity_id": target, "filename": value["filename"]},
+            ),)
+        if camera_action == "record":
+            if "filename" not in value:
+                return ()
+            data = {"entity_id": target, "filename": value["filename"]}
+            for field in ("duration", "lookback"):
+                if field in value:
+                    data[field] = value[field]
+            return ((domain, "record", data),)
+        if camera_action == "play_stream":
+            media_player = value.get("media_player", value.get("media_player_entity_id"))
+            if media_player is None:
+                return ()
+            data = {"entity_id": target, "media_player": media_player}
+            if "format" in value:
+                data["format"] = value["format"]
+            return ((domain, "play_stream", data),)
+        return ()
+
     if domain == "notify":
         message = value.get("message", state)
         if message is None:
@@ -1284,6 +1327,7 @@ def _expected_states_for_service(domain: str, service: str) -> set[str] | None:
         "persistent_notification",
         "logbook",
         "system_log",
+        "camera",
         "scene",
         "siren",
     }:

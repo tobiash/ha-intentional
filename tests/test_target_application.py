@@ -2238,6 +2238,87 @@ def test_stateless_service_targets_map_to_named_services() -> None:
     )
 
 
+def test_camera_target_maps_to_camera_services() -> None:
+    from intentional.ha_adapter import service_calls_for_resolved_target
+
+    assert service_calls_for_resolved_target(
+        "camera.front_door",
+        {"state": "on"},
+    ) == (("camera", "turn_on", {"entity_id": "camera.front_door"}),)
+    assert service_calls_for_resolved_target(
+        "camera.front_door",
+        {"state": "off"},
+    ) == (("camera", "turn_off", {"entity_id": "camera.front_door"}),)
+    assert service_calls_for_resolved_target(
+        "camera.front_door",
+        {"camera_action": "snapshot", "filename": "/tmp/doorbell.jpg"},
+    ) == (
+        (
+            "camera",
+            "snapshot",
+            {"entity_id": "camera.front_door", "filename": "/tmp/doorbell.jpg"},
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "camera.front_door",
+        {
+            "camera_action": "record",
+            "filename": "/tmp/doorbell.mp4",
+            "duration": 20,
+            "lookback": 5,
+        },
+    ) == (
+        (
+            "camera",
+            "record",
+            {
+                "entity_id": "camera.front_door",
+                "filename": "/tmp/doorbell.mp4",
+                "duration": 20,
+                "lookback": 5,
+            },
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "camera.front_door",
+        {
+            "camera_action": "play_stream",
+            "media_player": "media_player.office",
+            "format": "hls",
+        },
+    ) == (
+        (
+            "camera",
+            "play_stream",
+            {
+                "entity_id": "camera.front_door",
+                "media_player": "media_player.office",
+                "format": "hls",
+            },
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "camera.front_door",
+        {"camera_action": "disable_motion_detection"},
+    ) == (
+        (
+            "camera",
+            "disable_motion_detection",
+            {"entity_id": "camera.front_door"},
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "camera.front_door",
+        {"state": "enable_motion_detection"},
+    ) == (
+        (
+            "camera",
+            "enable_motion_detection",
+            {"entity_id": "camera.front_door"},
+        ),
+    )
+
+
 def test_tts_target_maps_to_speak_and_cloud_say_services() -> None:
     from intentional.ha_adapter import service_calls_for_resolved_target
 
