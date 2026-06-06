@@ -738,6 +738,27 @@ fire:
       example: "00:10:00"
       selector:
         text:
+    update_action:
+      name: Update action
+      description: "Action for update entities: install, skip, or clear_skipped."
+      required: false
+      example: install
+      selector:
+        text:
+    version:
+      name: Version
+      description: Optional version for update.install targets.
+      required: false
+      example: "1.0.0"
+      selector:
+        text:
+    backup:
+      name: Backup
+      description: Whether update.install should request a backup when supported.
+      required: false
+      example: true
+      selector:
+        boolean:
     update_entity:
       name: Update entity
       description: Whether to call homeassistant.update_entity for the target after applying the intent.

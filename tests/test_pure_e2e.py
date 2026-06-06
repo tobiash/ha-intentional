@@ -400,6 +400,33 @@ def test_timer_grace_period_scenario_resolves_timer_service_call() -> None:
     }
 
 
+def test_update_available_scenario_resolves_install_service_call() -> None:
+    calls = _service_calls_for_yaml(
+        """
+        - id: install-router-update-at-night
+          when: update.router_firmware == "on" and time_of_day == "night"
+          emit:
+            target: update.router_firmware
+            set:
+              update_action: install
+              backup: true
+            ttl: 5m
+        """,
+        [_state("update.router_firmware", "on")],
+        now=datetime(2026, 6, 5, 22, 15, tzinfo=ZoneInfo("Europe/Berlin")),
+    )
+
+    assert calls == {
+        "update.router_firmware": (
+            (
+                "update",
+                "install",
+                {"entity_id": "update.router_firmware", "backup": True},
+            ),
+        ),
+    }
+
+
 def test_counter_scenario_resolves_counter_service_call() -> None:
     calls = _service_calls_for_yaml(
         """

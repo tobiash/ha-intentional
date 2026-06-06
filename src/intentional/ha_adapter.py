@@ -111,6 +111,9 @@ MANUAL_SET_FIELDS = (
     "time",
     "timestamp",
     "duration",
+    "update_action",
+    "version",
+    "backup",
     "update_entity",
 )
 MANUAL_STATE_DOMAINS = frozenset({
@@ -1173,6 +1176,21 @@ def _service_calls_without_update_entity(
             data["duration"] = value["duration"]
         return ((domain, service, data),)
 
+    if domain == "update":
+        update_action = value.get("update_action", state)
+        if update_action == "install":
+            data = dict(service_data)
+            if "version" in value:
+                data["version"] = value["version"]
+            if "backup" in value:
+                data["backup"] = value["backup"]
+            return ((domain, "install", data),)
+        if update_action == "skip":
+            return ((domain, "skip", service_data),)
+        if update_action in {"clear_skipped", "clear_skip", "clear"}:
+            return ((domain, "clear_skipped", service_data),)
+        return ()
+
     return ()
 
 
@@ -1328,6 +1346,7 @@ def _expected_states_for_service(domain: str, service: str) -> set[str] | None:
         "logbook",
         "system_log",
         "camera",
+        "update",
         "scene",
         "siren",
     }:

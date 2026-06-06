@@ -249,6 +249,9 @@ def _representative_manual_set_payload() -> dict[str, object]:
         "time": "22:30:00",
         "timestamp": 1780691400,
         "duration": "00:10:00",
+        "update_action": "install",
+        "version": "1.0.0",
+        "backup": True,
         "update_entity": True,
     }
     missing = set(MANUAL_SET_FIELDS) - set(payload)

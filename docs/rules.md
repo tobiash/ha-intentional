@@ -152,6 +152,7 @@ The integration currently supports:
 | `script.*`      | `script.turn_on`, or `script.turn_off` with `state: off` |
 | `automation.*`  | `automation.trigger`, or `turn_on` / `turn_off` with `state` |
 | `timer.*`       | `timer.start`, `timer.cancel`, `timer.pause`, `timer.finish` |
+| `update.*`      | `update.install`, `update.skip`, `update.clear_skipped` |
 
 For lights, `state: off` calls `light.turn_off`, `state: toggle` calls
 `light.toggle`, and any other resolved value calls `light.turn_on`. The engine
@@ -230,6 +231,9 @@ called, normal HA state settling does not re-trigger the action while the same
 intent remains active. Script targets support optional `variables`. Automation
 targets default to `automation.trigger`, support optional `skip_condition`, and
 use `automation.turn_on` / `automation.turn_off` when `state` is `on` or `off`.
+Update targets support `update_action: install`, `update_action: skip`, and
+`update_action: clear_skipped`; `state` may be used as the same action alias.
+`update.install` also accepts optional `version` and `backup`.
 To-do targets support `todo_action` values `add_item`, `update_item`,
 `remove_item`, `clear_completed`, and `get_items`. Supplying `item` without
 `todo_action` defaults to `add_item`; `state: completed` marks an item
@@ -470,7 +474,8 @@ payloads: `state`, `brightness_pct`, `brightness`, `color_temp_k`,
 `timestamp`, `duration`, `humidity`, `mode`, `operation_mode`, `away_mode`,
 `fan_speed`, `command`, `params`, `cleaning_area_id`, `activity`, `device`,
 `num_repeats`, `delay_secs`, `hold_secs`, `camera_action`, `filename`,
-`media_player`, `format`, `lookback`, and `update_entity`.
+`media_player`, `format`, `lookback`, `update_action`, `version`, `backup`,
+and `update_entity`.
 For example, a dashboard button can force TV settings without creating a YAML
 rule:
 

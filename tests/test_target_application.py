@@ -2536,6 +2536,41 @@ def test_automation_target_maps_to_trigger_or_enable_disable() -> None:
     )
 
 
+def test_update_target_maps_to_update_services() -> None:
+    from intentional.ha_adapter import service_calls_for_resolved_target
+
+    assert service_calls_for_resolved_target(
+        "update.router_firmware",
+        {"update_action": "install", "version": "1.2.3", "backup": True},
+    ) == (
+        (
+            "update",
+            "install",
+            {
+                "entity_id": "update.router_firmware",
+                "version": "1.2.3",
+                "backup": True,
+            },
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "update.router_firmware",
+        {"state": "skip"},
+    ) == (
+        ("update", "skip", {"entity_id": "update.router_firmware"}),
+    )
+    assert service_calls_for_resolved_target(
+        "update.router_firmware",
+        {"update_action": "clear_skipped"},
+    ) == (
+        ("update", "clear_skipped", {"entity_id": "update.router_firmware"}),
+    )
+    assert service_calls_for_resolved_target(
+        "update.router_firmware",
+        {"state": "on"},
+    ) == ()
+
+
 def test_fire_and_forget_targets_do_not_invalidate_when_state_settles() -> None:
     from intentional.ha_adapter import (
         invalidate_service_plan_for_state_change,
@@ -2551,9 +2586,14 @@ def test_fire_and_forget_targets_do_not_invalidate_when_state_settles() -> None:
         "automation.arrival",
         {"skip_condition": False},
     )
+    update_calls = service_calls_for_resolved_target(
+        "update.router_firmware",
+        {"update_action": "install"},
+    )
     last_applied = {
         "script.movie_mode": service_plan_signature(script_calls),
         "automation.arrival": service_plan_signature(automation_calls),
+        "update.router_firmware": service_plan_signature(update_calls),
         "input_button.mark_arrival": service_plan_signature(
             service_calls_for_resolved_target(
                 "input_button.mark_arrival",
@@ -2572,6 +2612,10 @@ def test_fire_and_forget_targets_do_not_invalidate_when_state_settles() -> None:
     )
     assert not invalidate_service_plan_for_state_change(
         last_applied,
+        SimpleNamespace(entity_id="update.router_firmware", state="off", attributes={}),
+    )
+    assert not invalidate_service_plan_for_state_change(
+        last_applied,
         SimpleNamespace(
             entity_id="input_button.mark_arrival",
             state="2026-06-05T22:30:00+02:00",
@@ -2580,6 +2624,7 @@ def test_fire_and_forget_targets_do_not_invalidate_when_state_settles() -> None:
     )
     assert "script.movie_mode" in last_applied
     assert "automation.arrival" in last_applied
+    assert "update.router_firmware" in last_applied
     assert "input_button.mark_arrival" in last_applied
 
 

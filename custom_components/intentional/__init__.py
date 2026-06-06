@@ -169,6 +169,9 @@ FIRE_SERVICE_SCHEMA = vol.Schema(
         vol.Optional("time"): cv.string,
         vol.Optional("timestamp"): vol.Coerce(float),
         vol.Optional("duration"): cv.string,
+        vol.Optional("update_action"): cv.string,
+        vol.Optional("version"): cv.string,
+        vol.Optional("backup"): cv.boolean,
         vol.Optional("update_entity"): cv.boolean,
         vol.Optional("ttl"): vol.All(int, vol.Range(min=0, max=86400)),
     }

@@ -612,6 +612,24 @@
           "required": false,
           "selector": { "text": {} }
         },
+        "update_action": {
+          "name": "Update action",
+          "description": "Action for update entities: install, skip, or clear_skipped.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "version": {
+          "name": "Version",
+          "description": "Optional version for update.install targets.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "backup": {
+          "name": "Backup",
+          "description": "Whether update.install should request a backup when supported.",
+          "required": false,
+          "selector": { "boolean": {} }
+        },
         "update_entity": {
           "name": "Update entity",
           "description": "Whether to call homeassistant.update_entity for the target after applying the intent.",
