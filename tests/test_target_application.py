@@ -2261,6 +2261,26 @@ def test_stateless_service_targets_map_to_named_services() -> None:
         ("scheduler", "disable_all", {}),
     )
     assert service_calls_for_resolved_target(
+        "cast.show_lovelace_view",
+        {
+            "service_data": {
+                "entity_id": "media_player.office_display",
+                "dashboard_path": "lovelace",
+                "view_path": "front-door",
+            },
+        },
+    ) == (
+        (
+            "cast",
+            "show_lovelace_view",
+            {
+                "entity_id": "media_player.office_display",
+                "dashboard_path": "lovelace",
+                "view_path": "front-door",
+            },
+        ),
+    )
+    assert service_calls_for_resolved_target(
         "intentional.clear",
         {"service_data": {"target": "light.office"}},
     ) == (

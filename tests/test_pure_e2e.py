@@ -536,6 +536,45 @@ def test_doorbell_action_scenario_resolves_stateless_service_calls() -> None:
     }
 
 
+def test_doorbell_cast_monitor_scenario_resolves_cast_service_call() -> None:
+    calls = _service_calls_for_yaml(
+        """
+        - id: show-front-door-on-office-display
+          when: event.espnow_recv_doorbell.triggered == true and event.espnow_recv_doorbell.event_type == "ringer"
+          emit:
+            target: cast.show_lovelace_view
+            set:
+              service_data:
+                entity_id: media_player.office_display
+                dashboard_path: lovelace
+                view_path: front-door
+            ttl: 5s
+        """,
+        [
+            _state(
+                "event.espnow_recv_doorbell",
+                "2026-06-07T08:00:00+00:00",
+                triggered=True,
+                event_type="ringer",
+            ),
+        ],
+    )
+
+    assert calls == {
+        "cast.show_lovelace_view": (
+            (
+                "cast",
+                "show_lovelace_view",
+                {
+                    "entity_id": "media_player.office_display",
+                    "dashboard_path": "lovelace",
+                    "view_path": "front-door",
+                },
+            ),
+        ),
+    }
+
+
 def test_changed_pulse_scenario_resolves_only_for_one_cycle() -> None:
     from intentional.engine import Engine
     from intentional.ha_adapter import (

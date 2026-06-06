@@ -1131,6 +1131,7 @@ def _service_calls_without_update_entity(
         "logbook",
         "system_log",
         "scheduler",
+        "cast",
     }:
         service = str(value.get("service", state or _object_id))
         data = _action_service_data(value)
@@ -1382,6 +1383,7 @@ def _expected_states_for_service(domain: str, service: str) -> set[str] | None:
         "logbook",
         "system_log",
         "scheduler",
+        "cast",
         "shopping_list",
         "intentional",
         "homeassistant",

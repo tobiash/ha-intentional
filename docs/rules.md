@@ -146,6 +146,7 @@ The integration currently supports:
 | `logbook.*`     | calls the matching logbook service                     |
 | `system_log.*`  | calls the matching system_log service                  |
 | `scheduler.*`   | calls the matching Scheduler integration service       |
+| `cast.*`        | calls the matching Cast service                        |
 | `shopping_list.*` | calls the matching shopping_list service             |
 | `intentional.clear` | clears manual Intentional overrides                 |
 | `homeassistant.update_entity` | refreshes one or more HA entities via `service_data.entity_id` |
@@ -224,12 +225,12 @@ service name, for example `target: browser_mod.notification`; use
 `service_data` for less common Browser Mod fields. Telegram Bot targets work the
 same way, for example `target: telegram_bot.send_message`. Stateless service
 targets for `rest_command.*`, `persistent_notification.*`, `logbook.*`,
-`system_log.*`, and `scheduler.*` also use the target object as the service
+`system_log.*`, `scheduler.*`, and `cast.*` also use the target object as the service
 name. Shopping list
 targets work the same way, for example `target: shopping_list.add_item`, and
 support `name` for item services plus `reverse` for `shopping_list.sort`. Use
 `service_data` for service-specific fields such as `notification_id`, `level`,
-`name`, `entity_id`, or `skip_conditions`. Rules can also target
+`name`, `entity_id`, `skip_conditions`, `dashboard_path`, or `view_path`. Rules can also target
 `intentional.clear`; pass
 `service_data.target` to clear overrides for one entity, or omit it to clear
 all manual overrides. For event-driven entity refreshes, target
