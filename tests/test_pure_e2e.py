@@ -616,6 +616,28 @@ def test_doorbell_mqtt_publish_scenario_resolves_publish_service_call() -> None:
     }
 
 
+def test_google_assistant_sync_scenario_resolves_request_sync_service_call() -> None:
+    calls = _service_calls_for_yaml(
+        """
+        - id: sync-google-after-default-dashboard-change
+          when: input_boolean.default_dashboard.changed == true
+          emit:
+            target: google_assistant.request_sync
+            set:
+              service_data:
+                agent_user_id: home
+            ttl: 5s
+        """,
+        [_state("input_boolean.default_dashboard", "on", changed=True)],
+    )
+
+    assert calls == {
+        "google_assistant.request_sync": (
+            ("google_assistant", "request_sync", {"agent_user_id": "home"}),
+        ),
+    }
+
+
 def test_changed_pulse_scenario_resolves_only_for_one_cycle() -> None:
     from intentional.engine import Engine
     from intentional.ha_adapter import (

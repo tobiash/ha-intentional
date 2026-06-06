@@ -2326,6 +2326,16 @@ def test_stateless_service_targets_map_to_named_services() -> None:
         "mqtt.dump",
         {"service_data": {"topic": "#"}},
     ) == ()
+    assert service_calls_for_resolved_target(
+        "google_assistant.request_sync",
+        {"service_data": {"agent_user_id": "home"}},
+    ) == (
+        ("google_assistant", "request_sync", {"agent_user_id": "home"}),
+    )
+    assert service_calls_for_resolved_target(
+        "google_assistant.reload",
+        {},
+    ) == ()
 
 
 def test_camera_target_maps_to_camera_services() -> None:

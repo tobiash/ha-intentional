@@ -151,6 +151,7 @@ The integration currently supports:
 | `intentional.clear` | clears manual Intentional overrides                 |
 | `homeassistant.update_entity` | refreshes one or more HA entities via `service_data.entity_id` |
 | `mqtt.publish`  | publishes an MQTT message via `service_data`           |
+| `google_assistant.request_sync` | requests a Google Assistant device sync via `service_data` |
 | `tts.*`         | `tts.speak`, `tts.cloud_say`, `tts.clear_cache`         |
 | `button.*`      | `button.press`                                         |
 | `input_button.*` | `input_button.press`                                  |
@@ -237,7 +238,10 @@ support `name` for item services plus `reverse` for `shopping_list.sort`. Use
 all manual overrides. For event-driven entity refreshes, target
 `homeassistant.update_entity` and pass `service_data.entity_id`. For MQTT
 automation hand-offs, target `mqtt.publish` and pass `topic`, `payload`,
-optional `qos`, `retain`, and `evaluate_payload` through `service_data`. TTS provider targets such as
+optional `qos`, `retain`, and `evaluate_payload` through `service_data`. To
+sync exposed Google Assistant entities after a helper or device definition
+changes, target `google_assistant.request_sync` and optionally pass
+`agent_user_id` through `service_data`. TTS provider targets such as
 `target: tts.google_ai_tts` call `tts.speak`; `target: tts.cloud_say` calls
 `tts.cloud_say`.
 Button, scene, script, and automation targets are
