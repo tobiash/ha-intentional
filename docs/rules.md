@@ -154,6 +154,7 @@ The integration currently supports:
 | `google_assistant.request_sync` | requests a Google Assistant device sync via `service_data` |
 | `assist_satellite.announce`, `assist_satellite.start_conversation` | sends Assist Satellite announcements/conversation starts via `service_data` |
 | `alarmo.arm`, `alarmo.disarm`, `alarmo.skip_delay` | calls Alarmo-specific alarm services via `service_data` |
+| `device_tracker.see` | updates a tracked device location with `mac` or `dev_id` |
 | `tts.*`         | `tts.speak`, `tts.cloud_say`, `tts.clear_cache`         |
 | `button.*`      | `button.press`                                         |
 | `input_button.*` | `input_button.press`                                  |
@@ -250,7 +251,8 @@ changes, target `google_assistant.request_sync` and optionally pass
 rule target because it requires a service response. Alarmo targets expose the
 Alarmo-specific arm/disarm path for fields such as `mode`, `skip_delay`,
 `force`, and `code`; Alarmo user-management services are intentionally not rule
-targets. TTS provider targets such as
+targets. `device_tracker.see` accepts `mac` or `dev_id`; `state` is treated as
+`location_name` for concise presence rules. TTS provider targets such as
 `target: tts.google_ai_tts` call `tts.speak`; `target: tts.cloud_say` calls
 `tts.cloud_say`.
 Button, scene, script, and automation targets are
@@ -544,7 +546,8 @@ payloads: `state`, `brightness_pct`, `brightness`, `color_temp_k`,
 `fan_speed`, `command`, `params`, `cleaning_area_id`, `activity`, `device`,
 `num_repeats`, `delay_secs`, `hold_secs`, `camera_action`, `filename`,
 `media_player`, `format`, `lookback`, `update_action`, `version`, `backup`,
-`reverse`, and `update_entity`.
+`mac`, `dev_id`, `host_name`, `location_name`, `gps`, `gps_accuracy`,
+`battery`, `reverse`, and `update_entity`.
 For example, a dashboard button can force TV settings without creating a YAML
 rule:
 

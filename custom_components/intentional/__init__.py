@@ -175,6 +175,13 @@ FIRE_SERVICE_SCHEMA = vol.Schema(
         vol.Optional("update_action"): cv.string,
         vol.Optional("version"): cv.string,
         vol.Optional("backup"): cv.boolean,
+        vol.Optional("mac"): cv.string,
+        vol.Optional("dev_id"): cv.string,
+        vol.Optional("host_name"): cv.string,
+        vol.Optional("location_name"): cv.string,
+        vol.Optional("gps"): vol.All([vol.Coerce(float)], vol.Length(min=2, max=2)),
+        vol.Optional("gps_accuracy"): vol.All(vol.Coerce(float), vol.Range(min=0)),
+        vol.Optional("battery"): vol.All(vol.Coerce(float), vol.Range(min=0, max=100)),
         vol.Optional("update_entity"): cv.boolean,
         vol.Optional("ttl"): vol.All(int, vol.Range(min=0, max=86400)),
     }

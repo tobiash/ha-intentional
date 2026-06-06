@@ -2424,6 +2424,58 @@ def test_stateless_service_targets_map_to_named_services() -> None:
         "alarmo.enable_user",
         {"service_data": {"name": "Guest"}},
     ) == ()
+    assert service_calls_for_resolved_target(
+        "device_tracker.see",
+        {
+            "dev_id": "phone_tobias",
+            "host_name": "Tobias Phone",
+            "location_name": "home",
+            "gps": [52.52, 13.405],
+            "gps_accuracy": 12,
+            "battery": 88,
+        },
+    ) == (
+        (
+            "device_tracker",
+            "see",
+            {
+                "dev_id": "phone_tobias",
+                "host_name": "Tobias Phone",
+                "location_name": "home",
+                "gps": [52.52, 13.405],
+                "gps_accuracy": 12,
+                "battery": 88,
+            },
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "device_tracker.see",
+        {"service_data": {"mac": "AA:BB:CC:DD:EE:FF", "location_name": "not_home"}},
+    ) == (
+        (
+            "device_tracker",
+            "see",
+            {"mac": "AA:BB:CC:DD:EE:FF", "location_name": "not_home"},
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "device_tracker.see",
+        {"state": "home", "dev_id": "phone_tobias"},
+    ) == (
+        (
+            "device_tracker",
+            "see",
+            {"dev_id": "phone_tobias", "location_name": "home"},
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "device_tracker.reload",
+        {"service_data": {}},
+    ) == ()
+    assert service_calls_for_resolved_target(
+        "device_tracker.see",
+        {"location_name": "home"},
+    ) == ()
 
 
 def test_camera_target_maps_to_camera_services() -> None:

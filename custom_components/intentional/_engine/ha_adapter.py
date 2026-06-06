@@ -116,6 +116,13 @@ MANUAL_SET_FIELDS = (
     "update_action",
     "version",
     "backup",
+    "mac",
+    "dev_id",
+    "host_name",
+    "location_name",
+    "gps",
+    "gps_accuracy",
+    "battery",
     "update_entity",
 )
 MANUAL_STATE_DOMAINS = frozenset({
@@ -314,6 +321,13 @@ ACTION_SERVICE_FIELDS = frozenset({
     "chat_id",
     "duration",
     "reverse",
+    "mac",
+    "dev_id",
+    "host_name",
+    "location_name",
+    "gps",
+    "gps_accuracy",
+    "battery",
 })
 TTS_SERVICE_TARGETS = frozenset({"speak", "cloud_say", "clear_cache"})
 
@@ -1179,6 +1193,17 @@ def _service_calls_without_update_entity(
         data = _action_service_data(value)
         return ((domain, service, data),)
 
+    if domain == "device_tracker":
+        service = str(value.get("service", _object_id if _object_id == "see" else state))
+        if service != "see":
+            return ()
+        data = _action_service_data(value)
+        if state is not None and "location_name" not in data:
+            data["location_name"] = state
+        if not any(field in data for field in ("mac", "dev_id")):
+            return ()
+        return ((domain, service, data),)
+
     if domain == "shopping_list":
         service = str(value.get("service", _object_id or state))
         data = _action_service_data(value)
@@ -1419,6 +1444,7 @@ def _expected_states_for_service(domain: str, service: str) -> set[str] | None:
         "google_assistant",
         "assist_satellite",
         "alarmo",
+        "device_tracker",
         "camera",
         "update",
         "scene",

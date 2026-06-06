@@ -704,6 +704,43 @@ def test_alarmo_night_arm_scenario_resolves_alarmo_service_call() -> None:
     }
 
 
+def test_device_tracker_presence_scenario_resolves_see_service_call() -> None:
+    calls = _service_calls_for_yaml(
+        """
+        - id: mark-phone-home-when-presence-helper-turns-on
+          when: input_boolean.phone_presence_hint.changed == true and input_boolean.phone_presence_hint == "on"
+          emit:
+            target: device_tracker.see
+            set:
+              dev_id: phone_tobias
+              host_name: Tobias Phone
+              location_name: home
+              gps: [52.52, 13.405]
+              gps_accuracy: 12
+              battery: 88
+            ttl: 5s
+        """,
+        [_state("input_boolean.phone_presence_hint", "on", changed=True)],
+    )
+
+    assert calls == {
+        "device_tracker.see": (
+            (
+                "device_tracker",
+                "see",
+                {
+                    "dev_id": "phone_tobias",
+                    "host_name": "Tobias Phone",
+                    "location_name": "home",
+                    "gps": [52.52, 13.405],
+                    "gps_accuracy": 12,
+                    "battery": 88,
+                },
+            ),
+        ),
+    }
+
+
 def test_changed_pulse_scenario_resolves_only_for_one_cycle() -> None:
     from intentional.engine import Engine
     from intentional.ha_adapter import (

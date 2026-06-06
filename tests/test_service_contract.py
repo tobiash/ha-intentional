@@ -254,6 +254,13 @@ def _representative_manual_set_payload() -> dict[str, object]:
         "update_action": "install",
         "version": "1.0.0",
         "backup": True,
+        "mac": "AA:BB:CC:DD:EE:FF",
+        "dev_id": "phone_tobias",
+        "host_name": "Tobias Phone",
+        "location_name": "home",
+        "gps": [52.52, 13.405],
+        "gps_accuracy": 12,
+        "battery": 88,
         "update_entity": True,
     }
     missing = set(MANUAL_SET_FIELDS) - set(payload)

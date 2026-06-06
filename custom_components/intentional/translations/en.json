@@ -642,6 +642,48 @@
           "required": false,
           "selector": { "boolean": {} }
         },
+        "mac": {
+          "name": "MAC address",
+          "description": "MAC address for device_tracker.see.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "dev_id": {
+          "name": "Device tracker ID",
+          "description": "Device ID for device_tracker.see.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "host_name": {
+          "name": "Host name",
+          "description": "Optional host name for device_tracker.see.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "location_name": {
+          "name": "Location name",
+          "description": "Optional location name for device_tracker.see, such as home or not_home.",
+          "required": false,
+          "selector": { "text": {} }
+        },
+        "gps": {
+          "name": "GPS coordinates",
+          "description": "Optional latitude and longitude pair for device_tracker.see.",
+          "required": false,
+          "selector": { "object": {} }
+        },
+        "gps_accuracy": {
+          "name": "GPS accuracy",
+          "description": "Optional GPS accuracy in meters for device_tracker.see.",
+          "required": false,
+          "selector": { "number": { "min": 0, "mode": "box", "unit_of_measurement": "m" } }
+        },
+        "battery": {
+          "name": "Battery",
+          "description": "Optional battery percentage for device_tracker.see.",
+          "required": false,
+          "selector": { "number": { "min": 0, "max": 100, "unit_of_measurement": "%" } }
+        },
         "update_entity": {
           "name": "Update entity",
           "description": "Whether to call homeassistant.update_entity for the target after applying the intent.",
