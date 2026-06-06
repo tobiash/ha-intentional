@@ -10,6 +10,7 @@ CONF_RULE_DIR = "rule_dir"
 
 # Service names
 SERVICE_FIRE = "fire"
+SERVICE_CLEAR = "clear"
 SERVICE_ACTIVATE_SCENE = "activate_scene"
 SERVICE_RELOAD = "reload"
 

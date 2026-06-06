@@ -457,6 +457,16 @@ manual intent with the same default 2-hour TTL. Matching state reports from
 Intentional's own service calls are ignored, so successful automation updates
 do not churn into manual overrides.
 
+To end a manual override before its TTL expires, call `intentional.clear`.
+Pass `target` to clear manual intents for one entity, or omit `target` to
+clear all manual intents:
+
+```yaml
+action: intentional.clear
+data:
+  target: light.living_room
+```
+
 `intentional.fire` accepts the same supported target fields as rule `set`
 payloads: `state`, `brightness_pct`, `brightness`, `color_temp_k`,
 `color_temp_mired`, `rgb_color`, `rgbw_color`, `rgbww_color`, `hs_color`,

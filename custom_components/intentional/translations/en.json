@@ -676,6 +676,18 @@
         }
       }
     },
+    "clear": {
+      "name": "Clear manual intents",
+      "description": "Clear user-authority manual intents created by intentional.fire or state-drift overrides. If target is omitted, clears all manual intents.",
+      "fields": {
+        "target": {
+          "name": "Target",
+          "description": "Optional target entity_id whose manual intents should be cleared.",
+          "required": false,
+          "selector": { "entity": {} }
+        }
+      }
+    },
     "reload": {
       "name": "Reload rules",
       "description": "Re-read rule files from disk without restarting the integration.",

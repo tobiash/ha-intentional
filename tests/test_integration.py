@@ -129,6 +129,7 @@ async def test_services_registered(hass: HomeAssistant, config_entry: MockConfig
     assert "intentional" in services
     intentional_services = services["intentional"]
     assert "fire" in intentional_services
+    assert "clear" in intentional_services
     assert "reload" in intentional_services
     assert "activate_scene" in intentional_services
 
@@ -183,6 +184,54 @@ async def test_reload_service_works(
     await hass.services.async_call(DOMAIN, "reload", blocking=True)
     assert len(engine._rules) == 2  # noqa: SLF001
     assert "extra-rule" in engine._rules  # noqa: SLF001
+
+
+async def test_clear_service_removes_manual_intents(
+    hass: HomeAssistant, config_entry: MockConfigEntry
+) -> None:
+    """Calling intentional.clear should remove manual fire-service intents."""
+    config_entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(config_entry.entry_id)
+
+    engine = hass.data[DOMAIN][config_entry.entry_id]
+
+    await hass.services.async_call(
+        DOMAIN,
+        "fire",
+        {
+            "target": "light.test",
+            "state": "on",
+            "ttl": 7200,
+        },
+        blocking=True,
+    )
+    await hass.services.async_call(
+        DOMAIN,
+        "fire",
+        {
+            "target": "light.other",
+            "state": "off",
+            "ttl": 7200,
+        },
+        blocking=True,
+    )
+
+    assert len(engine.list_active_intents("light.test")) == 1
+    assert len(engine.list_active_intents("light.other")) == 1
+
+    await hass.services.async_call(
+        DOMAIN,
+        "clear",
+        {"target": "light.test"},
+        blocking=True,
+    )
+
+    assert engine.list_active_intents("light.test") == []
+    assert len(engine.list_active_intents("light.other")) == 1
+
+    await hass.services.async_call(DOMAIN, "clear", blocking=True)
+
+    assert engine.list_active_intents("light.other") == []
 
 
 async def test_api_health_endpoint(

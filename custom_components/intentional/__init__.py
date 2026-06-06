@@ -47,6 +47,7 @@ from .const import (
     DEFAULT_RULE_DIR,
     DOMAIN,
     SERVICE_ACTIVATE_SCENE,
+    SERVICE_CLEAR,
     SERVICE_FIRE,
     SERVICE_RELOAD,
     STORAGE_KEY,
@@ -183,6 +184,12 @@ ACTIVATE_SCENE_SCHEMA = vol.Schema(
     {
         vol.Required("rule_id"): cv.string,
         vol.Optional("ttl"): vol.All(int, vol.Range(min=0, max=86400)),
+    }
+)
+
+CLEAR_SERVICE_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_TARGET): cv.entity_id,
     }
 )
 
@@ -644,6 +651,18 @@ async def _register_services(
             rule_id, intent.ttl_ms,
         )
 
+    async def _clear_service(call: ServiceCall) -> None:
+        """Handle the `intentional.clear` service call."""
+        target = call.data.get(ATTR_TARGET)
+        removed = engine.clear_user_intents(target=target)
+        engine.evaluate_all()
+        await _refresh_entities(hass, entry)
+        _LOGGER.info(
+            "Cleared %s manual intent(s)%s",
+            removed,
+            f" for {target}" if target else "",
+        )
+
     async def _reload_service(_call: ServiceCall) -> None:
         """Handle the `intentional.reload` service call.
 
@@ -664,5 +683,6 @@ async def _register_services(
         await _refresh_entities(hass, entry)
 
     hass.services.async_register(DOMAIN, SERVICE_FIRE, _fire_service, schema=FIRE_SERVICE_SCHEMA)
+    hass.services.async_register(DOMAIN, SERVICE_CLEAR, _clear_service, schema=CLEAR_SERVICE_SCHEMA)
     hass.services.async_register(DOMAIN, SERVICE_ACTIVATE_SCENE, _activate_scene_service, schema=ACTIVATE_SCENE_SCHEMA)
     hass.services.async_register(DOMAIN, SERVICE_RELOAD, _reload_service)

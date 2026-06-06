@@ -480,6 +480,28 @@ class TestManualIntents:
         assert resolved.winning_intent.authority is Authority.USER
         assert resolved.value == {"brightness_pct": 100}
 
+    def test_clear_user_intents_only_removes_manual_intents(self) -> None:
+        engine = Engine()
+        engine.load_rules([_rule("r1", 'sensor.x.state == "on"', set={"state": "on"})])
+        engine.update_state("sensor.x", "on")
+        engine.evaluate_all()
+        engine.emit_user_intent("light.x", {"brightness_pct": 100})
+        engine.emit_user_intent("light.y", {"state": "off"})
+
+        assert engine.clear_user_intents("light.x") == 1
+
+        assert [
+            intent.authority for intent in engine.list_active_intents("light.x")
+        ] == [Authority.AUTOMATION]
+        assert len(engine.list_active_intents("light.y")) == 1
+
+        assert engine.clear_user_intents() == 1
+
+        assert [
+            intent.authority for intent in engine.list_active_intents("light.x")
+        ] == [Authority.AUTOMATION]
+        assert engine.list_active_intents("light.y") == []
+
 
 # ── Rule reload ─────────────────────────────────────────────────────
 

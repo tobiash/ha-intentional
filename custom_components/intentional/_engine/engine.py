@@ -173,6 +173,19 @@ class Engine:
         self._active_intents.append(intent)
         return intent
 
+    def clear_user_intents(self, target: str | None = None) -> int:
+        """Remove active manual/user intents, optionally for one target."""
+        before = len(self._active_intents)
+        self._active_intents = [
+            intent for intent in self._active_intents
+            if not (
+                intent.authority is Authority.USER
+                and not intent.rule_id
+                and (target is None or intent.target == target)
+            )
+        ]
+        return before - len(self._active_intents)
+
     def activate_scene_rule(
         self,
         rule_id: str,
