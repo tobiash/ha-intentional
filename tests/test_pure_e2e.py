@@ -536,6 +536,39 @@ def test_doorbell_action_scenario_resolves_stateless_service_calls() -> None:
     }
 
 
+def test_shopping_list_scenario_resolves_stateless_service_calls() -> None:
+    calls = _service_calls_for_yaml(
+        """
+        - id: add-humidifier-filter-when-empty
+          when: input_boolean.buro_luftbefeuchter_leer == "on"
+          emit:
+            target: shopping_list.add_item
+            set:
+              name: Humidifier filter
+            ttl: 5s
+
+        - id: sort-shopping-list-at-night
+          when: time_of_day == "night"
+          emit:
+            target: shopping_list.sort
+            set:
+              reverse: false
+            ttl: 5s
+        """,
+        [_state("input_boolean.buro_luftbefeuchter_leer", "on")],
+        now=datetime(2026, 6, 5, 22, 15, tzinfo=ZoneInfo("Europe/Berlin")),
+    )
+
+    assert calls == {
+        "shopping_list.add_item": (
+            ("shopping_list", "add_item", {"name": "Humidifier filter"}),
+        ),
+        "shopping_list.sort": (
+            ("shopping_list", "sort", {"reverse": False}),
+        ),
+    }
+
+
 def test_input_button_scenario_resolves_helper_press_service_call() -> None:
     calls = _service_calls_for_yaml(
         """

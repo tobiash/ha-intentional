@@ -2445,6 +2445,29 @@ def test_notify_state_alias_maps_to_message() -> None:
     )
 
 
+def test_shopping_list_target_maps_to_shopping_list_services() -> None:
+    from intentional.ha_adapter import service_calls_for_resolved_target
+
+    assert service_calls_for_resolved_target(
+        "shopping_list.add_item",
+        {"name": "Coffee"},
+    ) == (
+        ("shopping_list", "add_item", {"name": "Coffee"}),
+    )
+    assert service_calls_for_resolved_target(
+        "shopping_list.complete_item",
+        {"state": "Milk"},
+    ) == (
+        ("shopping_list", "complete_item", {"name": "Milk"}),
+    )
+    assert service_calls_for_resolved_target(
+        "shopping_list.sort",
+        {"reverse": True},
+    ) == (
+        ("shopping_list", "sort", {"reverse": True}),
+    )
+
+
 def test_service_plan_signature_freezes_nested_notify_data() -> None:
     from intentional.ha_adapter import (
         service_calls_for_resolved_target,

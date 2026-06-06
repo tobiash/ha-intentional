@@ -145,6 +145,7 @@ The integration currently supports:
 | `persistent_notification.*` | calls the matching persistent_notification service |
 | `logbook.*`     | calls the matching logbook service                     |
 | `system_log.*`  | calls the matching system_log service                  |
+| `shopping_list.*` | calls the matching shopping_list service             |
 | `tts.*`         | `tts.speak`, `tts.cloud_say`, `tts.clear_cache`         |
 | `button.*`      | `button.press`                                         |
 | `input_button.*` | `input_button.press`                                  |
@@ -220,7 +221,9 @@ service name, for example `target: browser_mod.notification`; use
 `service_data` for less common Browser Mod fields. Telegram Bot targets work the
 same way, for example `target: telegram_bot.send_message`. Stateless service
 targets for `rest_command.*`, `persistent_notification.*`, `logbook.*`, and
-`system_log.*` also use the target object as the service name. Use
+`system_log.*` also use the target object as the service name. Shopping list
+targets work the same way, for example `target: shopping_list.add_item`, and
+support `name` for item services plus `reverse` for `shopping_list.sort`. Use
 `service_data` for service-specific fields such as `notification_id`, `level`,
 `name`, or `entity_id`. TTS provider targets such as
 `target: tts.google_ai_tts` call `tts.speak`; `target: tts.cloud_say` calls
@@ -464,7 +467,7 @@ payloads: `state`, `brightness_pct`, `brightness`, `color_temp_k`,
 `hvac_mode`, `temperature`, `target_temp_low`, `target_temp_high`,
 `preset_mode`, `fan_mode`, `direction`, `oscillating`, `value`, `option`, `cycle`,
 `humidity`, `swing_mode`, `swing_horizontal_mode`, `aux_heat`, `code`,
-`message`, `title`,
+`message`, `name`, `title`,
 `data`, `service`, `service_data`, `media_player_entity_id`, `cache`,
 `language`, `options`, `browser_id`, `user_id`, `path`, `action_text`, `action`,
 `parse_mode`, `disable_notification`, `disable_web_page_preview`, `keyboard`,
@@ -475,7 +478,7 @@ payloads: `state`, `brightness_pct`, `brightness`, `color_temp_k`,
 `fan_speed`, `command`, `params`, `cleaning_area_id`, `activity`, `device`,
 `num_repeats`, `delay_secs`, `hold_secs`, `camera_action`, `filename`,
 `media_player`, `format`, `lookback`, `update_action`, `version`, `backup`,
-and `update_entity`.
+`reverse`, and `update_entity`.
 For example, a dashboard button can force TV settings without creating a YAML
 rule:
 

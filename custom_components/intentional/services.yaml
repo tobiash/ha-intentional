@@ -507,6 +507,13 @@ fire:
       example: Security
       selector:
         text:
+    name:
+      name: Name
+      description: Shopping list item name or service-specific display name.
+      required: false
+      example: Coffee
+      selector:
+        text:
     data:
       name: Data
       description: Optional notification data payload for notify targets.
@@ -738,6 +745,13 @@ fire:
       example: "00:10:00"
       selector:
         text:
+    reverse:
+      name: Reverse
+      description: Whether shopping_list.sort should sort in reverse order.
+      required: false
+      example: false
+      selector:
+        boolean:
     update_action:
       name: Update action
       description: "Action for update entities: install, skip, or clear_skipped."

@@ -77,6 +77,7 @@ MANUAL_SET_FIELDS = (
     "cycle",
     "code",
     "message",
+    "name",
     "title",
     "data",
     "service",
@@ -111,6 +112,7 @@ MANUAL_SET_FIELDS = (
     "time",
     "timestamp",
     "duration",
+    "reverse",
     "update_action",
     "version",
     "backup",
@@ -291,6 +293,7 @@ MEDIA_PLAYER_ACTION_SERVICES = {
 }
 ACTION_SERVICE_FIELDS = frozenset({
     "message",
+    "name",
     "title",
     "data",
     "media_player_entity_id",
@@ -310,6 +313,7 @@ ACTION_SERVICE_FIELDS = frozenset({
     "message_tag",
     "chat_id",
     "duration",
+    "reverse",
 })
 TTS_SERVICE_TARGETS = frozenset({"speak", "cloud_say", "clear_cache"})
 
@@ -1121,9 +1125,26 @@ def _service_calls_without_update_entity(
         data = _action_service_data(value)
         return ((domain, service, data),)
 
-    if domain in {"rest_command", "persistent_notification", "logbook", "system_log"}:
+    if domain in {
+        "rest_command",
+        "persistent_notification",
+        "logbook",
+        "system_log",
+    }:
         service = str(value.get("service", state or _object_id))
         data = _action_service_data(value)
+        return ((domain, service, data),)
+
+    if domain == "shopping_list":
+        service = str(value.get("service", _object_id or state))
+        data = _action_service_data(value)
+        if service in {
+            "add_item",
+            "remove_item",
+            "complete_item",
+            "incomplete_item",
+        } and "name" not in data and state is not None:
+            data["name"] = state
         return ((domain, service, data),)
 
     if domain == "tts":
@@ -1345,6 +1366,7 @@ def _expected_states_for_service(domain: str, service: str) -> set[str] | None:
         "persistent_notification",
         "logbook",
         "system_log",
+        "shopping_list",
         "camera",
         "update",
         "scene",

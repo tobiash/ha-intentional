@@ -414,6 +414,12 @@
           "required": false,
           "selector": { "text": {} }
         },
+        "name": {
+          "name": "Name",
+          "description": "Shopping list item name or service-specific display name.",
+          "required": false,
+          "selector": { "text": {} }
+        },
         "data": {
           "name": "Data",
           "description": "Optional notification data payload for notify targets.",
@@ -611,6 +617,12 @@
           "description": "Optional duration for timer.start or siren.turn_on targets.",
           "required": false,
           "selector": { "text": {} }
+        },
+        "reverse": {
+          "name": "Reverse",
+          "description": "Whether shopping_list.sort should sort in reverse order.",
+          "required": false,
+          "selector": { "boolean": {} }
         },
         "update_action": {
           "name": "Update action",
