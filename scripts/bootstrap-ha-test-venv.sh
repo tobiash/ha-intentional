@@ -29,6 +29,5 @@ cat <<EOF
 Created ${VENV_DIR} with Home Assistant ${HA_VERSION}.
 
 Useful checks:
-  ${VENV_DIR}/bin/python -m pytest tests/test_api.py tests/test_integration.py -v --tb=short
-  ${VENV_DIR}/bin/python -m pytest -m e2e_config_flow tests/test_e2e_config_flow.py -v --tb=short
+  scripts/run-ha-tests.sh
 EOF

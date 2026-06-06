@@ -33,11 +33,16 @@ Full HA-backed loop:
 
 ```bash
 scripts/bootstrap-ha-test-venv.sh
-.venv-ha/bin/python -m pytest tests/test_api.py tests/test_integration.py -v --tb=short
-.venv-ha/bin/python -m pytest -m e2e_config_flow tests/test_e2e_config_flow.py -v --tb=short
+scripts/run-ha-tests.sh
 ```
 
 The bootstrap script requires Python 3.14 by default to match CI, and pins
 Home Assistant plus `pytest-homeassistant-custom-component` to the same versions
 as the workflow. The full loop is large because Home Assistant and its harness
 pull a substantial dependency tree. CI is the normal place to run it.
+
+The HA-backed tests use Home Assistant's aiohttp test harness and need local
+network access. If you run them from a sandboxed agent or container, allow
+local networking; a network-isolated sandbox can make the first HA test appear
+to hang. `scripts/run-ha-tests.sh` adds a per-test timeout so that real stalls
+fail with diagnostics.

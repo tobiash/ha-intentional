@@ -73,14 +73,19 @@ The integration tests need HA:
 
 ```bash
 scripts/bootstrap-ha-test-venv.sh
-.venv-ha/bin/python -m pytest tests/test_api.py tests/test_integration.py -v --tb=short
-.venv-ha/bin/python -m pytest -m e2e_config_flow tests/test_e2e_config_flow.py -v --tb=short
+scripts/run-ha-tests.sh
 ```
 
 This requires Python 3.14 by default, matching CI. Set `PYTHON_BIN` if your
 Python 3.14 executable is elsewhere. It also requires ~500MB of disk space for
 the HA dependency tree. Most developers only run unit tests locally and let CI
 handle the integration suite.
+
+The HA-backed tests need local networking for the Home Assistant/aiohttp test
+harness. If they are run from a network-isolated sandbox, the first test can
+look stuck until a timeout kills it. Run `scripts/run-ha-tests.sh` with local
+networking enabled; set `PYTEST_TIMEOUT=300` if a slow machine needs a longer
+per-test timeout.
 
 ## Manual trigger
 
