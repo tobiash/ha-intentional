@@ -2181,6 +2181,63 @@ def test_telegram_bot_target_maps_to_named_service() -> None:
     )
 
 
+def test_stateless_service_targets_map_to_named_services() -> None:
+    from intentional.ha_adapter import service_calls_for_resolved_target
+
+    assert service_calls_for_resolved_target(
+        "rest_command.ring_fritzbox_phones",
+        {"service_data": {"phone": "**9"}},
+    ) == (
+        ("rest_command", "ring_fritzbox_phones", {"phone": "**9"}),
+    )
+    assert service_calls_for_resolved_target(
+        "persistent_notification.create",
+        {
+            "message": "Doorbell rang",
+            "title": "Doorbell",
+            "service_data": {"notification_id": "doorbell"},
+        },
+    ) == (
+        (
+            "persistent_notification",
+            "create",
+            {
+                "notification_id": "doorbell",
+                "message": "Doorbell rang",
+                "title": "Doorbell",
+            },
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "logbook.log",
+        {
+            "message": "Doorbell rang",
+            "service_data": {
+                "name": "Intentional",
+                "entity_id": "event.espnow_recv_doorbell",
+                "domain": "event",
+            },
+        },
+    ) == (
+        (
+            "logbook",
+            "log",
+            {
+                "name": "Intentional",
+                "entity_id": "event.espnow_recv_doorbell",
+                "domain": "event",
+                "message": "Doorbell rang",
+            },
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "system_log.write",
+        {"message": "Doorbell rang", "service_data": {"level": "info"}},
+    ) == (
+        ("system_log", "write", {"level": "info", "message": "Doorbell rang"}),
+    )
+
+
 def test_tts_target_maps_to_speak_and_cloud_say_services() -> None:
     from intentional.ha_adapter import service_calls_for_resolved_target
 

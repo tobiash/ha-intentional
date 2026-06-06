@@ -425,6 +425,74 @@ def test_counter_scenario_resolves_counter_service_call() -> None:
     }
 
 
+def test_doorbell_action_scenario_resolves_stateless_service_calls() -> None:
+    calls = _service_calls_for_yaml(
+        """
+        - id: ring-phones
+          when: binary_sensor.doorbell == "on"
+          emit:
+            target: rest_command.ring_fritzbox_phones
+            set:
+              service_data:
+                phone: "**9"
+            ttl: 5s
+
+        - id: doorbell-persistent-notification
+          when: binary_sensor.doorbell == "on"
+          emit:
+            target: persistent_notification.create
+            set:
+              title: "Doorbell"
+              message: "Someone rang the doorbell"
+              service_data:
+                notification_id: doorbell
+            ttl: 5s
+
+        - id: doorbell-logbook
+          when: binary_sensor.doorbell == "on"
+          emit:
+            target: logbook.log
+            set:
+              message: "Doorbell rang"
+              service_data:
+                name: "Intentional"
+                entity_id: binary_sensor.doorbell
+                domain: binary_sensor
+            ttl: 5s
+        """,
+        [_state("binary_sensor.doorbell", "on")],
+    )
+
+    assert calls == {
+        "logbook.log": (
+            (
+                "logbook",
+                "log",
+                {
+                    "name": "Intentional",
+                    "entity_id": "binary_sensor.doorbell",
+                    "domain": "binary_sensor",
+                    "message": "Doorbell rang",
+                },
+            ),
+        ),
+        "persistent_notification.create": (
+            (
+                "persistent_notification",
+                "create",
+                {
+                    "notification_id": "doorbell",
+                    "message": "Someone rang the doorbell",
+                    "title": "Doorbell",
+                },
+            ),
+        ),
+        "rest_command.ring_fritzbox_phones": (
+            ("rest_command", "ring_fritzbox_phones", {"phone": "**9"}),
+        ),
+    }
+
+
 def test_input_button_scenario_resolves_helper_press_service_call() -> None:
     calls = _service_calls_for_yaml(
         """

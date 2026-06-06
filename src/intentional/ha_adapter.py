@@ -1075,6 +1075,11 @@ def _service_calls_without_update_entity(
         data = _action_service_data(value)
         return ((domain, service, data),)
 
+    if domain in {"rest_command", "persistent_notification", "logbook", "system_log"}:
+        service = str(value.get("service", state or _object_id))
+        data = _action_service_data(value)
+        return ((domain, service, data),)
+
     if domain == "tts":
         service = str(value.get("service", state or "speak"))
         if _object_id in TTS_SERVICE_TARGETS and "service" not in value and state is None:
@@ -1275,6 +1280,10 @@ def _expected_states_for_service(domain: str, service: str) -> set[str] | None:
         "telegram_bot",
         "tts",
         "alert",
+        "rest_command",
+        "persistent_notification",
+        "logbook",
+        "system_log",
         "scene",
         "siren",
     }:

@@ -140,6 +140,10 @@ The integration currently supports:
 | `alert.*`       | `alert.turn_on`, `alert.turn_off`, `alert.toggle`      |
 | `browser_mod.*` | calls the matching Browser Mod service                 |
 | `telegram_bot.*` | calls the matching Telegram Bot service               |
+| `rest_command.*` | calls the matching rest_command service               |
+| `persistent_notification.*` | calls the matching persistent_notification service |
+| `logbook.*`     | calls the matching logbook service                     |
+| `system_log.*`  | calls the matching system_log service                  |
 | `tts.*`         | `tts.speak`, `tts.cloud_say`, `tts.clear_cache`         |
 | `button.*`      | `button.press`                                         |
 | `input_button.*` | `input_button.press`                                  |
@@ -207,9 +211,13 @@ as a shorthand for `message`. Alert targets support `state: on`, `state: off`,
 and `state: toggle`. Browser Mod targets use the target object as the
 service name, for example `target: browser_mod.notification`; use
 `service_data` for less common Browser Mod fields. Telegram Bot targets work the
-same way, for example `target: telegram_bot.send_message`. TTS provider targets
-such as `target: tts.google_ai_tts` call `tts.speak`; `target: tts.cloud_say`
-calls `tts.cloud_say`.
+same way, for example `target: telegram_bot.send_message`. Stateless service
+targets for `rest_command.*`, `persistent_notification.*`, `logbook.*`, and
+`system_log.*` also use the target object as the service name. Use
+`service_data` for service-specific fields such as `notification_id`, `level`,
+`name`, or `entity_id`. TTS provider targets such as
+`target: tts.google_ai_tts` call `tts.speak`; `target: tts.cloud_say` calls
+`tts.cloud_say`.
 Button, scene, script, and automation targets are
 treated as fire-and-forget action targets: once a resolved service plan is
 called, normal HA state settling does not re-trigger the action while the same
