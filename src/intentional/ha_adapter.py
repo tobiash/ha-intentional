@@ -1540,8 +1540,9 @@ def sync_state_object_into_engine(engine: Engine, state: Any) -> None:
     engine.update_state(entity_id, state.state)
 
     current_fields = {"state"}
-    if entity_id.startswith("event.") and f"{entity_id}.triggered" in engine.state:
-        current_fields.add("triggered")
+    for synthetic_field in ("changed", "triggered"):
+        if f"{entity_id}.{synthetic_field}" in engine.state:
+            current_fields.add(synthetic_field)
     for field, value in state.attributes.items():
         current_fields.add(field)
         engine.update_state(entity_id, value, field=field)
@@ -1555,29 +1556,52 @@ def sync_state_object_into_engine(engine: Engine, state: Any) -> None:
             del engine.state[key]
 
 
+def pulse_state_change(
+    engine: Engine,
+    old_state: Any | None,
+    new_state: Any,
+) -> bool:
+    """Expose a real HA entity state change as one-cycle trigger pulses.
+
+    Rules often need edge semantics instead of level semantics: "this value
+    just changed." Home Assistant event entities also keep their latest event
+    as state and attributes, so they retain the older `triggered` pulse as a
+    more domain-specific alias. The integration clears pulses after one apply
+    cycle.
+    """
+    entity_id = new_state.entity_id
+    if old_state is None:
+        return False
+    old_attributes = getattr(old_state, "attributes", {})
+    new_attributes = getattr(new_state, "attributes", {})
+    event_type_changed = old_attributes.get("event_type") != new_attributes.get(
+        "event_type"
+    )
+    if old_state.state == new_state.state and not event_type_changed:
+        return False
+    engine.update_state(entity_id, True, field="changed")
+    if entity_id.startswith("event."):
+        engine.update_state(entity_id, True, field="triggered")
+    return True
+
+
 def pulse_event_state_change(
     engine: Engine,
     old_state: Any | None,
     new_state: Any,
 ) -> bool:
-    """Expose an HA event entity state change as a one-cycle trigger pulse.
+    """Backward-compatible alias for event/entity state-change pulses."""
+    return pulse_state_change(engine, old_state, new_state)
 
-    Home Assistant event entities keep their latest event as state and
-    attributes. Rules often need edge semantics instead: "this event just
-    happened." The integration clears the pulse after one apply cycle.
-    """
-    entity_id = new_state.entity_id
-    if not entity_id.startswith("event.") or old_state is None:
-        return False
-    if old_state.state == new_state.state and getattr(
-        old_state, "attributes", {}
-    ).get("event_type") == getattr(new_state, "attributes", {}).get("event_type"):
-        return False
-    engine.update_state(entity_id, True, field="triggered")
-    return True
+
+def clear_state_change_pulses(engine: Engine, entity_ids: set[str]) -> None:
+    """Clear one-cycle state-change pulses after the integration applies them."""
+    for entity_id in entity_ids:
+        engine.update_state(entity_id, False, field="changed")
+        if entity_id.startswith("event."):
+            engine.update_state(entity_id, False, field="triggered")
 
 
 def clear_event_trigger_pulses(engine: Engine, entity_ids: set[str]) -> None:
-    """Clear one-cycle event trigger pulses after the integration applies them."""
-    for entity_id in entity_ids:
-        engine.update_state(entity_id, False, field="triggered")
+    """Backward-compatible alias for clearing state-change pulses."""
+    clear_state_change_pulses(engine, entity_ids)

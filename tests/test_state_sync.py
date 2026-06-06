@@ -111,6 +111,7 @@ def test_event_state_change_exposes_one_cycle_trigger_pulse() -> None:
     engine.evaluate_all()
 
     assert engine.resolve("telegram_bot.send_message") is None
+    assert engine.state["event.espnow_recv_doorbell.changed"] is False
     assert engine.state["event.espnow_recv_doorbell.triggered"] is False
 
 
@@ -127,6 +128,67 @@ def test_event_state_change_does_not_pulse_initial_state() -> None:
 
     assert not pulse_event_state_change(engine, None, new_state)
     assert "event.espnow_recv_doorbell.triggered" not in engine.state
+
+
+def test_regular_state_change_exposes_one_cycle_changed_pulse() -> None:
+    from intentional.engine import Engine
+    from intentional.ha_adapter import (
+        clear_state_change_pulses,
+        pulse_state_change,
+        sync_state_object_into_engine,
+    )
+    from intentional.yaml_loader import Rule
+
+    engine = Engine(clock_fn=lambda: 1000)
+    engine.load_rules([
+        Rule(
+            id="door-open-notify",
+            when='binary_sensor.front_door.changed == true and binary_sensor.front_door == "on"',
+            target="notify.pixel_8_pro",
+            set={"message": "Front door opened"},
+        )
+    ])
+    old_state = SimpleNamespace(
+        entity_id="binary_sensor.front_door",
+        state="off",
+        attributes={"device_class": "door"},
+    )
+    new_state = SimpleNamespace(
+        entity_id="binary_sensor.front_door",
+        state="on",
+        attributes={"device_class": "door"},
+    )
+
+    sync_state_object_into_engine(engine, new_state)
+    assert pulse_state_change(engine, old_state, new_state)
+    sync_state_object_into_engine(engine, new_state)
+    engine.evaluate_all()
+
+    resolved = engine.resolve("notify.pixel_8_pro")
+    assert resolved is not None
+    assert resolved.value == {"message": "Front door opened"}
+
+    clear_state_change_pulses(engine, {"binary_sensor.front_door"})
+    engine.evaluate_all()
+
+    assert engine.resolve("notify.pixel_8_pro") is None
+    assert engine.state["binary_sensor.front_door.changed"] is False
+    assert "binary_sensor.front_door.triggered" not in engine.state
+
+
+def test_regular_state_change_does_not_pulse_initial_state() -> None:
+    from intentional.engine import Engine
+    from intentional.ha_adapter import pulse_state_change
+
+    engine = Engine(clock_fn=lambda: 1000)
+    new_state = SimpleNamespace(
+        entity_id="binary_sensor.front_door",
+        state="on",
+        attributes={"device_class": "door"},
+    )
+
+    assert not pulse_state_change(engine, None, new_state)
+    assert "binary_sensor.front_door.changed" not in engine.state
 
 
 def test_time_sync_sets_bucket_and_exact_clock_context() -> None:

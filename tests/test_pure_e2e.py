@@ -536,6 +536,54 @@ def test_doorbell_action_scenario_resolves_stateless_service_calls() -> None:
     }
 
 
+def test_changed_pulse_scenario_resolves_only_for_one_cycle() -> None:
+    from intentional.engine import Engine
+    from intentional.ha_adapter import (
+        clear_state_change_pulses,
+        pulse_state_change,
+        service_calls_for_resolved_target,
+        sync_state_object_into_engine,
+    )
+    from intentional.yaml_loader import load_rules_from_string
+
+    engine = Engine(clock_fn=lambda: 1000)
+    engine.load_rules(load_rules_from_string("""
+        - id: notify-door-opened
+          when: binary_sensor.front_door.changed == true and binary_sensor.front_door == "on"
+          emit:
+            target: notify.pixel_8_pro
+            set:
+              title: Door
+              message: Front door opened
+            ttl: 5s
+    """))
+    old_state = _state("binary_sensor.front_door", "off", device_class="door")
+    new_state = _state("binary_sensor.front_door", "on", device_class="door")
+
+    sync_state_object_into_engine(engine, new_state)
+    assert pulse_state_change(engine, old_state, new_state)
+    sync_state_object_into_engine(engine, new_state)
+    engine.evaluate_all()
+
+    resolved = engine.resolve("notify.pixel_8_pro")
+    assert resolved is not None
+    assert service_calls_for_resolved_target(
+        "notify.pixel_8_pro",
+        dict(resolved.value),
+    ) == (
+        (
+            "notify",
+            "pixel_8_pro",
+            {"message": "Front door opened", "title": "Door"},
+        ),
+    )
+
+    clear_state_change_pulses(engine, {"binary_sensor.front_door"})
+    engine.evaluate_all()
+
+    assert engine.resolve("notify.pixel_8_pro") is None
+
+
 def test_shopping_list_scenario_resolves_stateless_service_calls() -> None:
     calls = _service_calls_for_yaml(
         """

@@ -29,10 +29,10 @@ from homeassistant.helpers.typing import ConfigType
 from ._engine import Engine, RuleLoadError, load_rules
 from ._engine.ha_adapter import (
     ServicePlanSignature,
-    clear_event_trigger_pulses,
+    clear_state_change_pulses,
     emit_manual_override_for_state_drift,
     manual_set_from_service_data,
-    pulse_event_state_change,
+    pulse_state_change,
     scene_activation_plan,
     service_calls_for_resolved_target,
     service_plan_signature,
@@ -262,8 +262,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # frequently, so identical resolved values should not produce repeated HA
     # service calls.
     _last_applied_targets: dict[str, ServicePlanSignature] = {}
-    # Track event entity pulses that should stay true through one apply cycle.
-    _event_pulses: set[str] = set()
+    # Track state-change pulses that should stay true through one apply cycle.
+    _state_change_pulses: set[str] = set()
     # Event used to signal the tick loop to stop. We use an event rather
     # than ``while True:`` + ``task.cancel()`` because cancellation only
     # takes effect at the next ``await``; if a slow ``_refresh_entities``
@@ -301,9 +301,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             # Apply resolved target intents to HA entities.
             await _apply_resolved_targets(hass, engine, _last_applied_targets)
-            if _event_pulses:
-                clear_event_trigger_pulses(engine, _event_pulses)
-                _event_pulses.clear()
+            if _state_change_pulses:
+                clear_state_change_pulses(engine, _state_change_pulses)
+                _state_change_pulses.clear()
                 engine.evaluate_all()
                 for stale_target in set(_last_applied_targets) - set(
                     engine.list_active_targets()
@@ -346,7 +346,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass,
                 engine,
                 _last_applied_targets,
-                _event_pulses,
+                _state_change_pulses,
             ),
         )
     )
@@ -468,7 +468,7 @@ def _on_ha_state_change_factory(
     hass: HomeAssistant,
     engine: Engine,
     last_applied: dict[str, ServicePlanSignature] | None = None,
-    event_pulses: set[str] | None = None,
+    state_change_pulses: set[str] | None = None,
 ):
     """Return a state_changed listener that pushes updates into the engine."""
 
@@ -478,10 +478,10 @@ def _on_ha_state_change_factory(
         if new_state is None:
             return
         sync_state_object_into_engine(engine, new_state)
-        if event_pulses is not None and pulse_event_state_change(
+        if state_change_pulses is not None and pulse_state_change(
             engine, old_state, new_state
         ):
-            event_pulses.add(new_state.entity_id)
+            state_change_pulses.add(new_state.entity_id)
         if last_applied is not None:
             emit_manual_override_for_state_drift(
                 engine,
