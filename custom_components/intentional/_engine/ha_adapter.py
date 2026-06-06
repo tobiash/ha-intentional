@@ -1135,6 +1135,13 @@ def _service_calls_without_update_entity(
         data = _action_service_data(value)
         return ((domain, service, data),)
 
+    if domain == "intentional":
+        service = str(value.get("service", state or _object_id))
+        if service != "clear":
+            return ()
+        data = _action_service_data(value)
+        return ((domain, service, data),)
+
     if domain == "shopping_list":
         service = str(value.get("service", _object_id or state))
         data = _action_service_data(value)
@@ -1367,6 +1374,7 @@ def _expected_states_for_service(domain: str, service: str) -> set[str] | None:
         "logbook",
         "system_log",
         "shopping_list",
+        "intentional",
         "camera",
         "update",
         "scene",

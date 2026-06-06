@@ -2236,6 +2236,16 @@ def test_stateless_service_targets_map_to_named_services() -> None:
     ) == (
         ("system_log", "write", {"level": "info", "message": "Doorbell rang"}),
     )
+    assert service_calls_for_resolved_target(
+        "intentional.clear",
+        {"service_data": {"target": "light.office"}},
+    ) == (
+        ("intentional", "clear", {"target": "light.office"}),
+    )
+    assert service_calls_for_resolved_target(
+        "intentional.fire",
+        {"service_data": {"target": "light.office", "state": "on"}},
+    ) == ()
 
 
 def test_camera_target_maps_to_camera_services() -> None:

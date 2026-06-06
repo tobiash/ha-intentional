@@ -146,6 +146,7 @@ The integration currently supports:
 | `logbook.*`     | calls the matching logbook service                     |
 | `system_log.*`  | calls the matching system_log service                  |
 | `shopping_list.*` | calls the matching shopping_list service             |
+| `intentional.clear` | clears manual Intentional overrides                 |
 | `tts.*`         | `tts.speak`, `tts.cloud_say`, `tts.clear_cache`         |
 | `button.*`      | `button.press`                                         |
 | `input_button.*` | `input_button.press`                                  |
@@ -225,7 +226,9 @@ targets for `rest_command.*`, `persistent_notification.*`, `logbook.*`, and
 targets work the same way, for example `target: shopping_list.add_item`, and
 support `name` for item services plus `reverse` for `shopping_list.sort`. Use
 `service_data` for service-specific fields such as `notification_id`, `level`,
-`name`, or `entity_id`. TTS provider targets such as
+`name`, or `entity_id`. Rules can also target `intentional.clear`; pass
+`service_data.target` to clear overrides for one entity, or omit it to clear
+all manual overrides. TTS provider targets such as
 `target: tts.google_ai_tts` call `tts.speak`; `target: tts.cloud_say` calls
 `tts.cloud_say`.
 Button, scene, script, and automation targets are
@@ -465,6 +468,20 @@ clear all manual intents:
 action: intentional.clear
 data:
   target: light.living_room
+```
+
+Rules can clear overrides too, which is useful for replacing helper-driven
+manual override reset automations:
+
+```yaml
+- id: clear-office-light-override-when-room-empty
+  when: binary_sensor.office_presence == "off" and input_boolean.office_manual_override == "on"
+  emit:
+    target: intentional.clear
+    set:
+      service_data:
+        target: light.office
+    ttl: 5s
 ```
 
 `intentional.fire` accepts the same supported target fields as rule `set`

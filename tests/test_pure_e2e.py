@@ -569,6 +569,31 @@ def test_shopping_list_scenario_resolves_stateless_service_calls() -> None:
     }
 
 
+def test_manual_override_clear_scenario_resolves_intentional_service_call() -> None:
+    calls = _service_calls_for_yaml(
+        """
+        - id: clear-office-light-override-when-room-empty
+          when: binary_sensor.office_presence == "off" and input_boolean.office_manual_override == "on"
+          emit:
+            target: intentional.clear
+            set:
+              service_data:
+                target: light.office
+            ttl: 5s
+        """,
+        [
+            _state("binary_sensor.office_presence", "off"),
+            _state("input_boolean.office_manual_override", "on"),
+        ],
+    )
+
+    assert calls == {
+        "intentional.clear": (
+            ("intentional", "clear", {"target": "light.office"}),
+        ),
+    }
+
+
 def test_input_button_scenario_resolves_helper_press_service_call() -> None:
     calls = _service_calls_for_yaml(
         """
