@@ -153,6 +153,7 @@ The integration currently supports:
 | `mqtt.publish`  | publishes an MQTT message via `service_data`           |
 | `google_assistant.request_sync` | requests a Google Assistant device sync via `service_data` |
 | `assist_satellite.announce`, `assist_satellite.start_conversation` | sends Assist Satellite announcements/conversation starts via `service_data` |
+| `alarmo.arm`, `alarmo.disarm`, `alarmo.skip_delay` | calls Alarmo-specific alarm services via `service_data` |
 | `tts.*`         | `tts.speak`, `tts.cloud_say`, `tts.clear_cache`         |
 | `button.*`      | `button.press`                                         |
 | `input_button.*` | `input_button.press`                                  |
@@ -246,7 +247,10 @@ changes, target `google_assistant.request_sync` and optionally pass
 `announce` and `start_conversation` for fire-and-forget voice prompts; use
 `service_data` for `entity_id`, `message`, `start_message`, `media_id`, and
 `preannounce` fields. `assist_satellite.ask_question` is intentionally not a
-rule target because it requires a service response. TTS provider targets such as
+rule target because it requires a service response. Alarmo targets expose the
+Alarmo-specific arm/disarm path for fields such as `mode`, `skip_delay`,
+`force`, and `code`; Alarmo user-management services are intentionally not rule
+targets. TTS provider targets such as
 `target: tts.google_ai_tts` call `tts.speak`; `target: tts.cloud_say` calls
 `tts.cloud_say`.
 Button, scene, script, and automation targets are

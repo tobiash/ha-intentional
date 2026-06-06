@@ -670,6 +670,40 @@ def test_assist_satellite_announce_scenario_resolves_announce_service_call() -> 
     }
 
 
+def test_alarmo_night_arm_scenario_resolves_alarmo_service_call() -> None:
+    calls = _service_calls_for_yaml(
+        """
+        - id: arm-alarmo-night-when-bedtime-starts
+          when: schedule.bedtime.changed == true and schedule.bedtime == "on"
+          emit:
+            target: alarmo.arm
+            set:
+              service_data:
+                entity_id: alarm_control_panel.alarmo
+                mode: night
+                skip_delay: true
+                force: true
+            ttl: 5s
+        """,
+        [_state("schedule.bedtime", "on", changed=True)],
+    )
+
+    assert calls == {
+        "alarmo.arm": (
+            (
+                "alarmo",
+                "arm",
+                {
+                    "entity_id": "alarm_control_panel.alarmo",
+                    "mode": "night",
+                    "skip_delay": True,
+                    "force": True,
+                },
+            ),
+        ),
+    }
+
+
 def test_changed_pulse_scenario_resolves_only_for_one_cycle() -> None:
     from intentional.engine import Engine
     from intentional.ha_adapter import (

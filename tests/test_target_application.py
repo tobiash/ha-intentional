@@ -2383,6 +2383,47 @@ def test_stateless_service_targets_map_to_named_services() -> None:
             },
         },
     ) == ()
+    assert service_calls_for_resolved_target(
+        "alarmo.arm",
+        {
+            "service_data": {
+                "entity_id": "alarm_control_panel.alarmo",
+                "mode": "night",
+                "skip_delay": True,
+                "force": True,
+            },
+        },
+    ) == (
+        (
+            "alarmo",
+            "arm",
+            {
+                "entity_id": "alarm_control_panel.alarmo",
+                "mode": "night",
+                "skip_delay": True,
+                "force": True,
+            },
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "alarmo.disarm",
+        {
+            "service_data": {
+                "entity_id": "alarm_control_panel.alarmo",
+                "code": "1234",
+            },
+        },
+    ) == (
+        (
+            "alarmo",
+            "disarm",
+            {"entity_id": "alarm_control_panel.alarmo", "code": "1234"},
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "alarmo.enable_user",
+        {"service_data": {"name": "Guest"}},
+    ) == ()
 
 
 def test_camera_target_maps_to_camera_services() -> None:

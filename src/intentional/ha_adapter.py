@@ -1172,6 +1172,13 @@ def _service_calls_without_update_entity(
         data = _action_service_data(value)
         return ((domain, service, data),)
 
+    if domain == "alarmo":
+        service = str(value.get("service", state or _object_id))
+        if service not in {"arm", "disarm", "skip_delay"}:
+            return ()
+        data = _action_service_data(value)
+        return ((domain, service, data),)
+
     if domain == "shopping_list":
         service = str(value.get("service", _object_id or state))
         data = _action_service_data(value)
@@ -1411,6 +1418,7 @@ def _expected_states_for_service(domain: str, service: str) -> set[str] | None:
         "mqtt",
         "google_assistant",
         "assist_satellite",
+        "alarmo",
         "camera",
         "update",
         "scene",
