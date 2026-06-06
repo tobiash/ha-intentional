@@ -2336,6 +2336,53 @@ def test_stateless_service_targets_map_to_named_services() -> None:
         "google_assistant.reload",
         {},
     ) == ()
+    assert service_calls_for_resolved_target(
+        "assist_satellite.announce",
+        {
+            "service_data": {
+                "entity_id": "assist_satellite.kitchen",
+                "message": "Doorbell",
+                "preannounce": False,
+            },
+        },
+    ) == (
+        (
+            "assist_satellite",
+            "announce",
+            {
+                "entity_id": "assist_satellite.kitchen",
+                "message": "Doorbell",
+                "preannounce": False,
+            },
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "assist_satellite.start_conversation",
+        {
+            "service_data": {
+                "entity_id": "assist_satellite.kitchen",
+                "start_message": "Front door is open.",
+            },
+        },
+    ) == (
+        (
+            "assist_satellite",
+            "start_conversation",
+            {
+                "entity_id": "assist_satellite.kitchen",
+                "start_message": "Front door is open.",
+            },
+        ),
+    )
+    assert service_calls_for_resolved_target(
+        "assist_satellite.ask_question",
+        {
+            "service_data": {
+                "entity_id": "assist_satellite.kitchen",
+                "question": "Close the door?",
+            },
+        },
+    ) == ()
 
 
 def test_camera_target_maps_to_camera_services() -> None:

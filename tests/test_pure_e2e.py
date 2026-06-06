@@ -638,6 +638,38 @@ def test_google_assistant_sync_scenario_resolves_request_sync_service_call() -> 
     }
 
 
+def test_assist_satellite_announce_scenario_resolves_announce_service_call() -> None:
+    calls = _service_calls_for_yaml(
+        """
+        - id: announce-air-quality-alert
+          when: binary_sensor.lqi_hobbyraum.changed == true and binary_sensor.lqi_hobbyraum == "on"
+          emit:
+            target: assist_satellite.announce
+            set:
+              service_data:
+                entity_id: assist_satellite.hobbyraum
+                message: Air quality alert
+                preannounce: false
+            ttl: 5s
+        """,
+        [_state("binary_sensor.lqi_hobbyraum", "on", changed=True)],
+    )
+
+    assert calls == {
+        "assist_satellite.announce": (
+            (
+                "assist_satellite",
+                "announce",
+                {
+                    "entity_id": "assist_satellite.hobbyraum",
+                    "message": "Air quality alert",
+                    "preannounce": False,
+                },
+            ),
+        ),
+    }
+
+
 def test_changed_pulse_scenario_resolves_only_for_one_cycle() -> None:
     from intentional.engine import Engine
     from intentional.ha_adapter import (
