@@ -3115,6 +3115,7 @@ async def test_apply_resolved_targets_withdraw_reconciles_to_revealed_intent() -
 - id: ambient
   observe:
     input_boolean.ambient: on
+  confidence: 0.4
   intent:
     light.desk:
       state: on
