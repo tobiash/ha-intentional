@@ -99,17 +99,20 @@ class Engine:
         self._pending_effects: list[tuple[str, Effect]] = []
         self._template_renderer = TemplateRenderer()
         self._generated_fields: dict[tuple[str, str], GeneratedFieldState] = {}
+        self._enabled = True
 
     # ── Lifecycle Persistence ───────────────────────────────────────
 
     def export_lifecycle_records(self) -> dict[str, Any]:
         """Return persistent lifecycle state for restart/reload recovery."""
-        return export_lifecycle_records(
+        records = export_lifecycle_records(
             self._active_intents,
             self._active_effect_rule_ids,
             self._generated_fields,
             now_ms=self.now_ms(),
         )
+        records["enabled"] = self._enabled
+        return records
 
     def import_lifecycle_records(self, records: dict[str, Any] | None) -> None:
         """Restore persisted lifecycle records produced by export_lifecycle_records()."""
@@ -121,6 +124,19 @@ class Engine:
         self._active_intents.extend(restored)
         self._active_effect_rule_ids = active_effect_rule_ids
         self._generated_fields.update(generated_fields)
+        if isinstance(records, dict) and records.get("enabled") is False:
+            self.set_enabled(False)
+
+    def is_enabled(self) -> bool:
+        """Return whether automation rule evaluation is globally enabled."""
+        return self._enabled
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Globally enable or disable Intentional automation."""
+        self._enabled = enabled
+        if not enabled:
+            self._active_intents = []
+            self._active_effect_rule_ids.clear()
 
     # ── Time ────────────────────────────────────────────────────────
 
@@ -260,6 +276,11 @@ class Engine:
         Also drops intents whose rules no longer exist.
         """
         now = self.now_ms()
+        if not self._enabled:
+            self._active_intents = []
+            self._active_effect_rule_ids.clear()
+            self._pending_effects.clear()
+            return
         firing, _condition_firing, _blocked_by, _for_remaining = (
             self._firing_rule_diagnostics(update_timers=True)
         )

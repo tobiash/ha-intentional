@@ -63,6 +63,40 @@ class TestStateManagement:
 
 
 class TestRuleEvaluation:
+    def test_global_disable_withdraws_active_rule_intents(self) -> None:
+        from intentional.yaml_loader import load_rules_from_string
+
+        engine = Engine(clock_fn=lambda: 1000)
+        engine.load_rules(load_rules_from_string('''
+- id: office-light
+  observe:
+    binary_sensor.office_occupancy: on
+  intent:
+    light.office:
+      state: on
+'''))
+        engine.update_state("binary_sensor.office_occupancy", "on")
+        engine.evaluate_all()
+        assert engine.resolve("light.office") is not None
+
+        engine.set_enabled(False)
+        engine.evaluate_all()
+
+        assert engine.is_enabled() is False
+        assert engine.resolve("light.office") is None
+        assert engine.active_intent_count() == 0
+
+    def test_global_disable_state_survives_lifecycle_restore(self) -> None:
+        engine = Engine(clock_fn=lambda: 1000)
+        engine.set_enabled(False)
+        records = engine.export_lifecycle_records()
+
+        restored = Engine(clock_fn=lambda: 1000)
+        restored.import_lifecycle_records(records)
+
+        assert records["enabled"] is False
+        assert restored.is_enabled() is False
+
     def test_generated_sample_field_resolves_to_one_allowed_value(self) -> None:
         from intentional.yaml_loader import load_rules_from_string
 

@@ -61,7 +61,7 @@ from .sensor import IntentionalSummarySensor, IntentionalTargetSensor
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH, Platform.BUTTON]
 MANUAL_OVERRIDE_TTL_SECONDS = 7200
 RULE_RELOAD_POLL_INTERVAL_MS = 2_000
 WITHDRAW_TO_OFF_DOMAINS = frozenset({"light", "switch", "input_boolean", "fan", "siren"})

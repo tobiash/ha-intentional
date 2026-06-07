@@ -23,6 +23,8 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from ._engine import RuleLoadError
 from ._engine.yaml_loader import load_rules_from_string
 
@@ -140,6 +142,51 @@ class RuleWorkspace:
             return {"filename": filename, "generation": self.generation(filename)}
         return {"error": "not_found"}
 
+    def list_rules(self) -> list[dict[str, Any]]:
+        """Return rule IDs with file and enabled metadata."""
+        rules: list[dict[str, Any]] = []
+        for file_info in self.list_files():
+            filename = file_info["filename"]
+            contents = self.read(filename)
+            if contents is None:
+                continue
+            try:
+                load_rules_from_string(contents)
+                raw_rules = _raw_rule_items_from_yaml(contents)
+            except (RuleLoadError, yaml.YAMLError):
+                continue
+            for rule in raw_rules:
+                rule_id = rule.get("id")
+                if not isinstance(rule_id, str):
+                    continue
+                rules.append({
+                    "id": rule_id,
+                    "filename": filename,
+                    "enabled": rule.get("enabled", True) is not False,
+                    "generation": file_info.get("generation"),
+                })
+        return rules
+
+    def set_rule_enabled(self, rule_id: str, enabled: bool) -> dict[str, Any]:
+        """Set a rule's top-level `enabled` flag in the containing YAML file."""
+        for file_info in self.list_files():
+            filename = file_info["filename"]
+            contents = self.read(filename)
+            if contents is None:
+                continue
+            updated = _set_rule_enabled_in_yaml(contents, rule_id, enabled)
+            if updated is None:
+                continue
+            err = self.write(filename, updated)
+            if err:
+                return {"error": "write_failed", "message": err}
+            return {
+                "filename": filename,
+                "generation": self.generation(filename),
+                "enabled": enabled,
+            }
+        return {"error": "not_found"}
+
 
 def _validate_rule_dir(rule_dir: str) -> None:
     """Best-effort validation of the rule directory path.
@@ -219,6 +266,16 @@ def _patch_rule_by_id(
     )
 
 
+def _list_rules(rule_dir: str) -> list[dict[str, Any]]:
+    """Return rule IDs with file and enabled metadata."""
+    return RuleWorkspace(rule_dir).list_rules()
+
+
+def _set_rule_enabled(rule_dir: str, rule_id: str, enabled: bool) -> dict[str, Any]:
+    """Set a rule's enabled flag in its YAML file."""
+    return RuleWorkspace(rule_dir).set_rule_enabled(rule_id, enabled)
+
+
 def _delete_rule_file(rule_dir: str, filename: str) -> str | None:
     """Delete filename from rule_dir. Returns error message or None."""
     return RuleWorkspace(rule_dir).delete(filename)
@@ -244,3 +301,38 @@ def _starter_template() -> str:
         "    set:\n"
         "      state: 'on'\n"
     )
+
+
+def _set_rule_enabled_in_yaml(contents: str, rule_id: str, enabled: bool) -> str | None:
+    """Return YAML contents with one rule's enabled flag changed, or None."""
+    docs = list(yaml.safe_load_all(contents))
+    changed = False
+    for doc in docs:
+        rule_items = None
+        if isinstance(doc, list):
+            rule_items = doc
+        elif isinstance(doc, dict) and isinstance(doc.get("rules"), list):
+            rule_items = doc["rules"]
+        if rule_items is None:
+            continue
+        for item in rule_items:
+            if isinstance(item, dict) and item.get("id") == rule_id:
+                item["enabled"] = enabled
+                changed = True
+    if not changed:
+        return None
+    return "---\n".join(
+        yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
+        for doc in docs
+        if doc is not None
+    )
+
+
+def _raw_rule_items_from_yaml(contents: str) -> list[dict[str, Any]]:
+    rules: list[dict[str, Any]] = []
+    for doc in yaml.safe_load_all(contents):
+        if isinstance(doc, list):
+            rules.extend(item for item in doc if isinstance(item, dict))
+        elif isinstance(doc, dict) and isinstance(doc.get("rules"), list):
+            rules.extend(item for item in doc["rules"] if isinstance(item, dict))
+    return rules

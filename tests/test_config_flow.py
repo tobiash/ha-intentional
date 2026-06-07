@@ -36,13 +36,16 @@ pytest.importorskip("homeassistant", reason="homeassistant not installed")
 REPO_ROOT = Path(__file__).parent.parent
 INTEGRATION_DIR = REPO_ROOT / "custom_components" / "intentional"
 
+from custom_components.intentional._engine.yaml_loader import load_rules_from_string  # noqa: E402
 from custom_components.intentional.rule_files import (  # noqa: E402
     _delete_rule_file,
     _is_safe_filename,
     _list_rule_files,
+    _list_rules,
     _patch_rule_by_id,
     _read_rule_file,
     _rule_file_generation,
+    _set_rule_enabled,
     _starter_template,
     _validate_rule_dir,
     _write_rule_file,
@@ -216,6 +219,65 @@ def test_patch_rule_by_id_rejects_stale_generation(tmp_path: Path) -> None:
     )
 
     assert result == {"error": "generation_mismatch"}
+
+
+def test_list_rules_returns_enabled_metadata(tmp_path: Path) -> None:
+    _write_rule_file(str(tmp_path), "rules.yaml", """- id: enabled-rule
+  when: 'true'
+  emit:
+    target: light.enabled
+    set:
+      state: 'on'
+- id: disabled-rule
+  enabled: false
+  when: 'true'
+  emit:
+    target: light.disabled
+    set:
+      state: 'on'
+""")
+
+    rules = _list_rules(str(tmp_path))
+
+    assert {rule["id"]: rule["enabled"] for rule in rules} == {
+        "enabled-rule": True,
+        "disabled-rule": False,
+    }
+    assert {rule["id"]: rule["filename"] for rule in rules} == {
+        "enabled-rule": "rules.yaml",
+        "disabled-rule": "rules.yaml",
+    }
+
+
+def test_list_rules_uses_authored_id_for_multi_target_rule(tmp_path: Path) -> None:
+    _write_rule_file(str(tmp_path), "multi.yaml", """- id: office-lights
+  observe:
+    binary_sensor.office_occupancy: on
+  intent:
+    light.left:
+      state: on
+    light.right:
+      state: on
+""")
+
+    rules = _list_rules(str(tmp_path))
+
+    assert [rule["id"] for rule in rules] == ["office-lights"]
+
+
+def test_set_rule_enabled_persists_to_yaml(tmp_path: Path) -> None:
+    _write_rule_file(str(tmp_path), "rules.yaml", """- id: office-light
+  when: 'true'
+  emit:
+    target: light.office
+    set:
+      state: 'on'
+""")
+
+    result = _set_rule_enabled(str(tmp_path), "office-light", False)
+
+    assert result["enabled"] is False
+    assert load_rules_from_string(_read_rule_file(str(tmp_path), "rules.yaml"))[0].enabled is False
 
 
 # ── _delete_rule_file ──────────────────────────────────────────────

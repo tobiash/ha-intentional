@@ -98,9 +98,12 @@ Home Assistant's `automation:` system is powerful but has a familiar scaling pro
 - **Per-field modifiers** — `set`, `cap`, `floor`, `offset`, `multiply`, with `merge: true` for partial updates
 - **Time** — `transition` and `easing` for smooth changes
 - **Animations** — `pulse`, `breath`, `cycle`, `flash` with device-native fallbacks
+- **Generated values** — periodically sample durable values such as RGB colors from a palette, with fixed or random intervals and transitions
 - **Manual override tracking** — managed-target HA state drift becomes a user intent with TTL
+- **Manual override controls** — HA buttons can clear manual overrides globally or per target
 - **Hot reload** — edit a rule file, the engine reloads without restarting Home Assistant
 - **UI rule editor** — edit rule files in the HA Configure panel, no SSH needed
+- **UI enable switches** — toggle individual rules or globally disable all Intentional automation from Home Assistant
 - **HTTP API** — 6 endpoints for external agents (`/api/intentional/*`); auth via HA bearer token
 - **Zero-config** — discover the rule directory, validate on load, log errors clearly
 - **HACS-installable** — one-click install, standard HA integration patterns
@@ -141,6 +144,51 @@ git clone https://github.com/tobiash/ha-intentional.git intentional
 ```
 
 Rule files are loaded in alphabetical order. The order is for **organization**, not priority — priority is per-intent, derived from `authority` and `confidence`.
+
+## Home Assistant UI controls
+
+Intentional exposes HA entities so common control tasks do not require YAML edits
+or Developer Tools service calls:
+
+- `switch.intentional_automation_enabled` globally enables/disables all
+  Intentional automation. Turning it off withdraws active automation intents and
+  prevents rules/effects from firing until it is turned back on.
+- One rule switch is created for each authored YAML rule. Toggling a rule switch
+  persists `enabled: true/false` in the rule file and reloads rules.
+- Clear-manual-override buttons are created globally and per known target. They
+  drop user/manual override intents immediately while leaving rule files intact.
+
+## Generated values
+
+Use field-local `generate` when an active intent should vary a durable desired
+state over time. This is useful for ambient lights such as monitor backlights:
+
+```yaml
+- id: monitor-backlight-random
+  observe:
+    binary_sensor.office_occupancy: on
+  intent:
+    light.monitor_backlight:
+      state: on
+      brightness_pct: 35
+      rgb_color:
+        generate:
+          kind: sample
+          from:
+            - [255, 120, 40]
+            - [255, 70, 120]
+            - [140, 70, 255]
+            - [40, 170, 255]
+          every:
+            min: 45s
+            max: 4m
+          transition:
+            min: 8s
+            max: 25s
+```
+
+Generated values are sampled, held until the next interval, persisted across
+restarts, and reconciled like ordinary target state.
 
 ## HTTP API (v0.3+)
 

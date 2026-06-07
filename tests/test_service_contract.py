@@ -86,6 +86,25 @@ def test_intent_sensor_states_have_translations() -> None:
         assert states["manual_override"] == "Manual override"
 
 
+def test_rule_control_entities_have_translations() -> None:
+    """Rule/global switches and clear buttons should render readable names."""
+    for path in (STRINGS_JSON, TRANSLATIONS_JSON):
+        translations = json.loads(path.read_text())
+        entity = translations["entity"]
+
+        assert entity["switch"]["global_enabled"]["name"] == "Automation enabled"
+        assert entity["switch"]["rule_enabled"]["name"] == "Rule enabled"
+        assert entity["button"]["clear_manual_overrides"]["name"] == "Clear manual overrides"
+
+
+def test_integration_forwards_control_platforms() -> None:
+    """HA must load switch/button platforms for rule controls to appear."""
+    source = INTEGRATION_INIT.read_text()
+
+    assert "Platform.SWITCH" in source
+    assert "Platform.BUTTON" in source
+
+
 def test_manual_set_fields_are_documented() -> None:
     """The documented intentional.fire field list must stay complete."""
     text = RULES_DOC.read_text()

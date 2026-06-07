@@ -70,6 +70,19 @@
       "summary": {
         "name": "Intent Engine Summary"
       }
+    },
+    "switch": {
+      "global_enabled": {
+        "name": "Automation enabled"
+      },
+      "rule_enabled": {
+        "name": "Rule enabled"
+      }
+    },
+    "button": {
+      "clear_manual_overrides": {
+        "name": "Clear manual overrides"
+      }
     }
   },
   "services": {
