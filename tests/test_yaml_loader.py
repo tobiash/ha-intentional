@@ -378,6 +378,26 @@ class TestRuleSchemaValidation:
           duration: 2s
 """)
 
+    def test_vnext_apply_transition_policy_parses(self) -> None:
+        rules = load_rules_from_string("""
+- id: office-presence
+  observe:
+    binary_sensor.office_presence: on
+  intent:
+    light.office:
+      state: on
+      brightness_pct: 40
+      apply:
+        transition:
+          assert: 2s
+          change: 4s
+          withdraw: 6s
+""")
+
+        assert rules[0].transition_assert_ms == 2_000
+        assert rules[0].transition_change_ms == 4_000
+        assert rules[0].transition_withdraw_ms == 6_000
+
     def test_vnext_effect_only_rule_parses_effect(self) -> None:
         rules = load_rules_from_string("""
 - id: door-left-open-notify

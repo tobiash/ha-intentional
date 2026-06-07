@@ -63,6 +63,9 @@ def intent_to_lifecycle_record(intent: Intent) -> dict[str, Any]:
         "offset": dict(intent.offset),
         "multiply": dict(intent.multiply),
         "transition_ms": intent.transition_ms,
+        "transition_assert_ms": intent.transition_assert_ms,
+        "transition_change_ms": intent.transition_change_ms,
+        "transition_withdraw_ms": intent.transition_withdraw_ms,
         "easing": intent.easing,
         "authority": intent.authority.value,
         "confidence": intent.confidence,
@@ -99,6 +102,9 @@ def intent_from_lifecycle_record(raw: Any) -> Intent | None:
         offset=dict(raw.get("offset") or {}),
         multiply=dict(raw.get("multiply") or {}),
         transition_ms=int(raw.get("transition_ms") or 0),
+        transition_assert_ms=_optional_int(raw.get("transition_assert_ms")),
+        transition_change_ms=_optional_int(raw.get("transition_change_ms")),
+        transition_withdraw_ms=_optional_int(raw.get("transition_withdraw_ms")),
         easing=str(raw.get("easing", "linear")),
         authority=authority,
         confidence=float(raw.get("confidence", 1.0)),
@@ -109,3 +115,9 @@ def intent_from_lifecycle_record(raw: Any) -> Intent | None:
         created_at_ms=int(raw.get("created_at_ms") or 0),
         animation=animation,
     )
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)

@@ -190,6 +190,9 @@ class Rule:
     multiply: dict[str, Any] = field(default_factory=dict)
     merge: bool = False
     transition_ms: int = 0
+    transition_assert_ms: int | None = None
+    transition_change_ms: int | None = None
+    transition_withdraw_ms: int | None = None
     easing: str = "linear"
     ttl_ms: int | None = None
     linger_ms: int | None = None
@@ -220,7 +223,7 @@ _RULE_TOP_LEVEL = {
 # Recognized fields in the emit block
 _EMIT_FIELDS = {
     "target", "scene", "set", "cap", "floor", "offset", "multiply", "merge",
-    "transition", "easing", "ttl", "linger", "animation",
+    "transition", "easing", "ttl", "linger", "animation", "apply",
 }
 # Recognized animation fields
 _ANIMATION_FIELDS = {
@@ -383,6 +386,12 @@ def _validate_rule(
 
     # durations
     transition_ms = _parse_optional_duration(emit.get("transition"), f"Rule {rule_id!r}: transition", file, line)
+    transition_assert_ms, transition_change_ms, transition_withdraw_ms = _parse_apply_transitions(
+        emit.get("apply"),
+        rule_id,
+        file,
+        line,
+    )
     ttl_ms = _parse_optional_duration(
         emit.get("ttl"),
         f"Rule {rule_id!r}: ttl",
@@ -426,6 +435,9 @@ def _validate_rule(
         multiply=_normalize_emit_mapping(emit.get("multiply", {})),
         merge=bool(emit.get("merge", False)),
         transition_ms=transition_ms,
+        transition_assert_ms=transition_assert_ms,
+        transition_change_ms=transition_change_ms,
+        transition_withdraw_ms=transition_withdraw_ms,
         easing=easing,
         ttl_ms=ttl_ms,
         linger_ms=linger_ms,
@@ -736,6 +748,9 @@ def _intent_fields_to_emit(
 
     emit: dict[str, Any] = {"target": target, "set": {}, "cap": {}, "floor": {}, "offset": {}, "multiply": {}}
     for intent_field, value in fields.items():
+        if intent_field == "apply":
+            emit["apply"] = value
+            continue
         _validate_vnext_intent_field(target, intent_field, value, file=file, line=line)
         if intent_field in {"ttl", "linger", "transition", "easing"}:
             emit[intent_field] = value
@@ -852,6 +867,43 @@ def _parse_optional_duration(
     raise RuleLoadError(
         f"{label} must be an integer (ms) or a duration string, got {type(value).__name__}",
         file=file, line=line,
+    )
+
+
+def _parse_apply_transitions(
+    raw: Any,
+    rule_id: str,
+    file: Path | None,
+    line: int | None,
+) -> tuple[int | None, int | None, int | None]:
+    if raw is None:
+        return None, None, None
+    if not isinstance(raw, dict):
+        raise RuleLoadError(f"Rule {rule_id!r}: apply must be a mapping", file=file, line=line)
+    unknown = set(raw) - {"transition"}
+    if unknown:
+        raise RuleLoadError(
+            f"Rule {rule_id!r}: unknown fields in apply: {sorted(unknown)}. Allowed: ['transition']",
+            file=file,
+            line=line,
+        )
+    transition = raw.get("transition")
+    if transition is None:
+        return None, None, None
+    if not isinstance(transition, dict):
+        raise RuleLoadError(f"Rule {rule_id!r}: apply.transition must be a mapping", file=file, line=line)
+    unknown_transition = set(transition) - {"assert", "change", "withdraw"}
+    if unknown_transition:
+        raise RuleLoadError(
+            f"Rule {rule_id!r}: unknown fields in apply.transition: {sorted(unknown_transition)}. "
+            "Allowed: ['assert', 'change', 'withdraw']",
+            file=file,
+            line=line,
+        )
+    return (
+        _parse_optional_duration(transition.get("assert"), f"Rule {rule_id!r}: apply.transition.assert", file, line, default=None),
+        _parse_optional_duration(transition.get("change"), f"Rule {rule_id!r}: apply.transition.change", file, line, default=None),
+        _parse_optional_duration(transition.get("withdraw"), f"Rule {rule_id!r}: apply.transition.withdraw", file, line, default=None),
     )
 
 

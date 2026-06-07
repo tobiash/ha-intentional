@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +64,15 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 MANUAL_OVERRIDE_TTL_SECONDS = 7200
 RULE_RELOAD_POLL_INTERVAL_MS = 2_000
+WITHDRAW_TO_OFF_DOMAINS = frozenset({"light", "switch", "input_boolean", "fan", "siren"})
+
+
+@dataclass(frozen=True)
+class _ResolvedTargetState:
+    value: dict[str, Any]
+    winner_key: tuple[str, int] | None
+    transition_ms: int
+    transition_withdraw_ms: int | None
 
 # Declaring http as a dependency tells HA to ensure hass.http is
 # available before this integration's setup runs. This is the
@@ -277,6 +287,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # frequently, so identical resolved values should not produce repeated HA
     # service calls.
     _last_applied_targets: dict[str, ServicePlanSignature] = {}
+    _last_resolved_targets: dict[str, _ResolvedTargetState] = {}
     # Track state-change pulses that should stay true through one apply cycle.
     _state_change_pulses: set[str] = set()
     # Event used to signal the tick loop to stop. We use an event rather
@@ -316,7 +327,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             await _apply_pending_effects(hass, engine)
             # Apply resolved target intents to HA entities.
-            await _apply_resolved_targets(hass, engine, _last_applied_targets)
+            await _apply_resolved_targets(hass, engine, _last_applied_targets, _last_resolved_targets)
             if _state_change_pulses:
                 clear_state_change_pulses(engine, _state_change_pulses)
                 _state_change_pulses.clear()
@@ -607,28 +618,39 @@ async def _apply_resolved_targets(
     hass: HomeAssistant,
     engine: Engine,
     last_applied: dict[str, ServicePlanSignature],
+    last_resolved: dict[str, _ResolvedTargetState] | None = None,
 ) -> None:
     """Apply resolved target intents to HA entities via service calls."""
+    if last_resolved is None:
+        last_resolved = {}
     active_targets = set(engine.list_active_targets())
     for target in sorted(active_targets):
         resolved = engine.resolve(target)
         if resolved is None:
-            last_applied.pop(target, None)
+            last_resolved.pop(target, None)
             continue
+        resolved_value = dict(resolved.value)
+        previous = last_resolved.get(target)
+        if previous is not None and previous.value == resolved_value and target in last_applied:
+            continue
+        transition_ms = _transition_ms_for_resolved_change(previous, resolved)
         calls = service_calls_for_resolved_target(
             target,
-            dict(resolved.value),
-            transition_ms=resolved.transition_ms,
+            resolved_value,
+            transition_ms=transition_ms,
         )
         if not calls:
+            last_resolved[target] = _resolved_target_state(resolved)
             continue
         signature = service_plan_signature(calls)
         if last_applied.get(target) == signature:
+            last_resolved[target] = _resolved_target_state(resolved)
             continue
         states = getattr(hass, "states", None)
         current_state = states.get(target) if states is not None else None
         if current_state is not None and service_plan_matches_state(signature, current_state):
             last_applied[target] = signature
+            last_resolved[target] = _resolved_target_state(resolved)
             continue
         for domain, service, service_data in calls:
             try:
@@ -646,9 +668,75 @@ async def _apply_resolved_targets(
                 break
         else:
             last_applied[target] = signature
+            last_resolved[target] = _resolved_target_state(resolved)
 
-    for stale_target in set(last_applied) - active_targets:
-        last_applied.pop(stale_target, None)
+    for stale_target in set(last_resolved) - active_targets:
+        previous = last_resolved.pop(stale_target)
+        withdraw_value = _default_withdraw_value(stale_target, previous)
+        if withdraw_value is None:
+            continue
+        calls = service_calls_for_resolved_target(
+            stale_target,
+            withdraw_value,
+            transition_ms=previous.transition_withdraw_ms if previous.transition_withdraw_ms is not None else previous.transition_ms,
+        )
+        if not calls:
+            continue
+        signature = service_plan_signature(calls)
+        if last_applied.get(stale_target) == signature:
+            continue
+        states = getattr(hass, "states", None)
+        current_state = states.get(stale_target) if states is not None else None
+        if current_state is not None and service_plan_matches_state(signature, current_state):
+            last_applied[stale_target] = signature
+            continue
+        for domain, service, service_data in calls:
+            try:
+                await hass.services.async_call(
+                    domain,
+                    service,
+                    service_data,
+                    blocking=False,
+                )
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning(
+                    "Failed to withdraw resolved intent for %s via %s.%s: %s",
+                    stale_target, domain, service, err,
+                )
+                break
+        else:
+            last_applied[stale_target] = signature
+
+
+def _resolved_target_state(resolved: Any) -> _ResolvedTargetState:
+    winner = resolved.winning_intent
+    return _ResolvedTargetState(
+        value=dict(resolved.value),
+        winner_key=(winner.rule_id, winner.created_at_ms) if winner is not None else None,
+        transition_ms=resolved.transition_ms,
+        transition_withdraw_ms=winner.transition_withdraw_ms if winner is not None else None,
+    )
+
+
+def _transition_ms_for_resolved_change(
+    previous: _ResolvedTargetState | None,
+    resolved: Any,
+) -> int:
+    winner = resolved.winning_intent
+    if winner is None:
+        return resolved.transition_ms
+    if previous is None or previous.winner_key != (winner.rule_id, winner.created_at_ms):
+        return winner.transition_assert_ms if winner.transition_assert_ms is not None else resolved.transition_ms
+    return winner.transition_change_ms if winner.transition_change_ms is not None else resolved.transition_ms
+
+
+def _default_withdraw_value(target: str, previous: _ResolvedTargetState) -> dict[str, Any] | None:
+    domain, sep, _object_id = target.partition(".")
+    if not sep or domain not in WITHDRAW_TO_OFF_DOMAINS:
+        return None
+    if previous.value.get("state") != "on":
+        return None
+    return {"state": "off"}
 
 
 async def _refresh_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:

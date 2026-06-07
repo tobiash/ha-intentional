@@ -133,6 +133,9 @@ class Intent:
     offset: dict[str, Any] = field(default_factory=dict)
     multiply: dict[str, Any] = field(default_factory=dict)
     transition_ms: int = 0
+    transition_assert_ms: int | None = None
+    transition_change_ms: int | None = None
+    transition_withdraw_ms: int | None = None
     easing: str = "linear"
     authority: Authority = Authority.AUTOMATION
     confidence: float = 1.0

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-06-07
+
+### Added
+- **Resolved-state transition policies** for VNext intents via `apply.transition.assert/change/withdraw`. Intentional now chooses HA-native transition durations based on whether a resolved target is first asserted, changes while still desired, or withdraws.
+- **Withdrawal reconciliation without durable off intents**. When a safe on/off domain (`light`, `switch`, `input_boolean`, `fan`, `siren`) loses its final `state: on` desire, Intentional can issue a default `off` service call using the withdrawn intent's `withdraw` transition. If another lower-priority intent remains, Intentional reconciles to that revealed state instead of calling off.
+
 ## [0.4.4] - 2026-06-07
 
 ### Fixed
