@@ -6,12 +6,19 @@ from dataclasses import asdict
 from typing import Any
 
 from .animation import AnimationSpec
+from .generation import (
+    GeneratedFieldState,
+    ValueGeneratorSpec,
+    generated_field_state_from_record,
+    generated_field_state_to_record,
+)
 from .intent import Authority, Intent
 
 
 def export_lifecycle_records(
     intents: list[Intent],
     active_effect_rule_ids: set[str],
+    generated_fields: dict[tuple[str, str], GeneratedFieldState] | None = None,
     *,
     now_ms: int,
 ) -> dict[str, Any]:
@@ -25,6 +32,11 @@ def export_lifecycle_records(
             and (intent.ttl_ms is not None or intent.ignore_when or intent.authority is Authority.USER)
         ],
         "active_effect_rule_ids": sorted(active_effect_rule_ids),
+        "generated_fields": [
+            generated_field_state_to_record(rule_id, field_name, state)
+            for (rule_id, field_name), state in sorted((generated_fields or {}).items())
+            if state.next_due_ms > now_ms
+        ],
     }
 
 
@@ -33,10 +45,10 @@ def restore_lifecycle_intents(
     *,
     now_ms: int,
     known_rule_ids: set[str],
-) -> tuple[list[Intent], set[str]]:
+) -> tuple[list[Intent], set[str], dict[tuple[str, str], GeneratedFieldState]]:
     """Restore non-expired lifecycle records that still belong to loaded rules."""
     if not records:
-        return [], set()
+        return [], set(), {}
     restored: list[Intent] = []
     for raw in records.get("intents", []):
         intent = intent_from_lifecycle_record(raw)
@@ -49,7 +61,16 @@ def restore_lifecycle_intents(
         rule_id for rule_id in records.get("active_effect_rule_ids", [])
         if rule_id in known_rule_ids
     }
-    return restored, active_effect_rule_ids
+    generated_fields: dict[tuple[str, str], GeneratedFieldState] = {}
+    for raw in records.get("generated_fields", []):
+        restored_state = generated_field_state_from_record(raw)
+        if restored_state is None:
+            continue
+        key, state = restored_state
+        rule_id, _field_name = key
+        if rule_id in known_rule_ids and state.next_due_ms > now_ms:
+            generated_fields[key] = state
+    return restored, active_effect_rule_ids, generated_fields
 
 
 def intent_to_lifecycle_record(intent: Intent) -> dict[str, Any]:
@@ -75,6 +96,10 @@ def intent_to_lifecycle_record(intent: Intent) -> dict[str, Any]:
         "ignore_when": intent.ignore_when,
         "created_at_ms": intent.created_at_ms,
         "animation": asdict(intent.animation) if intent.animation is not None else None,
+        "generators": {
+            field_name: asdict(spec)
+            for field_name, spec in intent.generators.items()
+        },
     }
 
 
@@ -93,6 +118,16 @@ def intent_from_lifecycle_record(raw: Any) -> Intent | None:
             animation = AnimationSpec(**animation_raw)
         except (TypeError, ValueError):
             animation = None
+    generators: dict[str, ValueGeneratorSpec] = {}
+    generators_raw = raw.get("generators")
+    if isinstance(generators_raw, dict):
+        for field_name, spec_raw in generators_raw.items():
+            if not isinstance(field_name, str) or not isinstance(spec_raw, dict):
+                continue
+            try:
+                generators[field_name] = ValueGeneratorSpec(**spec_raw)
+            except (TypeError, ValueError):
+                continue
     return Intent(
         target=str(raw.get("target", "")),
         set=dict(raw.get("set") or {}),
@@ -114,6 +149,7 @@ def intent_from_lifecycle_record(raw: Any) -> Intent | None:
         ignore_when=bool(raw.get("ignore_when", False)),
         created_at_ms=int(raw.get("created_at_ms") or 0),
         animation=animation,
+        generators=generators,
     )
 
 

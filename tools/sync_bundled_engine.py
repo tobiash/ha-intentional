@@ -14,6 +14,7 @@ MODULES = (
     "capabilities.py",
     "compositor.py",
     "engine.py",
+    "generation.py",
     "ha_adapter.py",
     "intent.py",
     "lifecycle.py",

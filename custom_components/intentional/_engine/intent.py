@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .animation import AnimationSpec
+    from .generation import ValueGeneratorSpec
 
 
 def _now_ms() -> int:
@@ -145,6 +146,7 @@ class Intent:
     ignore_when: bool = False
     created_at_ms: int = field(default_factory=_now_ms)
     animation: AnimationSpec | None = None
+    generators: dict[str, ValueGeneratorSpec] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Defensive copy of mutable defaults to honor the frozen contract."""
@@ -155,6 +157,7 @@ class Intent:
         object.__setattr__(self, "floor", _copy_field_dict(self.floor))
         object.__setattr__(self, "offset", _copy_field_dict(self.offset))
         object.__setattr__(self, "multiply", _copy_field_dict(self.multiply))
+        object.__setattr__(self, "generators", dict(self.generators))
 
     # ── Priority / comparison ────────────────────────────────────────
 

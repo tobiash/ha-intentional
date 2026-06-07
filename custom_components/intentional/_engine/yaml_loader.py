@@ -52,6 +52,7 @@ import yaml
 
 from .animation import AnimationSpec
 from .capabilities import vnext_intent_policy_error
+from .generation import ValueGeneratorSpec, parse_generator_spec
 from .intent import Authority
 from .records import Effect, IntentSelector, ObserveSelector
 
@@ -201,6 +202,7 @@ class Rule:
     reason: str = ""
     blocks: tuple[str, ...] = field(default_factory=tuple)
     animation: AnimationSpec | None = None
+    generators: dict[str, ValueGeneratorSpec] = field(default_factory=dict)
     effects: tuple[Effect, ...] = field(default_factory=tuple)
     intent_selectors: tuple[IntentSelector, ...] = field(default_factory=tuple)
     observe_selectors: tuple[ObserveSelector, ...] = field(default_factory=tuple)
@@ -222,7 +224,7 @@ _RULE_TOP_LEVEL = {
 }
 # Recognized fields in the emit block
 _EMIT_FIELDS = {
-    "target", "scene", "set", "cap", "floor", "offset", "multiply", "merge",
+    "target", "scene", "set", "cap", "floor", "offset", "multiply", "merge", "generate",
     "transition", "easing", "ttl", "linger", "animation", "apply",
 }
 # Recognized animation fields
@@ -419,6 +421,7 @@ def _validate_rule(
 
     # animation
     animation = _parse_animation(emit.get("animation"), rule_id, file, line)
+    generators = _parse_generators(emit.get("generate"), rule_id, file, line)
 
     return Rule(
         id=rule_id,
@@ -446,6 +449,7 @@ def _validate_rule(
         reason=str(raw.get("reason", "")),
         blocks=tuple(blocks_raw),
         animation=animation,
+        generators=generators,
         effects=effects,
         intent_selectors=intent_selectors,
         observe_selectors=observe_selectors,
@@ -750,7 +754,7 @@ def _intent_fields_to_emit(
 ) -> dict[str, Any]:
     """Normalize VNext target fields to the current emit schema."""
 
-    emit: dict[str, Any] = {"target": target, "set": {}, "cap": {}, "floor": {}, "offset": {}, "multiply": {}}
+    emit: dict[str, Any] = {"target": target, "set": {}, "cap": {}, "floor": {}, "offset": {}, "multiply": {}, "generate": {}}
     for intent_field, value in fields.items():
         if intent_field == "apply":
             emit["apply"] = value
@@ -759,7 +763,7 @@ def _intent_fields_to_emit(
         if intent_field in {"ttl", "linger", "transition", "easing"}:
             emit[intent_field] = value
             continue
-        if isinstance(value, dict) and set(value) & {"value", "min", "max", "offset", "multiply", "animate"}:
+        if isinstance(value, dict) and set(value) & {"value", "min", "max", "offset", "multiply", "animate", "generate"}:
             if "animate" in value:
                 if "animation" in emit:
                     raise RuleLoadError("One animated field per VNext target is supported", file=file, line=line)
@@ -778,6 +782,8 @@ def _intent_fields_to_emit(
                 emit["offset"][intent_field] = value["offset"]
             if "multiply" in value:
                 emit["multiply"][intent_field] = value["multiply"]
+            if "generate" in value:
+                emit["generate"][intent_field] = value["generate"]
             continue
         emit["set"][intent_field] = value
 
@@ -1030,6 +1036,52 @@ def _parse_animation(
             f"Rule {rule_id!r}: invalid animation: {e}",
             file=file, line=line,
         ) from e
+
+
+def _parse_generators(
+    raw: Any,
+    rule_id: str,
+    file: Path | None,
+    line: int | None,
+) -> dict[str, ValueGeneratorSpec]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise RuleLoadError(
+            f"Rule {rule_id!r}: `generate` must be a mapping",
+            file=file,
+            line=line,
+        )
+    generators: dict[str, ValueGeneratorSpec] = {}
+    for field_name, spec_raw in raw.items():
+        if not isinstance(field_name, str) or not field_name:
+            raise RuleLoadError(
+                f"Rule {rule_id!r}: generated field names must be non-empty strings",
+                file=file,
+                line=line,
+            )
+        try:
+            generators[field_name] = parse_generator_spec(
+                spec_raw,
+                parse_duration=_parse_generator_duration,
+            )
+        except ValueError as e:
+            raise RuleLoadError(
+                f"Rule {rule_id!r}: invalid generator for {field_name!r}: {e}",
+                file=file,
+                line=line,
+            ) from e
+    return generators
+
+
+def _parse_generator_duration(value: Any) -> int:
+    if isinstance(value, int):
+        if value <= 0:
+            raise ValueError(f"duration must be positive, got {value}")
+        return value
+    if isinstance(value, str):
+        return parse_duration(value)
+    raise ValueError(f"duration must be an integer (ms) or duration string, got {type(value).__name__}")
 
 
 def _parse_effects(

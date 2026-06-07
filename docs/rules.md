@@ -457,6 +457,45 @@ animation:
   repeat: 1                # optional
 ```
 
+## Generated values
+
+Use field-local `generate` when an active intent should periodically choose a
+new durable value. This is for slow, discrete variation such as ambient light
+colors. Unlike `animation`, generated values are sampled, held until the next
+interval, persisted across restarts, and reconciled as ordinary desired state.
+
+```yaml
+- id: monitor-backlight-random
+  observe:
+    binary_sensor.office_occupancy: on
+  intent:
+    light.monitor_backlight:
+      state: on
+      brightness_pct: 35
+      rgb_color:
+        generate:
+          kind: sample
+          from:
+            - [255, 120, 40]
+            - [120, 40, 255]
+            - [40, 180, 255]
+          every:
+            min: 45s
+            max: 4m
+          transition:
+            min: 8s
+            max: 25s
+```
+
+Supported initially:
+
+- `kind: sample`: choose one value from `from`
+- `every`: fixed duration (`2m`) or random interval with `min`/`max`
+- `transition`: optional fixed duration or random interval with `min`/`max`
+
+When there is more than one sample value, Intentional avoids picking the same
+value twice in a row.
+
 ## Composition order
 
 When multiple intents are active for the same target, the compositor

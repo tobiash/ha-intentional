@@ -63,6 +63,137 @@ class TestStateManagement:
 
 
 class TestRuleEvaluation:
+    def test_generated_sample_field_resolves_to_one_allowed_value(self) -> None:
+        from intentional.yaml_loader import load_rules_from_string
+
+        engine = Engine(clock_fn=lambda: 1000)
+        engine.load_rules(load_rules_from_string('''
+- id: monitor-backlight-random
+  observe:
+    binary_sensor.office_occupancy: on
+  intent:
+    light.monitor_backlight:
+      state: on
+      rgb_color:
+        generate:
+          kind: sample
+          from:
+            - [255, 120, 40]
+            - [120, 40, 255]
+          every: 2m
+'''))
+
+        engine.update_state("binary_sensor.office_occupancy", "on")
+        engine.evaluate_all()
+
+        resolved = engine.resolve("light.monitor_backlight")
+
+        assert resolved is not None
+        assert resolved.value["state"] == "on"
+        assert resolved.value["rgb_color"] in ([255, 120, 40], [120, 40, 255])
+
+    def test_generated_sample_field_resamples_after_interval(self) -> None:
+        from intentional.yaml_loader import load_rules_from_string
+
+        engine = Engine(clock_fn=lambda: 1000)
+        engine.load_rules(load_rules_from_string('''
+- id: monitor-backlight-random
+  observe:
+    binary_sensor.office_occupancy: on
+  intent:
+    light.monitor_backlight:
+      state: on
+      rgb_color:
+        generate:
+          kind: sample
+          from:
+            - [255, 120, 40]
+            - [120, 40, 255]
+          every: 2m
+'''))
+        engine.update_state("binary_sensor.office_occupancy", "on")
+        engine.evaluate_all()
+        first = engine.resolve("light.monitor_backlight").value["rgb_color"]
+
+        engine.advance_clock(119_000)
+        engine.evaluate_all()
+        before_due = engine.resolve("light.monitor_backlight").value["rgb_color"]
+        engine.advance_clock(1_000)
+        engine.evaluate_all()
+        after_due = engine.resolve("light.monitor_backlight").value["rgb_color"]
+
+        assert before_due == first
+        assert after_due != first
+        assert after_due in ([255, 120, 40], [120, 40, 255])
+
+    def test_generated_sample_field_can_set_transition(self) -> None:
+        from intentional.yaml_loader import load_rules_from_string
+
+        engine = Engine(clock_fn=lambda: 1000)
+        engine.load_rules(load_rules_from_string('''
+- id: monitor-backlight-random
+  observe:
+    binary_sensor.office_occupancy: on
+  intent:
+    light.monitor_backlight:
+      rgb_color:
+        generate:
+          kind: sample
+          from:
+            - [255, 120, 40]
+            - [120, 40, 255]
+          every: 2m
+          transition: 7s
+'''))
+
+        engine.update_state("binary_sensor.office_occupancy", "on")
+        engine.evaluate_all()
+        resolved = engine.resolve("light.monitor_backlight")
+
+        assert resolved.transition_ms == 7000
+
+    def test_generated_sample_field_survives_lifecycle_restore(self) -> None:
+        from intentional.yaml_loader import load_rules_from_string
+
+        rules = load_rules_from_string('''
+- id: monitor-backlight-random
+  observe:
+    binary_sensor.office_occupancy: on
+  intent:
+    light.monitor_backlight:
+      rgb_color:
+        generate:
+          kind: sample
+          from:
+            - [255, 120, 40]
+            - [120, 40, 255]
+          every: 2m
+''')
+        engine = Engine(clock_fn=lambda: 1000)
+        engine.load_rules(rules)
+        engine.update_state("binary_sensor.office_occupancy", "on")
+        engine.evaluate_all()
+        first = engine.resolve("light.monitor_backlight").value["rgb_color"]
+
+        records = engine.export_lifecycle_records()
+        assert records["generated_fields"] == [
+            {
+                "rule_id": "monitor-backlight-random",
+                "field": "rgb_color",
+                "value": first,
+                "next_due_ms": 121000,
+                "transition_ms": None,
+            }
+        ]
+
+        restored = Engine(clock_fn=lambda: 61_000)
+        restored.load_rules(rules)
+        restored.import_lifecycle_records(records)
+        restored.update_state("binary_sensor.office_occupancy", "on")
+        restored.evaluate_all()
+
+        assert restored.resolve("light.monitor_backlight").value["rgb_color"] == first
+
     def test_intent_selector_expands_to_resolved_targets(self) -> None:
         from intentional.yaml_loader import load_rules_from_string
 

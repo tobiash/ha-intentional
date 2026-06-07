@@ -39,10 +39,11 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from intentional.compositor import ResolvedIntent, resolve_intents
+from intentional.generation import GeneratedFieldState, sample_generated_field
 from intentional.intent import Authority, Intent
 from intentional.lifecycle import export_lifecycle_records, restore_lifecycle_intents
 from intentional.records import Effect, IntentSelector
@@ -97,6 +98,7 @@ class Engine:
         self._active_effect_rule_ids: set[str] = set()
         self._pending_effects: list[tuple[str, Effect]] = []
         self._template_renderer = TemplateRenderer()
+        self._generated_fields: dict[tuple[str, str], GeneratedFieldState] = {}
 
     # ── Lifecycle Persistence ───────────────────────────────────────
 
@@ -105,18 +107,20 @@ class Engine:
         return export_lifecycle_records(
             self._active_intents,
             self._active_effect_rule_ids,
+            self._generated_fields,
             now_ms=self.now_ms(),
         )
 
     def import_lifecycle_records(self, records: dict[str, Any] | None) -> None:
         """Restore persisted lifecycle records produced by export_lifecycle_records()."""
-        restored, active_effect_rule_ids = restore_lifecycle_intents(
+        restored, active_effect_rule_ids, generated_fields = restore_lifecycle_intents(
             records,
             now_ms=self.now_ms(),
             known_rule_ids=set(self._rules),
         )
         self._active_intents.extend(restored)
         self._active_effect_rule_ids = active_effect_rule_ids
+        self._generated_fields.update(generated_fields)
 
     # ── Time ────────────────────────────────────────────────────────
 
@@ -290,6 +294,7 @@ class Engine:
             continue
 
         # Add new intents for rules that just started firing
+        new_active = [self._refresh_generated_intent(intent, now) for intent in new_active]
         existing_rule_ids = {i.rule_id for i in new_active if i.rule_id}
         for rule_id, _target in firing.items():
             parsed = self._rules[rule_id]
@@ -378,7 +383,7 @@ class Engine:
         # Scene rules: target is empty, intent carries scene reference.
         # The integration layer discovers these via list_active_scene_intents()
         # and fires scene.turn_on instead of resolving a value.
-        return Intent(
+        intent = Intent(
             target=rule.target or "",  # "" for scene rules, entity_id otherwise
             set=self._template_renderer.render_value(rule.set, self.state),
             cap=self._template_renderer.render_value(rule.cap, self.state),
@@ -398,7 +403,66 @@ class Engine:
             ignore_when=rule.edge_created,
             created_at_ms=now,
             animation=rule.animation,
+            generators=rule.generators,
         )
+
+        if rule.generators:
+            intent = replace(
+                intent,
+                set=self._sample_generated_fields(rule, intent.set, now),
+                transition_ms=self._generated_transition_ms(rule) or intent.transition_ms,
+            )
+        return intent
+
+    def _refresh_generated_intent(self, intent: Intent, now: int) -> Intent:
+        if not intent.generators or not intent.rule_id:
+            return intent
+        if intent.rule_id not in self._rules:
+            return intent
+        changed = False
+        set_values = dict(intent.set)
+        transition_ms = intent.transition_ms
+        for field_name, spec in intent.generators.items():
+            key = (intent.rule_id, field_name)
+            state = self._generated_fields.get(key)
+            if state is None or now >= state.next_due_ms:
+                state = sample_generated_field(
+                    spec,
+                    now_ms=now,
+                    seed=f"{intent.rule_id}:{field_name}:{now}",
+                    previous_value=set_values.get(field_name),
+                )
+                self._generated_fields[key] = state
+                set_values[field_name] = state.value
+                if state.transition_ms is not None:
+                    transition_ms = state.transition_ms
+                changed = True
+        if not changed:
+            return intent
+        return replace(intent, set=set_values, transition_ms=transition_ms)
+
+    def _sample_generated_fields(self, rule: Rule, set_values: dict[str, Any], now: int) -> dict[str, Any]:
+        sampled = dict(set_values)
+        for field_name, spec in rule.generators.items():
+            key = (rule.id, field_name)
+            state = self._generated_fields.get(key)
+            if state is None or now >= state.next_due_ms:
+                state = sample_generated_field(
+                    spec,
+                    now_ms=now,
+                    seed=f"{rule.id}:{field_name}:{now}",
+                )
+            self._generated_fields[(rule.id, field_name)] = state
+            sampled[field_name] = state.value
+        return sampled
+
+    def _generated_transition_ms(self, rule: Rule) -> int | None:
+        transitions = [
+            state.transition_ms
+            for (rule_id, _field_name), state in self._generated_fields.items()
+            if rule_id == rule.id and state.transition_ms is not None
+        ]
+        return max(transitions) if transitions else None
 
     def _spawn_intents_from_selectors(self, rule: Rule, now: int) -> list[Intent]:
         intents: list[Intent] = []
@@ -716,4 +780,5 @@ def _linger_intent(intent: Intent, linger_ms: int, now: int) -> Intent:
         ignore_when=True,
         created_at_ms=now,
         animation=intent.animation,
+        generators=intent.generators,
     )
