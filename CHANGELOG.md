@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-06-08
+
+### Added
+- **Home Assistant UI controls** for Intentional: a global automation enable switch, per-rule enable switches that persist `enabled: true/false` in YAML, and clear-manual-override buttons globally and per target.
+- **README guidance** for generated values and Home Assistant UI controls.
+
 ## [0.6.1] - 2026-06-08
 
 ### Fixed
