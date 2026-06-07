@@ -29,6 +29,7 @@ TRANSLATIONS_JSON = (
     / "translations"
     / "en.json"
 )
+STRINGS_JSON = REPO_ROOT / "custom_components" / "intentional" / "strings.json"
 RULES_DOC = REPO_ROOT / "docs" / "rules.md"
 
 
@@ -62,6 +63,27 @@ def test_manual_set_fields_are_visible_in_translations() -> None:
 
     assert set(MANUAL_SET_FIELDS) <= fire_fields
     assert {"target", "ttl"} <= fire_fields
+
+
+def test_options_menu_entries_have_translations() -> None:
+    """The Configure options menu must not render blank menu entries."""
+    for path in (STRINGS_JSON, TRANSLATIONS_JSON):
+        translations = json.loads(path.read_text())
+        menu_options = translations["options"]["step"]["init"]["menu_options"]
+
+        assert menu_options["general"] == "General settings"
+        assert menu_options["rules"] == "Rule files"
+
+
+def test_intent_sensor_states_have_translations() -> None:
+    """Compact intent sensor states should render as human labels in HA."""
+    for path in (STRINGS_JSON, TRANSLATIONS_JSON):
+        translations = json.loads(path.read_text())
+        states = translations["entity"]["sensor"]["target_intent"]["state"]
+
+        assert states["active"] == "Active"
+        assert states["idle"] == "Idle"
+        assert states["manual_override"] == "Manual override"
 
 
 def test_manual_set_fields_are_documented() -> None:

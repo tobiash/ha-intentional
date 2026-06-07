@@ -259,6 +259,24 @@ class TestRuleSchemaValidation:
         assert rules[0].transition_ms == 1500
         assert rules[0].set == {"state": "on"}
 
+    def test_vnext_intent_normalizes_yaml_boolean_effect_off(self) -> None:
+        rules = load_rules_from_string("""
+- id: office-soft-light
+  observe:
+    binary_sensor.office_occupancy: on
+  intent:
+    light.office:
+      state: on
+      effect: off
+      brightness_pct: 40
+""")
+
+        assert rules[0].set == {
+            "state": "on",
+            "effect": "off",
+            "brightness_pct": 40,
+        }
+
     def test_vnext_intent_target_linger_is_metadata(self) -> None:
         rules = load_rules_from_string("""
 - id: tv-linger

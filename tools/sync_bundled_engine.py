@@ -17,6 +17,7 @@ MODULES = (
     "ha_adapter.py",
     "intent.py",
     "lifecycle.py",
+    "presentation.py",
     "records.py",
     "reconciliation.py",
     "selectors.py",

@@ -21,6 +21,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from ._engine.presentation import intent_sensor_state, value_summary
 from .const import (
     ATTR_ACTIVE_INTENTS,
     ATTR_AUTHORITY,
@@ -77,6 +78,7 @@ class IntentionalTargetSensor(SensorEntity):
 
     _attr_has_entity_name = True
     _attr_icon = "mdi:target"
+    _attr_translation_key = "target_intent"
 
     def __init__(self, hass: HomeAssistant, engine, entry: ConfigEntry, target: str) -> None:
         self.hass = hass
@@ -98,12 +100,8 @@ class IntentionalTargetSensor(SensorEntity):
 
     @property
     def native_value(self) -> str:
-        """Return a human-readable summary of the resolved value."""
-        resolved = self._engine.resolve(self._target)
-        if resolved is None:
-            return "idle"
-        parts = [f"{k}={v}" for k, v in resolved.value.items()]
-        return ", ".join(parts) if parts else "no_value"
+        """Return a compact, translatable state for the resolved value."""
+        return intent_sensor_state(self._engine.resolve(self._target))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -116,6 +114,9 @@ class IntentionalTargetSensor(SensorEntity):
             }
         return {
             ATTR_TARGET: self._target,
+            "summary": value_summary(resolved.value),
+            "desired_state": resolved.value,
+            "active_intent_count": len(resolved.all_active_intents),
             ATTR_ACTIVE_INTENTS: [
                 {
                     ATTR_RULE_ID: i.rule_id or "<manual>",
@@ -147,6 +148,7 @@ class IntentionalSummarySensor(SensorEntity):
     _attr_name = "Intent Engine Summary"
     _attr_icon = "mdi:palette"
     _attr_unique_id = "intentional_summary"
+    _attr_translation_key = "summary"
 
     def __init__(self, hass: HomeAssistant, engine, entry: ConfigEntry) -> None:
         self.hass = hass

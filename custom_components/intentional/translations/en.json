@@ -13,7 +13,66 @@
       "already_configured": "Intentional is already configured."
     }
   },
-    "services": {
+  "options": {
+    "step": {
+      "init": {
+        "menu_options": {
+          "general": "General settings",
+          "rules": "Rule files"
+        }
+      },
+      "general": {
+        "title": "General settings",
+        "description": "Change where Intentional reads rule files from.",
+        "data": {
+          "rule_dir": "Rule directory"
+        }
+      },
+      "rules": {
+        "title": "Rule files",
+        "description": "Manage Intentional rule files in {rule_dir}. Files: {file_count}. {filenames}",
+        "data": {
+          "action": "Action"
+        }
+      },
+      "edit_existing": {
+        "title": "Edit {filename}",
+        "data": {
+          "contents": "Rule YAML"
+        }
+      },
+      "edit_new": {
+        "title": "Create rule file",
+        "description": "Create a rule file in {rule_dir}.",
+        "data": {
+          "filename": "Filename",
+          "contents": "Rule YAML"
+        }
+      },
+      "delete_pick": {
+        "title": "Delete rule file",
+        "data": {
+          "filename": "Filename"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "target_intent": {
+        "name": "Intent",
+        "state": {
+          "active": "Active",
+          "idle": "Idle",
+          "manual_override": "Manual override"
+        }
+      },
+      "summary": {
+        "name": "Intent Engine Summary"
+      }
+    }
+  },
+  "services": {
     "fire": {
       "name": "Fire intent",
       "description": "Manually fire a user intent for a target entity.",

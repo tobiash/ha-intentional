@@ -460,12 +460,16 @@ def _validate_rule(
 
 
 def _normalize_emit_mapping(raw: Any) -> dict[str, Any]:
-    """Return an emit mapping with HA state booleans normalized to strings."""
+    """Return an emit mapping with YAML-coerced HA strings normalized."""
     mapping = dict(raw)
     if mapping.get("state") is True:
         mapping["state"] = "on"
     elif mapping.get("state") is False:
         mapping["state"] = "off"
+    if mapping.get("effect") is True:
+        mapping["effect"] = "on"
+    elif mapping.get("effect") is False:
+        mapping["effect"] = "off"
     return mapping
 
 
