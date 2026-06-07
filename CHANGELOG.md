@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-06-07
+
+### Fixed
+- **Stale live-rule intents after rule edits**. Reloading a level observation rule with the same `id` but a changed target/value now drops the old rule-bound intent so the next evaluation recreates it from the current rule definition. Edge-created TTL intents and manual/user intents are still preserved across reloads.
+
 ## [0.4.1] - 2026-06-07
 
 ### Fixed

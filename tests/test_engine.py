@@ -908,6 +908,26 @@ class TestRuleReload:
         # r2's intent is not active because sensor.x is "on"
         assert len(engine.list_active_intents("light.x")) == 0
 
+    def test_load_rules_recreates_active_intent_from_current_rule_definition(self) -> None:
+        engine = Engine()
+        engine.load_rules([_rule("r1", 'sensor.x.state == "on"', target="light.old")])
+        engine.update_state("sensor.x", "on")
+        engine.evaluate_all()
+        assert engine.resolve("light.old").value == {}
+
+        engine.load_rules([
+            _rule(
+                "r1",
+                'sensor.x.state == "on"',
+                target="light.new",
+                set={"brightness_pct": 40},
+            )
+        ])
+        engine.evaluate_all()
+
+        assert engine.resolve("light.old") is None
+        assert engine.resolve("light.new").value == {"brightness_pct": 40}
+
 
 # ── Diagnostics ─────────────────────────────────────────────────────
 

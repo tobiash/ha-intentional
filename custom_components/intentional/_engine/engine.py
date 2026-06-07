@@ -166,10 +166,11 @@ class Engine:
                 self._log.append(f"Failed to parse when for {rule.id!r}: {e}")
                 continue
             self._rules[rule.id] = _ParsedRule(rule=rule, when_ast=when_ast)
-        # Drop intents for rules that no longer exist
+        # Drop level-rule intents on reload so active observations recreate
+        # intents from the current rule definition (target/value/lifecycle).
         self._active_intents = [
             i for i in self._active_intents
-            if not i.rule_id or i.rule_id in self._rules
+            if not i.rule_id or (i.rule_id in self._rules and i.ignore_when)
         ]
         self._condition_true_since = {
             rule_id: since
