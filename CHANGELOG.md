@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-06-07
+
+### Fixed
+- **Blocking I/O in HTTP rule-file endpoints** introduced in v0.4.0. `GET /api/intentional/rules`, rule read/write/delete, and patch-by-rule-id now route rule-file work through `hass.async_add_executor_job` via the API's `_rule_file_job` seam. This fixes HA warnings for `scandir`, `read_bytes`, and `open` on the event loop.
+
+### Added
+- **API blocking-I/O regression guards** in `tests/test_config_flow_no_blocking_io.py` so future API rule-file endpoints cannot call sync rule-file helpers directly from async view handlers.
+
 ## [0.4.0] - 2026-06-07
 
 ### Added

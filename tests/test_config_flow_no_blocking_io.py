@@ -36,6 +36,12 @@ CONFIG_FLOW = (
     / "intentional"
     / "config_flow.py"
 )
+API = (
+    Path(__file__).parent.parent
+    / "custom_components"
+    / "intentional"
+    / "api.py"
+)
 
 
 def _get_sync_rule_file_helpers(tree: ast.Module) -> set[str]:
@@ -102,6 +108,43 @@ def test_no_sync_rule_files_called_from_config_flow() -> None:
         "Accepted: _list_in_executor / _read_in_executor / "
         "_write_in_executor / _delete_in_executor (executor wrappers)\n"
     )
+
+
+def test_no_sync_rule_files_called_from_api_views() -> None:
+    """No sync rule_files helper may be called directly from API view handlers."""
+    source = API.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(API))
+
+    sync_helpers = _get_sync_rule_file_helpers(tree)
+    violations: list[tuple[int, str]] = []
+    for line, callee in _all_call_sites(tree):
+        if callee in sync_helpers:
+            violations.append((line, callee))
+
+    assert not violations, (
+        "\n\napi.py calls sync rule_files helpers directly — this blocks "
+        "the HA event loop. Route every such call through _rule_file_job. "
+        "Offending lines:\n\n"
+        + "\n".join(f"  line {line}: {callee}(...)" for line, callee in violations)
+    )
+
+
+def test_api_rule_file_job_uses_hass_async_add_executor_job() -> None:
+    """The API rule-file executor seam must use hass.async_add_executor_job."""
+    source = API.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(API))
+    helpers = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_rule_file_job"
+    ]
+    assert len(helpers) == 1, "api.py must define exactly one _rule_file_job helper"
+    has_executor_call = any(
+        isinstance(child, ast.Call)
+        and isinstance(child.func, ast.Attribute)
+        and child.func.attr == "async_add_executor_job"
+        for child in ast.walk(helpers[0])
+    )
+    assert has_executor_call, "_rule_file_job must use hass.async_add_executor_job"
 
 
 def test_validate_rule_dir_may_be_called_sync() -> None:

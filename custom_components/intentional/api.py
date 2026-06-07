@@ -53,6 +53,8 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
+from functools import partial
 from typing import Any
 
 from aiohttp import web
@@ -114,6 +116,17 @@ def _error(message: str, code: str, status: int = 400) -> web.Response:
     )
 
 
+async def _rule_file_job(
+    hass: HomeAssistant,
+    func: Callable[..., Any],
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Run blocking rule-file work in HA's executor."""
+    job = partial(func, **kwargs) if kwargs else func
+    return await hass.async_add_executor_job(job, *args)
+
+
 # ── Health ─────────────────────────────────────────────────────────
 
 
@@ -137,7 +150,7 @@ class IntentionalHealthView(HomeAssistantView):
             return _error("Integration not configured", "not_configured", 503)
         return web.json_response({
             "status": "ok",
-            "version": "0.4.0",
+            "version": "0.4.1",
             "rule_dir": entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR),
             "rule_count": engine.rule_count(),
             "active_intent_count": engine.active_intent_count(),
@@ -157,7 +170,7 @@ class IntentionalRulesView(HomeAssistantView):
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
         rule_dir = _rule_dir_for(hass)
-        files = _list_rule_files(rule_dir)
+        files = await _rule_file_job(hass, _list_rule_files, rule_dir)
         return web.json_response({
             "rule_dir": rule_dir,
             "count": len(files),
@@ -185,7 +198,7 @@ class IntentionalRuleView(HomeAssistantView):
         if not _is_safe_filename(filename):
             return _error(f"Invalid filename: {filename!r}", "invalid_filename", 400)
         rule_dir = _rule_dir_for(hass)
-        contents = _read_rule_file(rule_dir, filename)
+        contents = await _rule_file_job(hass, _read_rule_file, rule_dir, filename)
         if contents is None:
             return _error(f"Rule file not found: {filename}", "not_found", 404)
         return web.json_response({
@@ -211,7 +224,7 @@ class IntentionalRuleView(HomeAssistantView):
             return _error("Request body must be {\"contents\": \"<yaml>\"}", "bad_request", 400)
 
         rule_dir = _rule_dir_for(hass)
-        err = _write_rule_file(rule_dir, filename, contents)
+        err = await _rule_file_job(hass, _write_rule_file, rule_dir, filename, contents)
         if err:
             return _error(err, "validation_failed", 400)
         # Auto-reload so the new rule takes effect
@@ -227,7 +240,7 @@ class IntentionalRuleView(HomeAssistantView):
         if not _is_safe_filename(filename):
             return _error(f"Invalid filename: {filename!r}", "invalid_filename", 400)
         rule_dir = _rule_dir_for(hass)
-        err = _delete_rule_file(rule_dir, filename)
+        err = await _rule_file_job(hass, _delete_rule_file, rule_dir, filename)
         if err:
             return _error(err, "delete_failed", 500)
         await hass.services.async_call(DOMAIN, "reload", blocking=True)
@@ -255,7 +268,9 @@ class IntentionalRuleByIDView(HomeAssistantView):
                 "bad_request",
                 400,
             )
-        result = _patch_rule_by_id(
+        result = await _rule_file_job(
+            hass,
+            _patch_rule_by_id,
             _rule_dir_for(hass),
             rule_id,
             contents,
