@@ -27,6 +27,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
 MANIFEST_PATH = REPO_ROOT / "custom_components" / "intentional" / "manifest.json"
+BUNDLED_ENGINE_INIT_PATH = REPO_ROOT / "custom_components" / "intentional" / "_engine" / "__init__.py"
+API_PATH = REPO_ROOT / "custom_components" / "intentional" / "api.py"
 
 
 def _read_manifest() -> dict:
@@ -132,3 +134,22 @@ def test_manifest_version_is_semver() -> None:
         f"manifest.json version {manifest['version']!r} is not a valid "
         f"semver string. HA expects MAJOR.MINOR.PATCH."
     )
+
+
+def test_runtime_version_matches_manifest() -> None:
+    import intentional
+
+    manifest = _read_manifest()
+    bundled_init = BUNDLED_ENGINE_INIT_PATH.read_text()
+    match = re.search(r'^__version__ = "([^"]+)"$', bundled_init, re.MULTILINE)
+
+    assert intentional.__version__ == manifest["version"]
+    assert match is not None
+    assert match.group(1) == manifest["version"]
+
+
+def test_health_endpoint_uses_runtime_version_constant() -> None:
+    api_source = API_PATH.read_text()
+
+    assert '"version": __version__' in api_source
+    assert not re.search(r'"version": "\d+\.\d+\.\d+"', api_source)

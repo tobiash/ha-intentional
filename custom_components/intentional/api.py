@@ -61,6 +61,7 @@ from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
+from ._engine import __version__  # noqa: TID252
 from ._engine.engine import Engine  # noqa: TID252
 from ._engine.reconciliation import (  # noqa: TID252
     actual_conditions_for_desired_record,
@@ -150,7 +151,7 @@ class IntentionalHealthView(HomeAssistantView):
             return _error("Integration not configured", "not_configured", 503)
         return web.json_response({
             "status": "ok",
-            "version": "0.4.1",
+            "version": __version__,
             "rule_dir": entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR),
             "rule_count": engine.rule_count(),
             "active_intent_count": engine.active_intent_count(),
