@@ -625,7 +625,8 @@ async def _apply_resolved_targets(
         signature = service_plan_signature(calls)
         if last_applied.get(target) == signature:
             continue
-        current_state = hass.states.get(target)
+        states = getattr(hass, "states", None)
+        current_state = states.get(target) if states is not None else None
         if current_state is not None and service_plan_matches_state(signature, current_state):
             last_applied[target] = signature
             continue
