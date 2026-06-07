@@ -46,6 +46,47 @@ def _service_calls_for_yaml(
     return calls_by_target
 
 
+def test_vnext_always_active_intent_resolves_to_service_call() -> None:
+    calls = _service_calls_for_yaml(
+        """
+        - id: hallway-base
+          intent:
+            light.hallway:
+              state: "on"
+              brightness_pct: 3
+        """,
+        [],
+    )
+
+    assert calls == {
+        "light.hallway": (
+            (
+                "light",
+                "turn_on",
+                {
+                    "entity_id": "light.hallway",
+                    "brightness_pct": 3,
+                },
+            ),
+        ),
+    }
+
+
+def test_vnext_disabled_rule_does_not_resolve_to_service_call() -> None:
+    calls = _service_calls_for_yaml(
+        """
+        - id: disabled-light
+          enabled: false
+          intent:
+            light.hallway:
+              state: "on"
+        """,
+        [],
+    )
+
+    assert calls == {}
+
+
 def test_room_automation_scenario_resolves_to_ha_service_calls() -> None:
     calls = _service_calls_for_yaml(
         """

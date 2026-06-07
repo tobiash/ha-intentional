@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-06-07
+
+### Added
+- **VNext `observe -> intent` DSL draft** with structured observations, multi-target intents, scenes, selector expansion, inline animations, effects, metadata, suppression, TTL, and linger semantics.
+- **Persistent lifecycle records** for edge-created TTL intents, lingering intents, manual overrides, and once-per-activation effect dedupe state. The HA integration restores these records after rule load and saves them during the tick loop.
+- **Agent-facing endpoints**: schema, validation, dry-run, world model, and generation-guarded patch-by-rule-id editing.
+- **Desired/status world model** exposing desired records, lifecycle records, selector diagnostics, actual state snapshots, and actual-vs-desired conditions.
+- **Jinja rendering** for scalar `intent` values and `effect.data`, including native numeric coercion through Jinja's native environment.
+- **Dynamic `observe.select`** with `any`, `all`, and `none` modes plus selector provenance diagnostics.
+- **Architecture deepening modules** for lifecycle persistence, templates, selector matching, reconciliation status, capability policy, VNext records, and bundled-engine sync.
+
+### Changed
+- **Intent/effect separation is stricter**: durable `intent` rejects action-like fields such as `state: toggle` and remote `command`; these must use `effect`.
+- **Reconciliation skips redundant HA calls** when actual HA state already matches the desired record.
+- **Rule-file editing** now uses a deeper rule workspace module with generation hashes and safe patch semantics.
+- **Bundled engine sync** is now repeatable via `tools/sync_bundled_engine.py`.
+
+### Notes
+- Test counts: 375 local tests pass, with 8 HA-dependent tests skipped when Home Assistant is not installed locally. CI runs the full HA harness.
+- This release is a large VNext foundation release. The VNext DSL remains marked as `vnext-draft` while compatibility with the legacy `when`/`emit` format is preserved.
+
 ## [0.3.4] - 2026-06-05
 
 ### Fixed

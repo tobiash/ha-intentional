@@ -176,6 +176,44 @@ def test_regular_state_change_exposes_one_cycle_changed_pulse() -> None:
     assert "binary_sensor.front_door.triggered" not in engine.state
 
 
+def test_vnext_edge_intent_persists_until_ttl_after_pulse_clears() -> None:
+    from intentional.engine import Engine
+    from intentional.ha_adapter import (
+        clear_state_change_pulses,
+        pulse_state_change,
+        sync_state_object_into_engine,
+    )
+    from intentional.yaml_loader import load_rules_from_string
+
+    engine = Engine(clock_fn=lambda: 1000)
+    engine.load_rules(load_rules_from_string("""
+- id: door-open-light
+  observe:
+    changed:
+      binary_sensor.front_door:
+        to: on
+  intent:
+    light.entry:
+      ttl: 2m
+      state: on
+"""))
+    old_state = SimpleNamespace(entity_id="binary_sensor.front_door", state="off", attributes={})
+    new_state = SimpleNamespace(entity_id="binary_sensor.front_door", state="on", attributes={})
+
+    sync_state_object_into_engine(engine, new_state)
+    assert pulse_state_change(engine, old_state, new_state)
+    engine.evaluate_all()
+    assert engine.resolve("light.entry").value == {"state": "on"}
+
+    clear_state_change_pulses(engine, {"binary_sensor.front_door"})
+    engine.evaluate_all()
+    assert engine.resolve("light.entry").value == {"state": "on"}
+
+    engine.advance_clock(120_000)
+    engine.evaluate_all()
+    assert engine.resolve("light.entry") is None
+
+
 def test_regular_state_change_does_not_pulse_initial_state() -> None:
     from intentional.engine import Engine
     from intentional.ha_adapter import pulse_state_change

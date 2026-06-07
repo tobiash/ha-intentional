@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ha-intentional"
-version = "0.1.0"
+version = "0.4.0"
 description = "Declarative intent-based automation for Home Assistant"
 readme = "README.md"
 license = { text = "MIT" }
@@ -24,6 +24,7 @@ classifiers = [
     "Topic :: Home Automation",
 ]
 dependencies = [
+    "Jinja2>=3.1",
     "PyYAML>=6.0",
     "voluptuous>=0.13.1",
 ]

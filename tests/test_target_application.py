@@ -786,6 +786,52 @@ def test_state_drift_does_not_emit_manual_override_for_matching_state() -> None:
     )
 
 
+def test_service_plan_matches_equivalent_actual_light_state() -> None:
+    from intentional.ha_adapter import (
+        service_calls_for_resolved_target,
+        service_plan_matches_state,
+        service_plan_signature,
+    )
+
+    calls = service_calls_for_resolved_target(
+        "light.desk",
+        {"state": "on", "brightness_pct": 60},
+    )
+    signature = service_plan_signature(calls)
+
+    assert service_plan_matches_state(
+        signature,
+        SimpleNamespace(
+            entity_id="light.desk",
+            state="on",
+            attributes={"brightness": 153},
+        ),
+    )
+
+
+def test_service_plan_does_not_match_conflicting_actual_light_state() -> None:
+    from intentional.ha_adapter import (
+        service_calls_for_resolved_target,
+        service_plan_matches_state,
+        service_plan_signature,
+    )
+
+    calls = service_calls_for_resolved_target(
+        "light.desk",
+        {"state": "on", "brightness_pct": 60},
+    )
+    signature = service_plan_signature(calls)
+
+    assert not service_plan_matches_state(
+        signature,
+        SimpleNamespace(
+            entity_id="light.desk",
+            state="off",
+            attributes={"brightness": 153},
+        ),
+    )
+
+
 def test_state_drift_does_not_emit_manual_override_for_unmanaged_target() -> None:
     from intentional.engine import Engine
     from intentional.ha_adapter import emit_manual_override_for_state_drift

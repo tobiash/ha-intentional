@@ -51,7 +51,9 @@ from typing import Any
 import yaml
 
 from intentional.animation import AnimationSpec
+from intentional.capabilities import vnext_intent_policy_error
 from intentional.intent import Authority
+from intentional.records import Effect, IntentSelector, ObserveSelector
 
 RuleDirFingerprint = tuple[tuple[str, int, int], ...]
 
@@ -190,11 +192,20 @@ class Rule:
     transition_ms: int = 0
     easing: str = "linear"
     ttl_ms: int | None = None
+    linger_ms: int | None = None
     authority: Authority = Authority.AUTOMATION
     confidence: float = 1.0
     reason: str = ""
     blocks: tuple[str, ...] = field(default_factory=tuple)
     animation: AnimationSpec | None = None
+    effects: tuple[Effect, ...] = field(default_factory=tuple)
+    intent_selectors: tuple[IntentSelector, ...] = field(default_factory=tuple)
+    observe_selectors: tuple[ObserveSelector, ...] = field(default_factory=tuple)
+    observe_selector_mode: str = "any"
+    edge_created: bool = False
+    enabled: bool = True
+    labels: tuple[str, ...] = field(default_factory=tuple)
+    notes: str = ""
     source_file: Path | None = None
     source_line: int | None = None
 
@@ -204,12 +215,12 @@ class Rule:
 
 # Recognized top-level fields in a rule
 _RULE_TOP_LEVEL = {
-    "id", "extends", "when", "for", "emit", "authority", "confidence", "reason", "blocks",
+    "id", "extends", "when", "observe", "for", "emit", "intent", "effect", "authority", "confidence", "reason", "blocks", "enabled", "labels", "notes", "edge_created",
 }
 # Recognized fields in the emit block
 _EMIT_FIELDS = {
     "target", "scene", "set", "cap", "floor", "offset", "multiply", "merge",
-    "transition", "easing", "ttl", "animation",
+    "transition", "easing", "ttl", "linger", "animation",
 }
 # Recognized animation fields
 _ANIMATION_FIELDS = {
@@ -228,6 +239,7 @@ class _RawRuleDef:
     raw: dict[str, Any]
     file: Path | None
     line: int | None
+    scenes: dict[str, Any] = field(default_factory=dict)
 
 
 def _validate_rule(
@@ -255,6 +267,8 @@ def _validate_rule(
             file=file, line=line,
         )
 
+    raw = _normalize_vnext_rule(raw, file=file, line=line)
+
     # id
     rule_id = raw.get("id")
     if not rule_id or not isinstance(rule_id, str):
@@ -264,6 +278,20 @@ def _validate_rule(
     when = raw.get("when")
     if not when or not isinstance(when, str):
         raise RuleLoadError(f"Rule {rule_id!r}: missing or invalid `when` (must be a non-empty string)", file=file, line=line)
+
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise RuleLoadError(f"Rule {rule_id!r}: `enabled` must be a boolean", file=file, line=line)
+
+    labels_raw = raw.get("labels", [])
+    if labels_raw is None:
+        labels_raw = []
+    if not isinstance(labels_raw, list) or not all(isinstance(label, str) for label in labels_raw):
+        raise RuleLoadError(f"Rule {rule_id!r}: `labels` must be a list of strings", file=file, line=line)
+
+    notes = raw.get("notes", "")
+    if not isinstance(notes, str):
+        raise RuleLoadError(f"Rule {rule_id!r}: `notes` must be a string", file=file, line=line)
 
     # for
     for_ms, for_entity, for_entity_unit = _parse_for(
@@ -275,6 +303,11 @@ def _validate_rule(
 
     # emit
     emit = raw.get("emit")
+    effects = _parse_effects(raw.get("effect"), rule_id, file, line)
+    intent_selectors = _parse_intent_selectors(raw.get("intent"), rule_id, file, line)
+    observe_selectors, observe_selector_mode = _parse_observe_selectors(raw.get("observe"), rule_id, file, line)
+    if emit is None and (effects or intent_selectors):
+        emit = {"target": "__intentional_effect_only__"}
     if not isinstance(emit, dict):
         raise RuleLoadError(f"Rule {rule_id!r}: missing or invalid `emit` block", file=file, line=line)
 
@@ -292,6 +325,7 @@ def _validate_rule(
     # with a resolved value).
     target = emit.get("target")
     scene = emit.get("scene")
+    effect_only = target == "__intentional_effect_only__"
     has_target = bool(target) and isinstance(target, str)
     has_scene = bool(scene) and isinstance(scene, str)
 
@@ -356,6 +390,13 @@ def _validate_rule(
         line,
         default=None,
     )
+    linger_ms = _parse_optional_duration(
+        emit.get("linger"),
+        f"Rule {rule_id!r}: linger",
+        file,
+        line,
+        default=None,
+    )
 
     # blocks
     blocks_raw = raw.get("blocks", [])
@@ -376,7 +417,7 @@ def _validate_rule(
         for_ms=for_ms,
         for_entity=for_entity,
         for_entity_unit=for_entity_unit,
-        target=target or "",
+        target="" if effect_only else target or "",
         scene=scene,
         set=_normalize_emit_mapping(emit.get("set", {})),
         cap=_normalize_emit_mapping(emit.get("cap", {})),
@@ -387,11 +428,20 @@ def _validate_rule(
         transition_ms=transition_ms,
         easing=easing,
         ttl_ms=ttl_ms,
+        linger_ms=linger_ms,
         authority=authority,
         confidence=float(confidence),
         reason=str(raw.get("reason", "")),
         blocks=tuple(blocks_raw),
         animation=animation,
+        effects=effects,
+        intent_selectors=intent_selectors,
+        observe_selectors=observe_selectors,
+        observe_selector_mode=observe_selector_mode,
+        edge_created=bool(raw.get("edge_created", False)),
+        enabled=enabled,
+        labels=tuple(labels_raw),
+        notes=notes,
         source_file=file,
         source_line=line,
     )
@@ -405,6 +455,378 @@ def _normalize_emit_mapping(raw: Any) -> dict[str, Any]:
     elif mapping.get("state") is False:
         mapping["state"] = "off"
     return mapping
+
+
+def _normalize_vnext_rule(
+    raw: dict[str, Any],
+    *,
+    file: Path | None,
+    line: int | None,
+) -> dict[str, Any]:
+    """Normalize the first VNext observe/intent shape to the existing Rule schema."""
+    if "observe" not in raw and "intent" not in raw:
+        return raw
+
+    normalized = dict(raw)
+    if normalized.get("enabled") is False:
+        normalized["when"] = "false"
+    if "when" not in normalized and "observe" in normalized:
+        normalized["when"] = _observe_to_when(normalized["observe"], file=file, line=line)
+    elif "when" not in normalized and "intent" in normalized:
+        normalized["when"] = "true"
+    if "for" not in normalized and isinstance(normalized.get("observe"), dict):
+        observe_for = normalized["observe"].get("for")
+        if observe_for is not None:
+            normalized["for"] = observe_for
+    if "emit" not in normalized and "intent" in normalized:
+        _normalize_vnext_suppression(normalized, file=file, line=line)
+        intent = normalized["intent"]
+        explicit_targets = [
+            key for key in intent
+            if key not in {"include", "select", "suppress"}
+        ] if isinstance(intent, dict) else []
+        if not explicit_targets and isinstance(intent, dict) and "select" in intent:
+            normalized["emit"] = {"target": "__intentional_effect_only__"}
+        else:
+            normalized["emit"] = _intent_to_emit(intent, file=file, line=line)
+    if "intent" in normalized and _observe_contains_edge(normalized.get("observe")):
+        normalized["edge_created"] = True
+        emit = normalized.get("emit")
+        if isinstance(emit, dict) and "ttl" not in emit:
+            raise RuleLoadError("VNext edge-created intents require `ttl`", file=file, line=line)
+    emit = normalized.get("emit")
+    if isinstance(emit, dict) and "ttl" in emit and "linger" in emit:
+        raise RuleLoadError("VNext target lifecycle cannot use both `ttl` and `linger`", file=file, line=line)
+    return normalized
+
+
+def _normalize_vnext_suppression(
+    raw: dict[str, Any],
+    *,
+    file: Path | None,
+    line: int | None,
+) -> None:
+    intent = raw.get("intent")
+    if not isinstance(intent, dict) or "suppress" not in intent:
+        return
+    suppress = intent["suppress"]
+    if not isinstance(suppress, dict):
+        raise RuleLoadError("VNext `intent.suppress` must be a mapping", file=file, line=line)
+    rules = suppress.get("rules", [])
+    if not isinstance(rules, list) or not all(isinstance(rule_id, str) for rule_id in rules):
+        raise RuleLoadError("VNext `intent.suppress.rules` must be a list of rule IDs", file=file, line=line)
+    raw["blocks"] = [*raw.get("blocks", []), *rules]
+
+
+def _observe_contains_edge(observe: Any) -> bool:
+    if not isinstance(observe, dict):
+        return False
+    if "changed" in observe or "happened" in observe:
+        return True
+    for key in ("all", "any", "none"):
+        items = observe.get(key)
+        if isinstance(items, list) and any(_observe_contains_edge(item) for item in items):
+            return True
+    return _observe_contains_edge(observe.get("not"))
+
+
+def _observe_to_when(
+    observe: Any,
+    *,
+    file: Path | None,
+    line: int | None,
+) -> str:
+    """Convert a compact level observation to the current when expression."""
+    if not isinstance(observe, dict):
+        raise RuleLoadError("`observe` must be a mapping", file=file, line=line)
+    if set(observe) == {"any"}:
+        return _observe_group_to_when("any", observe["any"], file=file, line=line)
+    if set(observe) == {"all"}:
+        return _observe_group_to_when("all", observe["all"], file=file, line=line)
+    if set(observe) == {"none"}:
+        return f"not {_observe_group_to_when('any', observe['none'], file=file, line=line)}"
+    if set(observe) == {"not"}:
+        return f"not ({_observe_to_when(observe['not'], file=file, line=line)})"
+    if set(observe) == {"changed"}:
+        return _changed_observe_to_when(observe["changed"], file=file, line=line)
+    if set(observe) == {"happened"}:
+        return _happened_observe_to_when(observe["happened"], file=file, line=line)
+    if set(observe) == {"select"}:
+        return "true"
+    fields = [key for key in observe if key not in {"for", "select"}]
+    if not fields:
+        raise RuleLoadError(
+            "VNext `observe` must contain at least one observed field",
+            file=file,
+            line=line,
+        )
+    return " and ".join(
+        _observe_field_to_when(field, observe[field], file=file, line=line)
+        for field in fields
+    )
+
+
+def _observe_group_to_when(
+    operator: str,
+    items: Any,
+    *,
+    file: Path | None,
+    line: int | None,
+) -> str:
+    """Convert a grouped observation to the current boolean expression syntax."""
+    if not isinstance(items, list) or not items:
+        raise RuleLoadError(
+            f"VNext `observe.{operator}` must be a non-empty list",
+            file=file,
+            line=line,
+        )
+    joiner = " or " if operator == "any" else " and "
+    return "(" + joiner.join(
+        _observe_to_when(item, file=file, line=line)
+        for item in items
+    ) + ")"
+
+
+def _changed_observe_to_when(
+    changed: Any,
+    *,
+    file: Path | None,
+    line: int | None,
+) -> str:
+    if not isinstance(changed, dict) or len(changed) != 1:
+        raise RuleLoadError("VNext `observe.changed` must contain exactly one entity", file=file, line=line)
+    entity_id, spec = next(iter(changed.items()))
+    if not isinstance(entity_id, str) or not entity_id:
+        raise RuleLoadError("VNext `observe.changed` entity must be a non-empty string", file=file, line=line)
+    if spec is None:
+        spec = {}
+    if not isinstance(spec, dict):
+        raise RuleLoadError("VNext `observe.changed` spec must be a mapping", file=file, line=line)
+    unknown = set(spec) - {"to", "within"}
+    if unknown:
+        raise RuleLoadError(
+            f"VNext `observe.changed` does not support fields {sorted(unknown)} yet",
+            file=file,
+            line=line,
+        )
+    parts = [f"{entity_id}.changed == true"]
+    if "to" in spec:
+        parts.append(f"{entity_id} == {_when_literal(spec['to'])}")
+    return " and ".join(parts)
+
+
+def _happened_observe_to_when(
+    happened: Any,
+    *,
+    file: Path | None,
+    line: int | None,
+) -> str:
+    if not isinstance(happened, dict) or len(happened) != 1:
+        raise RuleLoadError("VNext `observe.happened` must contain exactly one event entity", file=file, line=line)
+    entity_id, spec = next(iter(happened.items()))
+    if not isinstance(entity_id, str) or not entity_id.startswith("event."):
+        raise RuleLoadError("VNext `observe.happened` currently supports event.* entities", file=file, line=line)
+    if spec is None:
+        spec = {}
+    if not isinstance(spec, dict):
+        raise RuleLoadError("VNext `observe.happened` spec must be a mapping", file=file, line=line)
+    parts = [f"{entity_id}.triggered == true"]
+    for observed_field, value in spec.items():
+        if observed_field == "within":
+            continue
+        parts.append(f"{entity_id}.{observed_field} == {_when_literal(value)}")
+    return " and ".join(parts)
+
+
+def _observe_field_to_when(
+    field: str,
+    expected: Any,
+    *,
+    file: Path | None,
+    line: int | None,
+) -> str:
+    """Convert one observed field predicate to a current when expression."""
+    if isinstance(expected, dict):
+        if len(expected) != 1:
+            raise RuleLoadError(
+                "VNext `observe` comparisons must contain exactly one operator",
+                file=file,
+                line=line,
+        )
+        operator, expected = next(iter(expected.items()))
+        return f"{field} {_observe_operator_to_when(operator, file=file, line=line)} {_when_literal(expected)}"
+    return f"{field} == {_when_literal(expected)}"
+
+
+def _observe_operator_to_when(
+    operator: str,
+    *,
+    file: Path | None,
+    line: int | None,
+) -> str:
+    operators = {
+        "is": "==",
+        "is_not": "!=",
+        "lt": "<",
+        "lte": "<=",
+        "gt": ">",
+        "gte": ">=",
+    }
+    try:
+        return operators[operator]
+    except KeyError as e:
+        raise RuleLoadError(
+            f"VNext `observe` does not support operator {operator!r} yet",
+            file=file,
+            line=line,
+        ) from e
+
+
+def _when_literal(value: Any) -> str:
+    if value is True:
+        return '"on"'
+    if value is False:
+        return '"off"'
+    if isinstance(value, str):
+        return repr(value).replace("'", '"')
+    return repr(value)
+
+
+def _intent_to_emit(
+    intent: Any,
+    *,
+    file: Path | None,
+    line: int | None,
+) -> dict[str, Any]:
+    """Convert a single VNext target intent to the current emit schema."""
+    if not isinstance(intent, dict):
+        raise RuleLoadError("`intent` must be a mapping", file=file, line=line)
+    target_items = [
+        (key, value)
+        for key, value in intent.items()
+        if key not in {"include", "select", "suppress"}
+    ]
+    if len(target_items) != 1:
+        raise RuleLoadError(
+            "VNext `intent` currently supports exactly one explicit target",
+            file=file,
+            line=line,
+        )
+    target, fields = target_items[0]
+    if not isinstance(target, str) or not target:
+        raise RuleLoadError("VNext `intent` target must be a non-empty string", file=file, line=line)
+    if not isinstance(fields, dict):
+        raise RuleLoadError(
+            f"VNext `intent` for {target!r} must be a mapping",
+            file=file,
+            line=line,
+        )
+
+    return _intent_fields_to_emit(target, fields, file=file, line=line)
+
+
+def _intent_fields_to_emit(
+    target: str,
+    fields: dict[str, Any],
+    *,
+    file: Path | None,
+    line: int | None,
+) -> dict[str, Any]:
+    """Normalize VNext target fields to the current emit schema."""
+
+    emit: dict[str, Any] = {"target": target, "set": {}, "cap": {}, "floor": {}, "offset": {}, "multiply": {}}
+    for intent_field, value in fields.items():
+        _validate_vnext_intent_field(target, intent_field, value, file=file, line=line)
+        if intent_field in {"ttl", "linger", "transition", "easing"}:
+            emit[intent_field] = value
+            continue
+        if isinstance(value, dict) and set(value) & {"value", "min", "max", "offset", "multiply", "animate"}:
+            if "animate" in value:
+                if "animation" in emit:
+                    raise RuleLoadError("One animated field per VNext target is supported", file=file, line=line)
+                emit["animation"] = _vnext_inline_animation_to_legacy(intent_field, value["animate"], file=file, line=line)
+                if "value" not in value:
+                    initial = _vnext_animation_initial_value(emit["animation"])
+                    if initial is not None:
+                        emit["set"][intent_field] = initial
+            if "value" in value:
+                emit["set"][intent_field] = value["value"]
+            if "max" in value:
+                emit["cap"][intent_field] = value["max"]
+            if "min" in value:
+                emit["floor"][intent_field] = value["min"]
+            if "offset" in value:
+                emit["offset"][intent_field] = value["offset"]
+            if "multiply" in value:
+                emit["multiply"][intent_field] = value["multiply"]
+            continue
+        emit["set"][intent_field] = value
+
+    return {key: value for key, value in emit.items() if key == "target" or value}
+
+
+def _vnext_inline_animation_to_legacy(
+    field: str,
+    raw: Any,
+    *,
+    file: Path | None,
+    line: int | None,
+) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise RuleLoadError("VNext inline `animate` must be a mapping", file=file, line=line)
+    animation = dict(raw)
+    animation["parameter"] = field
+    if "kind" in animation:
+        return animation
+
+    kind_keys = set(animation) & {"pulse", "cycle", "breath", "flash"}
+    if len(kind_keys) != 1:
+        raise RuleLoadError(
+            "VNext inline `animate` must specify exactly one of pulse, cycle, breath, or flash",
+            file=file,
+            line=line,
+        )
+    kind = next(iter(kind_keys))
+    kind_value = animation.pop(kind)
+    animation["kind"] = kind
+    if kind in {"pulse", "cycle"}:
+        animation["values"] = kind_value
+    elif kind == "breath":
+        if isinstance(kind_value, list | tuple) and len(kind_value) == 2:
+            animation["min"], animation["max"] = kind_value
+        elif isinstance(kind_value, dict):
+            animation.update(kind_value)
+        else:
+            raise RuleLoadError("VNext breath animation must be [min, max] or a mapping", file=file, line=line)
+    elif kind == "flash":
+        animation["peak"] = kind_value
+    return animation
+
+
+def _vnext_animation_initial_value(animation: dict[str, Any]) -> Any:
+    kind = animation.get("kind")
+    if kind in {"pulse", "cycle"}:
+        values = animation.get("values")
+        if isinstance(values, list | tuple) and values:
+            return values[0]
+    if kind == "breath":
+        return animation.get("min")
+    if kind == "flash":
+        return animation.get("peak")
+    return None
+
+
+def _validate_vnext_intent_field(
+    target: str,
+    field: str,
+    value: Any,
+    *,
+    file: Path | None,
+    line: int | None,
+) -> None:
+    message = vnext_intent_policy_error(target, field, value)
+    if message is not None:
+        raise RuleLoadError(message, file=file, line=line)
 
 
 def _parse_optional_duration(
@@ -554,6 +976,190 @@ def _parse_animation(
         ) from e
 
 
+def _parse_effects(
+    raw: Any,
+    rule_id: str,
+    file: Path | None,
+    line: int | None,
+) -> tuple[Effect, ...]:
+    if raw is None:
+        return ()
+    raw_effects = raw if isinstance(raw, list) else [raw]
+    if not isinstance(raw_effects, list):
+        raise RuleLoadError(f"Rule {rule_id!r}: `effect` must be a mapping or list", file=file, line=line)
+
+    effects: list[Effect] = []
+    for effect in raw_effects:
+        if not isinstance(effect, dict):
+            raise RuleLoadError(f"Rule {rule_id!r}: each `effect` must be a mapping", file=file, line=line)
+        unknown = set(effect) - {"service", "target", "data"}
+        if unknown:
+            raise RuleLoadError(
+                f"Rule {rule_id!r}: unknown fields in `effect`: {sorted(unknown)}",
+                file=file,
+                line=line,
+            )
+        service_name = effect.get("service")
+        if not isinstance(service_name, str) or "." not in service_name:
+            raise RuleLoadError(
+                f"Rule {rule_id!r}: `effect.service` must be a domain.service string",
+                file=file,
+                line=line,
+            )
+        domain, service = service_name.split(".", 1)
+        target = effect.get("target", {})
+        data = effect.get("data", {})
+        if not isinstance(target, dict):
+            raise RuleLoadError(f"Rule {rule_id!r}: `effect.target` must be a mapping", file=file, line=line)
+        if not isinstance(data, dict):
+            raise RuleLoadError(f"Rule {rule_id!r}: `effect.data` must be a mapping", file=file, line=line)
+        effects.append(Effect(domain=domain, service=service, target=dict(target), data=dict(data)))
+    return tuple(effects)
+
+
+def _parse_intent_selectors(
+    intent: Any,
+    rule_id: str,
+    file: Path | None,
+    line: int | None,
+) -> tuple[IntentSelector, ...]:
+    if not isinstance(intent, dict) or "select" not in intent:
+        return ()
+    raw_selectors = intent["select"]
+    if not isinstance(raw_selectors, list):
+        raise RuleLoadError(f"Rule {rule_id!r}: `intent.select` must be a list", file=file, line=line)
+    selectors: list[IntentSelector] = []
+    for raw_selector in raw_selectors:
+        if not isinstance(raw_selector, dict):
+            raise RuleLoadError(f"Rule {rule_id!r}: selector entries must be mappings", file=file, line=line)
+        selectors.append(_parse_intent_selector(raw_selector, rule_id, file, line))
+    return tuple(selectors)
+
+
+def _parse_observe_selectors(
+    observe: Any,
+    rule_id: str,
+    file: Path | None,
+    line: int | None,
+) -> tuple[tuple[ObserveSelector, ...], str]:
+    if not isinstance(observe, dict) or "select" not in observe:
+        return (), "any"
+    raw_select = observe["select"]
+    if not isinstance(raw_select, dict):
+        raise RuleLoadError(f"Rule {rule_id!r}: `observe.select` must be a mapping", file=file, line=line)
+    mode = raw_select.get("mode", "any")
+    if mode not in {"any", "all", "none"}:
+        raise RuleLoadError(f"Rule {rule_id!r}: `observe.select.mode` must be any, all, or none", file=file, line=line)
+    raw_entities = raw_select.get("entities")
+    if not isinstance(raw_entities, list) or not raw_entities:
+        raise RuleLoadError(f"Rule {rule_id!r}: `observe.select.entities` must be a non-empty list", file=file, line=line)
+    return tuple(
+        _parse_observe_selector(raw_selector, rule_id, file, line)
+        for raw_selector in raw_entities
+    ), mode
+
+
+def _parse_observe_selector(
+    raw: Any,
+    rule_id: str,
+    file: Path | None,
+    line: int | None,
+) -> ObserveSelector:
+    if not isinstance(raw, dict):
+        raise RuleLoadError(f"Rule {rule_id!r}: `observe.select.entities` entries must be mappings", file=file, line=line)
+    selector_keys = {"domain", "area", "label", "exclude"}
+    domain = raw.get("domain")
+    area = raw.get("area")
+    label = raw.get("label")
+    if domain is not None and not isinstance(domain, str):
+        raise RuleLoadError(f"Rule {rule_id!r}: observe selector `domain` must be a string", file=file, line=line)
+    if area is not None and not isinstance(area, str):
+        raise RuleLoadError(f"Rule {rule_id!r}: observe selector `area` must be a string", file=file, line=line)
+    if label is not None and not isinstance(label, str):
+        raise RuleLoadError(f"Rule {rule_id!r}: observe selector `label` must be a string", file=file, line=line)
+    if domain is None and area is None and label is None:
+        raise RuleLoadError(f"Rule {rule_id!r}: observe selector requires domain, area, or label", file=file, line=line)
+    exclude_raw = raw.get("exclude", [])
+    if not isinstance(exclude_raw, list) or not all(isinstance(item, str) for item in exclude_raw):
+        raise RuleLoadError(f"Rule {rule_id!r}: observe selector `exclude` must be a list of entity IDs", file=file, line=line)
+    comparisons = {key: value for key, value in raw.items() if key not in selector_keys}
+    if not comparisons:
+        comparisons = {"state": "on"}
+    if len(comparisons) != 1:
+        raise RuleLoadError(f"Rule {rule_id!r}: observe selector supports one comparison field", file=file, line=line)
+    field, value = next(iter(comparisons.items()))
+    operator = "is"
+    expected = value
+    if isinstance(value, dict):
+        if len(value) != 1:
+            raise RuleLoadError(f"Rule {rule_id!r}: observe selector comparison must contain one operator", file=file, line=line)
+        operator, expected = next(iter(value.items()))
+        _observe_operator_to_when(operator, file=file, line=line)
+    return ObserveSelector(
+        domain=domain,
+        area=area,
+        label=label,
+        exclude=tuple(exclude_raw),
+        field=str(field),
+        operator=operator,
+        value=_observe_selector_expected_value(expected),
+    )
+
+
+def _observe_selector_expected_value(value: Any) -> Any:
+    if value is True:
+        return "on"
+    if value is False:
+        return "off"
+    return value
+
+
+def _parse_intent_selector(
+    raw: dict[str, Any],
+    rule_id: str,
+    file: Path | None,
+    line: int | None,
+) -> IntentSelector:
+    selector_keys = {"domain", "area", "label", "exclude"}
+    unknown_filters = {key for key in selector_keys if key in raw and raw[key] is None}
+    if unknown_filters:
+        raise RuleLoadError(f"Rule {rule_id!r}: selector filters cannot be null", file=file, line=line)
+    domain = raw.get("domain")
+    area = raw.get("area")
+    label = raw.get("label")
+    if domain is not None and not isinstance(domain, str):
+        raise RuleLoadError(f"Rule {rule_id!r}: selector `domain` must be a string", file=file, line=line)
+    if area is not None and not isinstance(area, str):
+        raise RuleLoadError(f"Rule {rule_id!r}: selector `area` must be a string", file=file, line=line)
+    if label is not None and not isinstance(label, str):
+        raise RuleLoadError(f"Rule {rule_id!r}: selector `label` must be a string", file=file, line=line)
+    if not any((domain, area, label)):
+        raise RuleLoadError(f"Rule {rule_id!r}: selector requires domain, area, or label", file=file, line=line)
+    exclude = raw.get("exclude", [])
+    if exclude is None:
+        exclude = []
+    if not isinstance(exclude, list) or not all(isinstance(entity_id, str) for entity_id in exclude):
+        raise RuleLoadError(f"Rule {rule_id!r}: selector `exclude` must be a list of entity IDs", file=file, line=line)
+
+    fields = {key: value for key, value in raw.items() if key not in selector_keys}
+    emit = _intent_fields_to_emit("<selector>", fields, file=file, line=line)
+    return IntentSelector(
+        domain=domain,
+        area=area,
+        label=label,
+        exclude=tuple(exclude),
+        set=_normalize_emit_mapping(emit.get("set", {})),
+        cap=dict(emit.get("cap", {})),
+        floor=dict(emit.get("floor", {})),
+        offset=dict(emit.get("offset", {})),
+        multiply=dict(emit.get("multiply", {})),
+        transition_ms=_parse_optional_duration(emit.get("transition"), f"Rule {rule_id!r}: selector.transition", file, line) or 0,
+        easing=str(emit.get("easing", "linear")),
+        ttl_ms=_parse_optional_duration(emit.get("ttl"), f"Rule {rule_id!r}: selector.ttl", file, line, default=None),
+        linger_ms=_parse_optional_duration(emit.get("linger"), f"Rule {rule_id!r}: selector.linger", file, line, default=None),
+    )
+
+
 # ── Inheritance resolution ───────────────────────────────────────────
 
 
@@ -571,9 +1177,31 @@ def _load_raw_rule_defs_from_string(
         raise RuleLoadError(f"YAML parse error: {e}", file=file, line=line_num) from e
 
     raw_rules: list[_RawRuleDef] = []
+    all_scenes: dict[str, Any] = {}
     for doc in docs:
         if doc is None:
             continue  # empty document
+        if isinstance(doc, dict):
+            unknown = set(doc) - {"rules", "scenes"}
+            if unknown:
+                raise RuleLoadError(
+                    f"Unknown top-level document fields: {sorted(unknown)}. "
+                    "Allowed: ['rules', 'scenes']",
+                    file=file,
+                )
+            doc_scenes = doc.get("scenes", {})
+            if doc_scenes is None:
+                doc_scenes = {}
+            if not isinstance(doc_scenes, dict):
+                raise RuleLoadError("Document `scenes` must be a mapping", file=file)
+            for scene_id, scene in doc_scenes.items():
+                if scene_id in all_scenes:
+                    raise RuleLoadError(f"Duplicate scene id {scene_id!r}", file=file)
+                all_scenes[scene_id] = scene
+            doc_rules = doc.get("rules", [])
+            if not isinstance(doc_rules, list):
+                raise RuleLoadError("Document `rules` must be a list", file=file)
+            doc = doc_rules
         if not isinstance(doc, list):
             raise RuleLoadError(
                 f"Each YAML document must be a list of rules, got {type(doc).__name__}",
@@ -586,7 +1214,7 @@ def _load_raw_rule_defs_from_string(
                     f"Each rule must be a mapping, got {type(raw).__name__}",
                     file=file, line=line_num,
                 )
-            raw_rules.append(_RawRuleDef(raw=raw, file=file, line=line_num))
+            raw_rules.append(_RawRuleDef(raw=raw, file=file, line=line_num, scenes=all_scenes))
 
     return raw_rules
 
@@ -686,10 +1314,23 @@ def _merge_emit_dicts(parent: dict[str, Any], child: dict[str, Any]) -> dict[str
 
 
 def _validate_raw_rule_defs(raw_rules: list[_RawRuleDef]) -> list[Rule]:
+    scenes: dict[str, Any] = {}
+    for raw_def in raw_rules:
+        for scene_id, scene in raw_def.scenes.items():
+            if scene_id in scenes and scenes[scene_id] != scene:
+                raise RuleLoadError(f"Duplicate scene id {scene_id!r}", file=raw_def.file)
+            scenes[scene_id] = scene
     resolved_rules = _resolve_rule_inheritance(raw_rules)
+    resolved_rules = [
+        _expand_vnext_scene_includes(raw_def, scenes)
+        for raw_def in resolved_rules
+    ]
+    expanded_rules = []
+    for raw_def in resolved_rules:
+        expanded_rules.extend(_expand_vnext_multi_target_rule(raw_def))
     rules = [
         _validate_rule(raw_def.raw, file=raw_def.file, line=raw_def.line)
-        for raw_def in resolved_rules
+        for raw_def in expanded_rules
     ]
 
     # Check for duplicate IDs
@@ -706,6 +1347,111 @@ def _validate_raw_rule_defs(raw_rules: list[_RawRuleDef]) -> list[Rule]:
         seen[rule.id] = rule
 
     return rules
+
+
+def _expand_vnext_scene_includes(
+    raw_def: _RawRuleDef,
+    scenes: dict[str, Any],
+) -> _RawRuleDef:
+    raw = raw_def.raw
+    intent = raw.get("intent")
+    if not isinstance(intent, dict) or "include" not in intent:
+        return raw_def
+
+    expanded_intent = _expand_intent_includes(intent, scenes, stack=())
+    expanded = deepcopy(raw)
+    expanded["intent"] = expanded_intent
+    return _RawRuleDef(raw=expanded, file=raw_def.file, line=raw_def.line, scenes=raw_def.scenes)
+
+
+def _expand_intent_includes(
+    intent: dict[str, Any],
+    scenes: dict[str, Any],
+    *,
+    stack: tuple[str, ...],
+) -> dict[str, Any]:
+    includes = intent.get("include", [])
+    if isinstance(includes, str):
+        includes = [includes]
+    if not isinstance(includes, list) or not all(isinstance(item, str) for item in includes):
+        raise RuleLoadError("VNext `intent.include` must be a scene id string or list of scene ids")
+
+    result: dict[str, Any] = {}
+    for include in includes:
+        scene_id = include.removeprefix("scene.")
+        if scene_id in stack:
+            cycle = " -> ".join((*stack, scene_id))
+            raise RuleLoadError(f"Scene include cycle: {cycle}")
+        scene = scenes.get(scene_id)
+        if not isinstance(scene, dict) or not isinstance(scene.get("intent"), dict):
+            raise RuleLoadError(f"Unknown or invalid scene include {include!r}")
+        scene_intent = _expand_intent_includes(scene["intent"], scenes, stack=(*stack, scene_id))
+        result = _merge_vnext_intents(result, scene_intent)
+
+    inline_intent = {
+        key: deepcopy(value)
+        for key, value in intent.items()
+        if key != "include"
+    }
+    return _merge_vnext_intents(result, inline_intent)
+
+
+def _merge_vnext_intents(parent: dict[str, Any], child: dict[str, Any]) -> dict[str, Any]:
+    result = deepcopy(parent)
+    for target, fields in child.items():
+        if target in result and isinstance(result[target], dict) and isinstance(fields, dict):
+            result[target] = _merge_vnext_target_fields(result[target], fields)
+        else:
+            result[target] = deepcopy(fields)
+    return result
+
+
+def _merge_vnext_target_fields(parent: dict[str, Any], child: dict[str, Any]) -> dict[str, Any]:
+    result = deepcopy(parent)
+    for intent_field, value in child.items():
+        if intent_field in result:
+            result[intent_field] = _merge_vnext_field_value(result[intent_field], value)
+        else:
+            result[intent_field] = deepcopy(value)
+    return result
+
+
+def _merge_vnext_field_value(parent: Any, child: Any) -> Any:
+    operator_keys = {"value", "min", "max", "offset", "multiply", "animate"}
+    parent_is_operator = isinstance(parent, dict) and bool(set(parent) & operator_keys)
+    child_is_operator = isinstance(child, dict) and bool(set(child) & operator_keys)
+    if parent_is_operator and child_is_operator:
+        merged = deepcopy(parent)
+        merged.update(deepcopy(child))
+        return merged
+    if child_is_operator and not parent_is_operator and "value" not in child:
+        merged = {"value": deepcopy(parent)}
+        merged.update(deepcopy(child))
+        return merged
+    return deepcopy(child)
+
+
+def _expand_vnext_multi_target_rule(raw_def: _RawRuleDef) -> list[_RawRuleDef]:
+    """Expand a VNext multi-target intent into one current Rule per target."""
+    raw = raw_def.raw
+    if "emit" in raw or "intent" not in raw or not isinstance(raw.get("intent"), dict):
+        return [raw_def]
+    intent = raw["intent"]
+    target_keys = [
+        key for key in intent
+        if key not in {"include", "select", "suppress"}
+    ]
+    if len(target_keys) <= 1:
+        return [raw_def]
+
+    expanded: list[_RawRuleDef] = []
+    rule_id = raw.get("id")
+    for target in target_keys:
+        item = deepcopy(raw)
+        item["id"] = f"{rule_id}:{target}"
+        item["intent"] = {target: deepcopy(intent[target])}
+        expanded.append(_RawRuleDef(raw=item, file=raw_def.file, line=raw_def.line))
+    return expanded
 
 
 # ── Public API ───────────────────────────────────────────────────────

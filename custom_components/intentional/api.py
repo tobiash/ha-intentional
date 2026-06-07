@@ -59,11 +59,18 @@ from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
+from ._engine.engine import Engine  # noqa: TID252
+from ._engine.reconciliation import (  # noqa: TID252
+    actual_conditions_for_desired_record,
+    actual_snapshot,
+)
+from ._engine.yaml_loader import RuleLoadError, load_rules_from_string  # noqa: TID252
 from .const import CONF_RULE_DIR, DEFAULT_RULE_DIR, DOMAIN  # noqa: TID252
 from .rule_files import (  # noqa: TID252
     _delete_rule_file,
     _is_safe_filename,
     _list_rule_files,
+    _patch_rule_by_id,
     _read_rule_file,
     _write_rule_file,
 )
@@ -130,7 +137,7 @@ class IntentionalHealthView(HomeAssistantView):
             return _error("Integration not configured", "not_configured", 503)
         return web.json_response({
             "status": "ok",
-            "version": "0.3.0",
+            "version": "0.4.0",
             "rule_dir": entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR),
             "rule_count": engine.rule_count(),
             "active_intent_count": engine.active_intent_count(),
@@ -225,6 +232,40 @@ class IntentionalRuleView(HomeAssistantView):
             return _error(err, "delete_failed", 500)
         await hass.services.async_call(DOMAIN, "reload", blocking=True)
         return web.json_response({"filename": filename, "status": "deleted"})
+
+
+class IntentionalRuleByIDView(HomeAssistantView):
+    """PATCH /api/intentional/rules/id/<rule_id> — generation-guarded rule update."""
+
+    url = r"/api/intentional/rules/id/{rule_id:.+}"
+    name = "api:intentional:rule_by_id"
+    requires_auth = True
+
+    async def patch(self, request: web.Request, rule_id: str) -> web.Response:
+        hass = request.app["hass"]
+        try:
+            data = await request.json()
+        except (ValueError, json.JSONDecodeError) as err:
+            return _error(f"Invalid JSON: {err}", "bad_request", 400)
+        contents = data.get("contents")
+        expected_generation = data.get("expected_generation")
+        if not isinstance(contents, str) or not isinstance(expected_generation, str):
+            return _error(
+                "Request body must include string `contents` and `expected_generation`",
+                "bad_request",
+                400,
+            )
+        result = _patch_rule_by_id(
+            _rule_dir_for(hass),
+            rule_id,
+            contents,
+            expected_generation=expected_generation,
+        )
+        if "error" in result:
+            status = 409 if result["error"] == "generation_mismatch" else 400
+            return web.json_response(result, status=status)
+        await hass.services.async_call(DOMAIN, "reload", blocking=True)
+        return web.json_response({"status": "saved", **result})
 
 
 # ── Reload ─────────────────────────────────────────────────────────
@@ -327,6 +368,167 @@ class IntentionalExplainView(HomeAssistantView):
         return web.json_response(engine.explain_target(target))
 
 
+# ── Agent-optimized VNext endpoints ─────────────────────────────────
+
+
+class IntentionalSchemaView(HomeAssistantView):
+    """GET /api/intentional/schema — machine-readable VNext capabilities."""
+
+    url = "/api/intentional/schema"
+    name = "api:intentional:schema"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        return web.json_response({
+            "dsl_version": "vnext-draft",
+            "top_level_rule_fields": [
+                "id", "enabled", "labels", "notes", "observe", "intent",
+                "effect", "authority", "confidence", "reason",
+            ],
+            "observe_operators": [
+                "is", "is_not", "lt", "lte", "gt", "gte", "all", "any",
+                "not", "none", "changed", "happened", "for",
+            ],
+            "intent_field_operators": [
+                "value", "min", "max", "offset", "multiply", "animate",
+            ],
+            "target_metadata": ["ttl", "linger", "transition", "easing"],
+            "effect_service_policy": "any_home_assistant_domain_service",
+            "selector_filters": ["domain", "area", "label", "exclude"],
+        })
+
+
+class IntentionalValidateView(HomeAssistantView):
+    """POST /api/intentional/validate — validate proposed YAML."""
+
+    url = "/api/intentional/validate"
+    name = "api:intentional:validate"
+    requires_auth = True
+
+    async def post(self, request: web.Request) -> web.Response:
+        try:
+            data = await request.json()
+        except (ValueError, json.JSONDecodeError) as err:
+            return _error(f"Invalid JSON: {err}", "bad_request", 400)
+        contents = data.get("contents")
+        if not isinstance(contents, str):
+            return _error("Request body must include string `contents`", "bad_request", 400)
+        try:
+            rules = load_rules_from_string(contents)
+        except RuleLoadError as err:
+            return web.json_response({"valid": False, "errors": [str(err)]}, status=400)
+        return web.json_response({
+            "valid": True,
+            "rule_count": len(rules),
+            "normalized": [_rule_to_api_dict(rule) for rule in rules],
+            "warnings": [],
+        })
+
+
+class IntentionalDryRunView(HomeAssistantView):
+    """POST /api/intentional/dry-run — evaluate proposed YAML without applying."""
+
+    url = "/api/intentional/dry-run"
+    name = "api:intentional:dry_run"
+    requires_auth = True
+
+    async def post(self, request: web.Request) -> web.Response:
+        try:
+            data = await request.json()
+        except (ValueError, json.JSONDecodeError) as err:
+            return _error(f"Invalid JSON: {err}", "bad_request", 400)
+        contents = data.get("contents")
+        if not isinstance(contents, str):
+            return _error("Request body must include string `contents`", "bad_request", 400)
+        try:
+            rules = load_rules_from_string(contents)
+        except RuleLoadError as err:
+            return web.json_response({"valid": False, "errors": [str(err)]}, status=400)
+
+        engine = Engine(selector_resolver=lambda _selector: [])
+        engine.load_rules(rules)
+        state_overrides = data.get("state_overrides", {})
+        if not isinstance(state_overrides, dict):
+            return _error("`state_overrides` must be a mapping", "bad_request", 400)
+        for key, value in state_overrides.items():
+            if not isinstance(key, str) or "." not in key:
+                continue
+            entity_id, _sep, field = key.rpartition(".")
+            engine.update_state(entity_id, value, field=field)
+        engine.evaluate_all()
+
+        resolved = []
+        for target in engine.list_active_targets():
+            result = engine.resolve(target)
+            if result is not None:
+                resolved.append({"target": target, "value": dict(result.value)})
+        effects = [
+            {"rule_id": rule_id, "domain": effect.domain, "service": effect.service, "target": effect.target, "data": effect.data}
+            for rule_id, effect in engine.drain_pending_effects()
+        ]
+        return web.json_response({
+            "valid": True,
+            "active_targets": list(engine.list_active_targets()),
+            "resolved_targets": resolved,
+            "effects": effects,
+            "errors": [],
+        })
+
+
+class IntentionalWorldView(HomeAssistantView):
+    """GET /api/intentional/world — compact agent world model."""
+
+    url = "/api/intentional/world"
+    name = "api:intentional:world"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        engine = _engine_for(hass)
+        if engine is None:
+            return _error("Integration not configured", "not_configured", 503)
+
+        world = engine.world_model()
+        entities: dict[str, dict[str, Any]] = {}
+        for record in world["desired_records"]:
+            target = record["target"]
+            state = hass.states.get(target)
+            if state is not None:
+                entities[target] = actual_snapshot(state)
+                record["actual"] = entities[target]
+                record["conditions"].extend(actual_conditions_for_desired_record(record, state))
+            else:
+                record["conditions"].extend(actual_conditions_for_desired_record(record, None))
+
+        world["health"] = {
+            "status": "ok",
+            "rule_count": engine.rule_count(),
+            "active_intent_count": engine.active_intent_count(),
+        }
+        world["entities"] = entities
+        return web.json_response(world)
+
+
+def _rule_to_api_dict(rule: Any) -> dict[str, Any]:
+    return {
+        "id": rule.id,
+        "enabled": rule.enabled,
+        "labels": list(rule.labels),
+        "notes": rule.notes,
+        "when": rule.when,
+        "target": rule.target,
+        "set": dict(rule.set),
+        "cap": dict(rule.cap),
+        "floor": dict(rule.floor),
+        "offset": dict(rule.offset),
+        "multiply": dict(rule.multiply),
+        "effects": [
+            {"domain": effect.domain, "service": effect.service, "target": effect.target, "data": effect.data}
+            for effect in rule.effects
+        ],
+    }
+
+
 # ── Registration ───────────────────────────────────────────────────
 
 
@@ -340,9 +542,14 @@ def register_api(hass: HomeAssistant) -> None:
         IntentionalHealthView,
         IntentionalRulesView,
         IntentionalRuleView,
+        IntentionalRuleByIDView,
         IntentionalReloadView,
         IntentionalStateView,
         IntentionalExplainView,
+        IntentionalSchemaView,
+        IntentionalValidateView,
+        IntentionalDryRunView,
+        IntentionalWorldView,
     ]
     for view_cls in views:
         hass.http.register_view(view_cls())

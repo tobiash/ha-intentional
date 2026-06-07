@@ -24,6 +24,8 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, State
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
 
 from ._engine import Engine, RuleLoadError, load_rules
@@ -35,6 +37,7 @@ from ._engine.ha_adapter import (
     pulse_state_change,
     scene_activation_plan,
     service_calls_for_resolved_target,
+    service_plan_matches_state,
     service_plan_signature,
     sync_state_object_into_engine,
     sync_time_context_into_engine,
@@ -210,7 +213,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Intentional from a config entry."""
     rule_dir = entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR)
 
-    engine = Engine()
+    engine = Engine(selector_resolver=lambda selector: _resolve_intent_selector(hass, selector))
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = engine
 
     # Make sure the rule directory exists before we try to load from it.
@@ -247,7 +250,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             except RuleLoadError as err:
                 _LOGGER.error("Could not load starter rules from %s: %s", rule_dir, err)
 
+    store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
+    lifecycle_records = await store.async_load()
+
     engine.load_rules(initial_rules)
+    if isinstance(lifecycle_records, dict):
+        engine.import_lifecycle_records(lifecycle_records)
     _LOGGER.info("Loaded %d rules from %s", len(initial_rules), rule_dir)
 
     rule_fingerprint = await hass.async_add_executor_job(
@@ -306,6 +314,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _active_scenes = await _activate_scene_rules(
                 hass, engine, _active_scenes
             )
+            await _apply_pending_effects(hass, engine)
             # Apply resolved target intents to HA entities.
             await _apply_resolved_targets(hass, engine, _last_applied_targets)
             if _state_change_pulses:
@@ -317,6 +326,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 ):
                     _last_applied_targets.pop(stale_target, None)
             # Push resolved values to entities
+            await store.async_save(engine.export_lifecycle_records())
             await _refresh_entities(hass, entry)
 
     hass.async_create_task(_tick_loop(), name=f"{DOMAIN}_tick")
@@ -471,6 +481,28 @@ def _sync_state_into_engine(hass: HomeAssistant, engine: Engine) -> None:
         sync_state_object_into_engine(engine, state)
 
 
+def _resolve_intent_selector(hass: HomeAssistant, selector: Any) -> list[str]:
+    """Resolve a VNext intent selector against current HA state/registry metadata."""
+    registry = er.async_get(hass)
+    matches: list[str] = []
+    excluded = set(getattr(selector, "exclude", ()))
+    for state in hass.states.async_all():
+        entity_id = state.entity_id
+        if entity_id in excluded:
+            continue
+        domain, _sep, _object_id = entity_id.partition(".")
+        if selector.domain and domain != selector.domain:
+            continue
+        entry = registry.async_get(entity_id)
+        if selector.area and (entry is None or entry.area_id != selector.area):
+            continue
+        labels = getattr(entry, "labels", set()) if entry is not None else set()
+        if selector.label and selector.label not in labels:
+            continue
+        matches.append(entity_id)
+    return matches
+
+
 def _on_ha_state_change_factory(
     hass: HomeAssistant,
     engine: Engine,
@@ -550,6 +582,27 @@ async def _activate_scene_rules(
     return active
 
 
+async def _apply_pending_effects(hass: HomeAssistant, engine: Engine) -> None:
+    """Apply effect service calls that became active this cycle."""
+    for rule_id, effect in engine.drain_pending_effects():
+        service_data = {**effect.target, **effect.data}
+        try:
+            await hass.services.async_call(
+                effect.domain,
+                effect.service,
+                service_data,
+                blocking=False,
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning(
+                "Failed to apply effect from rule %s via %s.%s: %s",
+                rule_id,
+                effect.domain,
+                effect.service,
+                err,
+            )
+
+
 async def _apply_resolved_targets(
     hass: HomeAssistant,
     engine: Engine,
@@ -571,6 +624,10 @@ async def _apply_resolved_targets(
             continue
         signature = service_plan_signature(calls)
         if last_applied.get(target) == signature:
+            continue
+        current_state = hass.states.get(target)
+        if current_state is not None and service_plan_matches_state(signature, current_state):
+            last_applied[target] = signature
             continue
         for domain, service, service_data in calls:
             try:

@@ -20,7 +20,7 @@ Integration health check. Returns 200 if the integration is configured, 503 othe
 ```json
 {
   "status": "ok",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "rule_dir": "/config/intentional/rules",
   "rule_count": 3,
   "active_intent_count": 1

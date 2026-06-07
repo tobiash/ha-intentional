@@ -40,7 +40,9 @@ from custom_components.intentional.rule_files import (  # noqa: E402
     _delete_rule_file,
     _is_safe_filename,
     _list_rule_files,
+    _patch_rule_by_id,
     _read_rule_file,
+    _rule_file_generation,
     _starter_template,
     _validate_rule_dir,
     _write_rule_file,
@@ -165,6 +167,55 @@ def test_write_rule_file_creates_dir_if_missing(tmp_path: Path) -> None:
     err = _write_rule_file(str(new_dir), "rule.yaml", contents)
     assert err is None
     assert (new_dir / "rule.yaml").exists()
+
+
+def test_patch_rule_by_id_replaces_matching_file_when_generation_matches(tmp_path: Path) -> None:
+    original = """- id: desk
+  when: 'true'
+  emit:
+    target: light.desk
+    set:
+      state: 'on'
+"""
+    replacement = """- id: desk
+  observe:
+    input_boolean.work: on
+  intent:
+    light.desk:
+      state: off
+"""
+    _write_rule_file(str(tmp_path), "desk.yaml", original)
+    generation = _rule_file_generation(str(tmp_path), "desk.yaml")
+
+    result = _patch_rule_by_id(
+        str(tmp_path),
+        "desk",
+        replacement,
+        expected_generation=generation,
+    )
+
+    assert result == {"filename": "desk.yaml", "generation": _rule_file_generation(str(tmp_path), "desk.yaml")}
+    assert _read_rule_file(str(tmp_path), "desk.yaml") == replacement
+
+
+def test_patch_rule_by_id_rejects_stale_generation(tmp_path: Path) -> None:
+    original = """- id: desk
+  when: 'true'
+  emit:
+    target: light.desk
+    set:
+      state: 'on'
+"""
+    _write_rule_file(str(tmp_path), "desk.yaml", original)
+
+    result = _patch_rule_by_id(
+        str(tmp_path),
+        "desk",
+        original,
+        expected_generation="stale",
+    )
+
+    assert result == {"error": "generation_mismatch"}
 
 
 # ── _delete_rule_file ──────────────────────────────────────────────

@@ -44,10 +44,15 @@ from typing import Any
 
 from .compositor import ResolvedIntent, resolve_intents
 from .intent import Authority, Intent
+from .lifecycle import export_lifecycle_records, restore_lifecycle_intents
+from .records import Effect, IntentSelector
+from .selectors import observe_selectors_fire, selector_diagnostics
+from .templates import TemplateRenderer
 from .when_parser import TimeOfDay, WhenAST, evaluate_when, parse_when
 from .yaml_loader import Rule
 
 StateChangeCallback = Callable[[str, Any], None]
+SelectorResolver = Callable[[IntentSelector], list[str]]
 _FOR_UNIT_MULTIPLIERS = {
     "ms": 1,
     "s": 1_000,
@@ -72,17 +77,46 @@ class Engine:
     for any target.
     """
 
-    def __init__(self, *, clock_fn: Callable[[], int] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        clock_fn: Callable[[], int] | None = None,
+        selector_resolver: SelectorResolver | None = None,
+    ) -> None:
         self._rules: dict[str, _ParsedRule] = {}
         self.state: dict[str, Any] = {}
         self._active_intents: list[Intent] = []
         self._time_of_day: str | TimeOfDay | None = None
         self._clock_fn = clock_fn or (lambda: int(time.time() * 1000))
+        self._selector_resolver = selector_resolver or (lambda _selector: [])
         self._clock_offset_ms: int = 0  # for tests: advance_clock adds to this
         self._animation_started_at: dict[str, int] = {}  # rule_id → ms
         self._condition_true_since: dict[str, int] = {}  # rule_id → ms
         self._state_change_callbacks: list[StateChangeCallback] = []
         self._log: list[str] = []  # last N log lines for diagnostics
+        self._active_effect_rule_ids: set[str] = set()
+        self._pending_effects: list[tuple[str, Effect]] = []
+        self._template_renderer = TemplateRenderer()
+
+    # ── Lifecycle Persistence ───────────────────────────────────────
+
+    def export_lifecycle_records(self) -> dict[str, Any]:
+        """Return persistent lifecycle state for restart/reload recovery."""
+        return export_lifecycle_records(
+            self._active_intents,
+            self._active_effect_rule_ids,
+            now_ms=self.now_ms(),
+        )
+
+    def import_lifecycle_records(self, records: dict[str, Any] | None) -> None:
+        """Restore persisted lifecycle records produced by export_lifecycle_records()."""
+        restored, active_effect_rule_ids = restore_lifecycle_intents(
+            records,
+            now_ms=self.now_ms(),
+            known_rule_ids=set(self._rules),
+        )
+        self._active_intents.extend(restored)
+        self._active_effect_rule_ids = active_effect_rule_ids
 
     # ── Time ────────────────────────────────────────────────────────
 
@@ -246,19 +280,43 @@ class Engine:
                 # Rule still fires — keep
                 new_active.append(intent)
                 continue
+            if intent.rule_id in self._rules:
+                rule = self._rules[intent.rule_id].rule
+                if rule.linger_ms and not intent.ignore_when:
+                    new_active.append(_linger_intent(intent, rule.linger_ms, now))
+                    continue
             # Rule no longer fires — drop, regardless of TTL
             continue
 
         # Add new intents for rules that just started firing
         existing_rule_ids = {i.rule_id for i in new_active if i.rule_id}
         for rule_id, _target in firing.items():
+            parsed = self._rules[rule_id]
+            if parsed.rule.effects and rule_id not in self._active_effect_rule_ids:
+                self._pending_effects.extend(
+                    (rule_id, self._template_renderer.render_effect(effect, self.state))
+                    for effect in parsed.rule.effects
+                )
             if rule_id not in existing_rule_ids:
-                parsed = self._rules[rule_id]
+                if not parsed.rule.target and parsed.rule.scene is None:
+                    if parsed.rule.intent_selectors:
+                        new_active.extend(self._spawn_intents_from_selectors(parsed.rule, now))
+                    continue
                 intent = self._spawn_intent_from_rule(parsed.rule, now)
                 new_active.append(intent)
                 self._animation_started_at[rule_id] = now
 
         self._active_intents = new_active
+        self._active_effect_rule_ids = {
+            rule_id for rule_id in firing
+            if self._rules[rule_id].rule.effects
+        }
+
+    def drain_pending_effects(self) -> list[tuple[str, Effect]]:
+        """Return and clear effects that became active since the last drain."""
+        effects = list(self._pending_effects)
+        self._pending_effects.clear()
+        return effects
 
     def _eval_when(self, ast: WhenAST) -> bool:
         return evaluate_when(ast, self.state, time_of_day=self._time_of_day)
@@ -273,7 +331,11 @@ class Engine:
         firing: dict[str, str] = {}
         for_remaining: dict[str, int] = {}
         for rule_id, parsed in self._rules.items():
-            if self._eval_when(parsed.when_ast):
+            if self._eval_when(parsed.when_ast) and observe_selectors_fire(
+                parsed.rule,
+                self.state,
+                self._selector_resolver,
+            ):
                 since = self._condition_true_since.get(rule_id)
                 if since is None:
                     since = now
@@ -317,11 +379,11 @@ class Engine:
         # and fires scene.turn_on instead of resolving a value.
         return Intent(
             target=rule.target or "",  # "" for scene rules, entity_id otherwise
-            set=dict(rule.set),
-            cap=dict(rule.cap),
-            floor=dict(rule.floor),
-            offset=dict(rule.offset),
-            multiply=dict(rule.multiply),
+            set=self._template_renderer.render_value(rule.set, self.state),
+            cap=self._template_renderer.render_value(rule.cap, self.state),
+            floor=self._template_renderer.render_value(rule.floor, self.state),
+            offset=self._template_renderer.render_value(rule.offset, self.state),
+            multiply=self._template_renderer.render_value(rule.multiply, self.state),
             transition_ms=rule.transition_ms,
             easing=rule.easing,
             authority=rule.authority,
@@ -329,9 +391,35 @@ class Engine:
             ttl_ms=rule.ttl_ms,
             reason=rule.reason,
             rule_id=rule.id,
+            ignore_when=rule.edge_created,
             created_at_ms=now,
             animation=rule.animation,
         )
+
+    def _spawn_intents_from_selectors(self, rule: Rule, now: int) -> list[Intent]:
+        intents: list[Intent] = []
+        for selector in rule.intent_selectors:
+            for target in self._selector_resolver(selector):
+                if target in selector.exclude:
+                    continue
+                intents.append(Intent(
+                    target=target,
+                    set=self._template_renderer.render_value(selector.set, self.state),
+                    cap=self._template_renderer.render_value(selector.cap, self.state),
+                    floor=self._template_renderer.render_value(selector.floor, self.state),
+                    offset=self._template_renderer.render_value(selector.offset, self.state),
+                    multiply=self._template_renderer.render_value(selector.multiply, self.state),
+                    transition_ms=selector.transition_ms,
+                    easing=selector.easing,
+                    authority=rule.authority,
+                    confidence=rule.confidence,
+                    ttl_ms=selector.ttl_ms,
+                    reason=rule.reason,
+                    rule_id=rule.id,
+                    ignore_when=rule.edge_created,
+                    created_at_ms=now,
+                ))
+        return intents
 
     # ── Resolution ─────────────────────────────────────────────────
 
@@ -403,6 +491,8 @@ class Engine:
             i for i in self._active_intents
             if not i.target  # scene rules have empty target
             and not i.is_expired(into_the_future_ms=now)
+            and i.rule_id in self._rules
+            and self._rules[i.rule_id].rule.scene is not None
         ]
         if return_intents:
             return [
@@ -505,6 +595,35 @@ class Engine:
             "rules_for_target": rules_for_target,
         }
 
+    def world_model(self) -> dict[str, Any]:
+        """Return a compact desired/spec-status model for agents and APIs."""
+        desired_records = []
+        for target in self.list_active_targets():
+            resolved = self.resolve(target)
+            if resolved is None:
+                continue
+            winning = resolved.winning_intent
+            desired_records.append({
+                "target": target,
+                "desired": dict(resolved.value),
+                "rule_id": winning.rule_id if winning is not None else "",
+                "reason": winning.reason if winning is not None else "",
+                "conditions": [{"type": "DesiredResolved", "status": "true"}],
+            })
+        return {
+            "dsl_version": "vnext-draft",
+            "rule_count": self.rule_count(),
+            "active_intent_count": self.active_intent_count(),
+            "desired_records": desired_records,
+            "selector_diagnostics": selector_diagnostics(
+                {rule_id: parsed.rule for rule_id, parsed in self._rules.items()},
+                self.state,
+                self._selector_resolver,
+            ),
+            "lifecycle": self.export_lifecycle_records(),
+            "errors": self.log,
+        }
+
     def explain(self, target: str) -> str:
         """Return a human-readable explanation of a target's resolved value."""
         intents = self.list_active_intents(target)
@@ -568,3 +687,26 @@ def _intent_to_diagnostic_dict(intent: Intent | None) -> dict[str, Any] | None:
         "created_at_ms": intent.created_at_ms,
         "ignore_when": intent.ignore_when,
     }
+
+
+def _linger_intent(intent: Intent, linger_ms: int, now: int) -> Intent:
+    """Return a copy of an intent that survives after its level observation stops."""
+    return Intent(
+        target=intent.target,
+        set=dict(intent.set),
+        merge=intent.merge,
+        cap=dict(intent.cap),
+        floor=dict(intent.floor),
+        offset=dict(intent.offset),
+        multiply=dict(intent.multiply),
+        transition_ms=intent.transition_ms,
+        easing=intent.easing,
+        authority=intent.authority,
+        confidence=intent.confidence,
+        ttl_ms=linger_ms,
+        reason=intent.reason,
+        rule_id=intent.rule_id,
+        ignore_when=True,
+        created_at_ms=now,
+        animation=intent.animation,
+    )

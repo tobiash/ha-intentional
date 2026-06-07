@@ -1,11 +1,11 @@
 {
   "domain": "intentional",
   "name": "Intentional",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "documentation": "https://github.com/tobiash/ha-intentional",
   "issue_tracker": "https://github.com/tobiash/ha-intentional/issues",
   "codeowners": ["@tobiash"],
-  "requirements": ["pyyaml>=6.0"],
+  "requirements": ["jinja2>=3.1", "pyyaml>=6.0"],
   "dependencies": [],
   "iot_class": "local_push",
   "config_flow": true,

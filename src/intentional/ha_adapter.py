@@ -1372,7 +1372,7 @@ def invalidate_service_plan_for_state_change(
     plan = last_applied.get(entity_id)
     if plan is None:
         return False
-    if _service_plan_matches_state(plan, state):
+    if service_plan_matches_state(plan, state):
         return False
     last_applied.pop(entity_id, None)
     return True
@@ -1403,7 +1403,7 @@ def emit_manual_override_for_state_drift(
     return True
 
 
-def _service_plan_matches_state(plan: ServicePlanSignature, state: Any) -> bool:
+def service_plan_matches_state(plan: ServicePlanSignature, state: Any) -> bool:
     """Return True if an HA state object is consistent with a cached plan."""
     for domain, service, data_items in plan:
         data = dict(data_items)
