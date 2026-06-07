@@ -456,7 +456,6 @@ def test_state_change_keeps_cached_light_color_plan_for_tuple_attributes() -> No
                 {
                     "state": "on",
                     "rgb_color": [255, 80, 40],
-                    "hs_color": [24.0, 90.0],
                 },
             )
         )
@@ -469,7 +468,6 @@ def test_state_change_keeps_cached_light_color_plan_for_tuple_attributes() -> No
             state="on",
             attributes={
                 "rgb_color": (255, 80, 40),
-                "hs_color": (24.0, 90.0),
             },
         ),
     )
@@ -1079,7 +1077,6 @@ def test_light_resolved_value_maps_to_turn_on_service() -> None:
             "entity_id": "light.desk",
             "brightness_pct": 40,
             "color_temp_kelvin": 2700,
-            "rgb_color": [255, 80, 40],
             "effect": "colorloop",
             "flash": "short",
             "transition": 1.5,
@@ -1128,9 +1125,37 @@ def test_light_toggle_resolved_value_maps_to_toggle_service() -> None:
             "entity_id": "light.desk",
             "brightness_pct": 40,
             "color_temp_kelvin": 2700,
-            "hs_color": [24.0, 90.0],
             "effect": "colorloop",
             "transition": 1.5,
+        },
+    )
+
+
+def test_light_service_payload_uses_single_brightness_and_color_descriptor() -> None:
+    from intentional.ha_adapter import service_call_for_resolved_target
+
+    call = service_call_for_resolved_target(
+        "light.desk",
+        {
+            "state": "on",
+            "brightness": 26,
+            "brightness_pct": 40,
+            "color_temp_k": 4524,
+            "rgb_color": [255, 218, 188],
+            "hs_color": [26.732, 26.125],
+            "xy_color": [0.392, 0.357],
+            "effect": "off",
+        },
+    )
+
+    assert call == (
+        "light",
+        "turn_on",
+        {
+            "entity_id": "light.desk",
+            "brightness": 26,
+            "color_temp_kelvin": 4524,
+            "effect": "off",
         },
     )
 

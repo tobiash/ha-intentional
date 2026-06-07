@@ -330,6 +330,20 @@ ACTION_SERVICE_FIELDS = frozenset({
     "battery",
 })
 TTS_SERVICE_TARGETS = frozenset({"speak", "cloud_say", "clear_cache"})
+LIGHT_BRIGHTNESS_FIELDS = ("brightness", "brightness_pct")
+LIGHT_COLOR_FIELDS = (
+    "color_temp_k",
+    "color_temp_mired",
+    "rgbww_color",
+    "rgbw_color",
+    "rgb_color",
+    "hs_color",
+    "xy_color",
+)
+LIGHT_FIELD_ALIASES = {
+    "color_temp_k": "color_temp_kelvin",
+    "color_temp_mired": "color_temp",
+}
 
 
 def manual_set_from_service_data(data: dict[str, Any]) -> dict[str, Any]:
@@ -339,6 +353,25 @@ def manual_set_from_service_data(data: dict[str, Any]) -> dict[str, Any]:
         for field in MANUAL_SET_FIELDS
         if field in data
     }
+
+
+def _add_light_turn_fields(service_data: dict[str, Any], value: dict[str, Any]) -> None:
+    for key, val in value.items():
+        if key in {"state", "update_entity"}:
+            continue
+        if key in LIGHT_BRIGHTNESS_FIELDS or key in LIGHT_COLOR_FIELDS:
+            continue
+        service_data[key] = val
+
+    for key in LIGHT_BRIGHTNESS_FIELDS:
+        if key in value:
+            service_data[key] = value[key]
+            break
+
+    for key in LIGHT_COLOR_FIELDS:
+        if key in value:
+            service_data[LIGHT_FIELD_ALIASES.get(key, key)] = value[key]
+            break
 
 
 def time_of_day_bucket(hour: int) -> str:
@@ -524,28 +557,12 @@ def _service_calls_without_update_entity(
     if domain == "light":
         if state == "toggle":
             service = "toggle"
-            for key, val in value.items():
-                if key in {"state", "update_entity"}:
-                    continue
-                if key == "color_temp_k":
-                    service_data["color_temp_kelvin"] = val
-                elif key == "color_temp_mired":
-                    service_data["color_temp"] = val
-                else:
-                    service_data[key] = val
+            _add_light_turn_fields(service_data, value)
         elif state == "off":
             service = "turn_off"
         else:
             service = "turn_on"
-            for key, val in value.items():
-                if key in {"state", "update_entity"}:
-                    continue
-                if key == "color_temp_k":
-                    service_data["color_temp_kelvin"] = val
-                elif key == "color_temp_mired":
-                    service_data["color_temp"] = val
-                else:
-                    service_data[key] = val
+            _add_light_turn_fields(service_data, value)
         if transition_ms:
             service_data["transition"] = transition_ms / 1000.0
         return ((domain, service, service_data),)
