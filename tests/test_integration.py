@@ -58,6 +58,7 @@ from custom_components.intentional.const import (  # noqa: E402
     CONF_RULE_DIR,
     DOMAIN,
 )
+from custom_components.intentional.rule_store import rule_store_key  # noqa: E402
 
 # ── Fixtures ───────────────────────────────────────────────────────
 
@@ -162,17 +163,19 @@ async def test_rule_file_loaded(
 
 
 async def test_reload_service_works(
-    hass: HomeAssistant, config_entry: MockConfigEntry, rule_dir: Path
+    hass: HomeAssistant, config_entry: MockConfigEntry
 ) -> None:
-    """Calling intentional.reload should re-read rule files from disk."""
+    """Calling intentional.reload should re-read stored rules."""
     config_entry.add_to_hass(hass)
     await hass.config_entries.async_setup(config_entry.entry_id)
 
     engine = hass.data[DOMAIN][config_entry.entry_id]
     assert len(engine._rules) == 1  # noqa: SLF001
 
-    # Add a new rule file
-    (rule_dir / "02-extra.yaml").write_text(
+    rule_store = hass.data[DOMAIN][rule_store_key(config_entry.entry_id)]
+    await rule_store.async_write(
+        "stored-rules.yaml",
+        rule_store.contents + "\n---\n"
         "- id: extra-rule\n"
         "  when: time_of_day == '00:00'\n"
         "  emit:\n"
