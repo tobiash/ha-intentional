@@ -297,7 +297,7 @@ When a final `state: on` intent withdraws from a safe on/off domain such as `lig
 
 ## Generated Values
 
-Generated values periodically sample a durable field while the intent remains active:
+Generated values periodically update a durable field while the intent remains active:
 
 ```yaml
 intent:
@@ -306,26 +306,70 @@ intent:
     brightness_pct: 35
     rgb_color:
       generate:
-        kind: sample
+        kind: walk
         from:
           - [255, 120, 40]
           - [255, 70, 120]
           - [140, 70, 255]
+          - [40, 170, 255]
         every:
-          min: 45s
-          max: 4m
+          min: 2m
+          max: 6m
         transition:
-          min: 8s
-          max: 25s
+          min: 30s
+          max: 75s
 ```
 
-Supported generated-value fields:
+Generated values persist across restarts and avoid immediate repeats when alternatives exist. They are intended for slow ambient behavior, not fast effects.
+
+Supported strategy fields:
 
 - `kind: sample`: choose one value from `from`.
+- `kind: walk`: move to a neighboring value in the `from` palette ring.
+- `kind: weighted_sample`: choose from `from` using weights.
+- `kind: gradient`: move halfway toward a palette color; `mode: nearest` picks the nearest palette color, `mode: random` picks a random palette color.
+- `kind: noise`: generate a value from numeric bounds or an HSV color range.
 - `every`: fixed duration or `{min, max}` random duration.
 - `transition`: optional fixed duration or `{min, max}` random HA transition duration.
 
-Generated values persist across restarts and avoid immediate repeats when alternatives exist.
+Weighted sample supports either a parallel `weights` list or inline objects:
+
+```yaml
+rgb_color:
+  generate:
+    kind: weighted_sample
+    from:
+      - value: [255, 120, 40]
+        weight: 3
+      - value: [140, 70, 255]
+        weight: 1
+    every: 5m
+```
+
+Noise can generate RGB colors from HSV-style ranges:
+
+```yaml
+rgb_color:
+  generate:
+    kind: noise
+    hue: { min: 200, max: 320 }
+    saturation: { min: 55, max: 90 }
+    value: { min: 45, max: 85 }
+    every: 3m
+    transition: 45s
+```
+
+Noise can also generate numeric fields:
+
+```yaml
+brightness_pct:
+  generate:
+    kind: noise
+    min: 25
+    max: 45
+    step: 5
+    every: 10m
+```
 
 ## Effects
 

@@ -80,18 +80,18 @@ Assistant storage.
       brightness_pct: 35
       rgb_color:
         generate:
-          kind: sample
+          kind: walk
           from:
             - [255, 120, 40]
             - [255, 70, 120]
             - [140, 70, 255]
             - [40, 170, 255]
           every:
-            min: 45s
-            max: 4m
+            min: 2m
+            max: 6m
           transition:
-            min: 8s
-            max: 25s
+            min: 30s
+            max: 75s
       linger: 90s
   confidence: 0.35
   reason: Gently varying occupied-office backlight

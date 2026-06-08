@@ -98,6 +98,10 @@ from custom_components.intentional.const import (  # noqa: E402
     CONF_RULE_DIR,
     DOMAIN,
 )
+from custom_components.intentional.rule_store import (  # noqa: E402
+    RULE_STORE_FILENAME,
+    rule_store_key,
+)
 
 # ── Fixtures ───────────────────────────────────────────────────────
 
@@ -178,7 +182,6 @@ async def loaded_entry(
 # ── User config flow ───────────────────────────────────────────────
 
 
-@pytest.mark.e2e_config_flow
 @pytest.mark.e2e_config_flow
 async def test_user_flow_shows_initial_form(hass: HomeAssistant) -> None:
     """Starting the user flow shows a form asking for the rule directory."""
@@ -311,17 +314,12 @@ async def test_options_flow_init_shows_menu(
 
 
 @pytest.mark.e2e_config_flow
-async def test_options_flow_rules_step_lists_files_without_blocking_io(
+async def test_options_flow_rules_step_lists_storage_document(
     hass: HomeAssistant, loaded_entry: MockConfigEntry, rule_dir: Path
 ) -> None:
-    """async_step_rules must list files WITHOUT blocking the event loop.
-
-    v0.3.0..v0.3.3 called ``_list_rule_files`` sync, triggering HA's
-    "Detected blocking call to scandir" warning. We assert that the
-    step returns a form (not a 500) and the listed files match the
-    on-disk state.
-    """
-    # Add an extra rule file
+    """async_step_rules should expose the storage-backed rule document."""
+    # Storage is imported during setup. Later disk edits are intentionally not
+    # listed because HA storage is now the source of truth.
     (rule_dir / "extra.yaml").write_text(
         "- id: extra\n  when: 'true'\n  emit:\n    target: light.x\n    set:\n      state: 'on'\n"
     )
@@ -337,25 +335,18 @@ async def test_options_flow_rules_step_lists_files_without_blocking_io(
     assert result["type"] == FlowResultType.FORM
     assert result["step_id"] == "rules"
 
-    # The form should have a 'action' selector with both files plus
-    # __create__ and __delete__ options.
+    # The form should expose only the synthetic storage file. File create/delete
+    # actions are no longer offered because storage owns authored rules.
     schema = result["data_schema"]
     choices = set(schema.schema["action"].container)
-    assert "starter.yaml" in choices, (
-        f"Expected starter.yaml in choices, got {choices}"
-    )
-    assert "extra.yaml" in choices, (
-        f"Expected extra.yaml in choices, got {choices}"
-    )
-    assert "__create__" in choices
-    assert "__delete__" in choices
+    assert choices == {RULE_STORE_FILENAME}
 
 
 @pytest.mark.e2e_config_flow
-async def test_options_flow_create_new_rule(
+async def test_options_flow_can_add_rule_by_editing_storage_document(
     hass: HomeAssistant, loaded_entry: MockConfigEntry, rule_dir: Path
 ) -> None:
-    """The 'create new rule' path: select __create__, fill form, save, reload."""
+    """New rules are added by editing the storage-backed YAML document."""
     result = await hass.config_entries.options.async_init(
         loaded_entry.entry_id,
         context={"source": "config_entry"},
@@ -365,15 +356,14 @@ async def test_options_flow_create_new_rule(
     )
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
-        user_input={"action": "__create__"},
+        user_input={"action": RULE_STORE_FILENAME},
     )
-    # Should now be on edit_new
     assert result["type"] == FlowResultType.FORM
-    assert result["step_id"] == "edit_new"
+    assert result["step_id"] == "edit_existing"
 
-    # Submit
-    new_rule = (
-        "- id: created-by-options-flow\n"
+    rule_store = hass.data[DOMAIN][rule_store_key(loaded_entry.entry_id)]
+    new_rule = rule_store.contents + (
+        "\n- id: created-by-options-flow\n"
         "  when: input_boolean.x == 'on'\n"
         "  emit:\n"
         "    target: light.test\n"
@@ -382,20 +372,16 @@ async def test_options_flow_create_new_rule(
     )
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
-        user_input={
-            "filename": "created.yaml",
-            "contents": new_rule,
-        },
+        user_input={"contents": new_rule},
     )
     assert result["type"] == FlowResultType.CREATE_ENTRY, (
         f"Expected CREATE_ENTRY after saving new rule, got "
         f"{result['type']!r} reason={result.get('reason')!r}"
     )
 
-    # The file should exist on disk
-    assert (rule_dir / "created.yaml").read_text() == new_rule
+    assert rule_store.contents == new_rule
+    assert not (rule_dir / "created.yaml").exists()
 
-    # And the engine should have picked it up
     engine = hass.data[DOMAIN][loaded_entry.entry_id]
     assert "created-by-options-flow" in engine._rules  # noqa: SLF001
 
@@ -414,7 +400,7 @@ async def test_options_flow_edit_existing_rule(
     )
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
-        user_input={"action": "starter.yaml"},
+        user_input={"action": RULE_STORE_FILENAME},
     )
     # Should now be on edit_existing with the current file contents
     assert result["type"] == FlowResultType.FORM
@@ -426,9 +412,8 @@ async def test_options_flow_edit_existing_rule(
     # default is on the description; for vol.Optional, it's the .default
     # attribute of the wrapped validator.
     assert current_default is not None
-    # The file on disk should have the starter content
-    on_disk = (rule_dir / "starter.yaml").read_text()
-    assert "starter" in on_disk
+    rule_store = hass.data[DOMAIN][rule_store_key(loaded_entry.entry_id)]
+    assert "starter" in rule_store.contents
 
     # Submit with new content
     new_content = (
@@ -445,15 +430,15 @@ async def test_options_flow_edit_existing_rule(
     )
     assert result["type"] == FlowResultType.CREATE_ENTRY
 
-    # File should be updated on disk
-    assert (rule_dir / "starter.yaml").read_text() == new_content
+    assert rule_store.contents == new_content
+    assert (rule_dir / "starter.yaml").read_text() != new_content
 
 
 @pytest.mark.e2e_config_flow
-async def test_options_flow_delete_rule(
+async def test_options_flow_does_not_offer_file_delete_action(
     hass: HomeAssistant, loaded_entry: MockConfigEntry, rule_dir: Path
 ) -> None:
-    """The 'delete rule' path: pick file, confirm, file gone, engine updated."""
+    """Storage-backed rules should not expose the old file delete action."""
     result = await hass.config_entries.options.async_init(
         loaded_entry.entry_id,
         context={"source": "config_entry"},
@@ -461,26 +446,11 @@ async def test_options_flow_delete_rule(
     result = await hass.config_entries.options.async_configure(
         result["flow_id"], user_input={"next_step_id": "rules"}
     )
-    result = await hass.config_entries.options.async_configure(
-        result["flow_id"],
-        user_input={"action": "__delete__"},
-    )
-    # Should now be on delete_pick
     assert result["type"] == FlowResultType.FORM
-    assert result["step_id"] == "delete_pick"
-
-    result = await hass.config_entries.options.async_configure(
-        result["flow_id"],
-        user_input={"filename": "starter.yaml"},
-    )
-    assert result["type"] == FlowResultType.CREATE_ENTRY
-
-    # File should be gone
-    assert not (rule_dir / "starter.yaml").exists()
-
-    # Engine should no longer have the rule
-    engine = hass.data[DOMAIN][loaded_entry.entry_id]
-    assert "starter" not in engine._rules  # noqa: SLF001
+    choices = set(result["data_schema"].schema["action"].container)
+    assert choices == {RULE_STORE_FILENAME}
+    assert "__delete__" not in choices
+    assert (rule_dir / "starter.yaml").exists()
 
 
 @pytest.mark.e2e_config_flow
@@ -571,12 +541,11 @@ async def test_no_blocking_io_warnings_during_full_options_flow(
     assert result["step_id"] == "rules"
 
     result = await hass.config_entries.options.async_configure(
-        result["flow_id"], user_input={"action": "starter.yaml"}
+        result["flow_id"], user_input={"action": RULE_STORE_FILENAME}
     )
     assert result["type"] == FlowResultType.FORM  # async_step_edit_existing
     assert result["step_id"] == "edit_existing"
 
-    # And the delete path (read file, unlink)
     result = await hass.config_entries.options.async_configure(
         result["flow_id"], user_input={"contents": "garbage yaml: :"}
     )
@@ -585,22 +554,16 @@ async def test_no_blocking_io_warnings_during_full_options_flow(
     assert result["step_id"] == "edit_existing"
     assert "base" in result["errors"]
 
-    # The starter file must still exist (validation rejected the write)
+    # The starter import file must still exist; the rejected write targeted
+    # storage, not the legacy file on disk.
     assert (rule_dir / "starter.yaml").exists()
 
 
 @pytest.mark.e2e_config_flow
-async def test_options_flow_uses_executor_for_io(
+async def test_storage_backed_options_flow_does_not_use_file_executor(
     hass: HomeAssistant, loaded_entry: MockConfigEntry, rule_dir: Path
 ) -> None:
-    """Verify the flow actually goes through hass.async_add_executor_job.
-
-    AST inspection (test_config_flow_no_blocking_io.py) catches static
-    call sites. This test wraps the executor and verifies it was
-    actually called — guarding against the case where someone replaces
-    the executor wrapper with a no-op or sync fallback "because it's
-    faster" without realizing it reintroduces blocking-I/O.
-    """
+    """Storage-backed rule list/read should not go through file helpers."""
     # Wrap the executor to count calls
     original_executor_job = hass.async_add_executor_job
     executor_calls: list[tuple[str, tuple]] = []
@@ -621,22 +584,18 @@ async def test_options_flow_uses_executor_for_io(
     )
     assert result["type"] == FlowResultType.FORM
 
-    # async_step_rules must have called the executor for _list_rule_files
-    list_calls = [c for c in executor_calls if c[0] == "_list_rule_files"]
-    assert list_calls, (
-        f"async_step_rules did not go through the executor for "
-        f"_list_rule_files. Calls seen: {executor_calls}. "
-        f"This means a sync I/O call snuck back into the config flow."
-    )
+    file_helper_calls = [
+        c for c in executor_calls if c[0] in {"_list_rule_files", "_read_rule_file"}
+    ]
+    assert not file_helper_calls
 
-    # Now click into the edit form — that should call _read_rule_file
+    # Now click into the edit form. Storage-backed reads should stay in memory.
     executor_calls.clear()
     result = await hass.config_entries.options.async_configure(
-        result["flow_id"], user_input={"action": "starter.yaml"}
+        result["flow_id"], user_input={"action": RULE_STORE_FILENAME}
     )
     assert result["type"] == FlowResultType.FORM
-    read_calls = [c for c in executor_calls if c[0] == "_read_rule_file"]
-    assert read_calls, (
-        f"async_step_edit_existing did not go through the executor for "
-        f"_read_rule_file. Calls seen: {executor_calls}."
-    )
+    file_helper_calls = [
+        c for c in executor_calls if c[0] in {"_list_rule_files", "_read_rule_file"}
+    ]
+    assert not file_helper_calls

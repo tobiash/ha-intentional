@@ -466,7 +466,10 @@ class IntentionalSchemaView(HomeAssistantView):
                 "not", "none", "changed", "happened", "for",
             ],
             "intent_field_operators": [
-                "value", "min", "max", "offset", "multiply", "animate",
+                "value", "min", "max", "offset", "multiply", "animate", "generate",
+            ],
+            "generator_kinds": [
+                "sample", "walk", "weighted_sample", "gradient", "noise",
             ],
             "target_metadata": ["ttl", "linger", "transition", "easing"],
             "effect_service_policy": "any_home_assistant_domain_service",

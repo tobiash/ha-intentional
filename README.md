@@ -162,21 +162,21 @@ Use field-local `generate` when an active intent should vary durable desired sta
       brightness_pct: 35
       rgb_color:
         generate:
-          kind: sample
+          kind: walk
           from:
             - [255, 120, 40]
             - [255, 70, 120]
             - [140, 70, 255]
             - [40, 170, 255]
           every:
-            min: 45s
-            max: 4m
+            min: 2m
+            max: 6m
           transition:
-            min: 8s
-            max: 25s
+            min: 30s
+            max: 75s
 ```
 
-Generated values are held until the next interval, persisted across restarts, and reconciled like ordinary target state.
+Generated values are held until the next interval, persisted across restarts, and reconciled like ordinary target state. Supported strategies include `sample`, `walk`, `weighted_sample`, `gradient`, and `noise`.
 
 ## Home Assistant UI Controls
 
