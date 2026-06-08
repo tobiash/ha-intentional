@@ -1,62 +1,18 @@
-# Welcome to ha-intentional! 🎉
+# Welcome to ha-intentional.
 #
-# This is a starter rule that does nothing harmful — it just turns
-# off the bedroom light at 23:00 if it's still on. Edit it to match
-# your home, then call `intentional.reload` from
-# Developer Tools → Actions to pick up your changes.
-#
-# ── Quick start ────────────────────────────────────────────────
-# 1. Edit `target` to point at a real light in your home
-#    (e.g. light.bedroom_main or light.living_room)
-# 2. Change `when` to whatever condition makes sense for you
-# 3. Save the file
-# 4. Developer Tools → Actions → intentional.reload
-#
-# ── The schema ─────────────────────────────────────────────────
-# Each rule has four parts:
-#
-#   id:        Unique name for this rule. Used in logs & sensors.
-#   when:      A condition expression. When true, the rule fires.
-#   emit:      What state the rule wants the target entity to be in.
-#              - set:       absolute values (e.g. brightness_pct: 0)
-#              - cap:       upper bound (clamp to this max)
-#              - floor:     lower bound (clamp to this min)
-#              - offset:    add this much
-#              - multiply:  scale by this factor
-#              - transition: fade time, e.g. "30s" or "2m"
-#              - ttl:       how long the intent lives, e.g. "2h"
-#   authority: Who is asking. user > automation > sensor.
-#              Default is automation — which means manual button
-#              presses will override these rules.
-#
-# ── More examples ──────────────────────────────────────────────
-# See https://github.com/tobiash/ha-intentional/blob/main/examples/
-# for 7 fully-commented rule files covering dimming, scenes,
-# animations, modifiers, and more.
-# ────────────────────────────────────────────────────────────────
+# Current installs store rules in Home Assistant storage. This file is kept as
+# an importable starter example for users who seed /config/intentional/rules/
+# before first setup.
 
 - id: bedroom-off-at-23
-  # Change `light.bedroom` to a real light in your home.
-  # Common options: light.bedroom_main, light.living_room, light.kitchen
-  when: time_of_day == "23:00" and light.bedroom.state == "on"
-  emit:
-    target: light.bedroom        # ⚠️  EDIT THIS
-    set:
+  observe:
+    input_boolean.intentional_example_enabled: "on"
+  intent:
+    light.bedroom:
       state: "off"
-    transition: 30s               # Fade out over 30 seconds
-    ttl: 5m                       # Intent lives for 5 minutes
+      ttl: 5m
+      apply:
+        transition:
+          assert: 30s
   authority: automation
-
-# Tip: add a second rule to log a warning instead, so you can see
-# the engine working without changing any real entity:
-#
-# - id: bedroom-debug
-#   when: time_of_day == "23:00" and light.bedroom.state == "on"
-#   emit:
-#     target: light.bedroom
-#     set:
-#       # An intent that says "turn off" with automation authority
-#       # and no TTL — this rule will keep firing every minute
-#       # until the light is actually off.
-#       state: "off"
-#   authority: automation
+  reason: Example rule; create and enable input_boolean.intentional_example_enabled to try it

@@ -37,6 +37,7 @@ from .rule_files import (
     _validate_rule_dir,
     _write_rule_file,
 )
+from .rule_store import RULE_STORE_FILENAME, StorageRuleStore, rule_store_key
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -72,6 +73,12 @@ async def _delete_in_executor(
     return await hass.async_add_executor_job(
         _delete_rule_file, rule_dir, filename
     )
+
+
+def _storage_rule_store(hass, entry_id: str) -> StorageRuleStore | None:
+    """Return loaded storage-backed rule store, if the integration is running."""
+    store = hass.data.get(DOMAIN, {}).get(rule_store_key(entry_id))
+    return store if isinstance(store, StorageRuleStore) else None
 
 
 class IntentionalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -205,6 +212,7 @@ class IntentionalOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
     ) -> FlowResult:
         """Rule management hub: pick a file to edit, or create/delete."""
         rule_dir = self.config_entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR)
+        rule_store = _storage_rule_store(self.hass, self.config_entry.entry_id)
 
         # Handle a previous submit: route to the right step
         if user_input is not None:
@@ -220,7 +228,7 @@ class IntentionalOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
         # EXECUTOR: list_rule_files does path.glob() + stat() — both
         # blocking I/O. v0.3.0..v0.3.3 called this sync, triggering
         # HA's "Detected blocking call to scandir" warning + 500.
-        files = await _list_in_executor(self.hass, rule_dir)
+        files = rule_store.list_files() if rule_store is not None else await _list_in_executor(self.hass, rule_dir)
         # Build select options: each file + create + delete
         if not files:
             return self.async_show_form(
@@ -242,8 +250,9 @@ class IntentionalOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
         file_choices: dict[str, str] = {
             f["filename"]: f["filename"] for f in files
         }
-        file_choices["__create__"] = "➕ Create new rule"
-        file_choices["__delete__"] = "🗑️  Delete a rule"
+        if rule_store is None:
+            file_choices["__create__"] = "➕ Create new rule"
+            file_choices["__delete__"] = "🗑️  Delete a rule"
 
         return self.async_show_form(
             step_id="rules",
@@ -262,14 +271,18 @@ class IntentionalOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
     ) -> FlowResult:
         """Edit the currently-selected rule file."""
         rule_dir = self.config_entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR)
+        rule_store = _storage_rule_store(self.hass, self.config_entry.entry_id)
 
         if user_input is not None:
             contents = user_input.get("contents", "")
             # EXECUTOR: writes go through the executor (mkdir + write_text
             # + yaml validation — all blocking).
-            err = await _write_in_executor(
-                self.hass, rule_dir, self._selected_file, contents
-            )
+            if rule_store is not None:
+                err = await rule_store.async_write(RULE_STORE_FILENAME, contents)
+            else:
+                err = await _write_in_executor(
+                    self.hass, rule_dir, self._selected_file, contents
+                )
             if err:
                 return self.async_show_form(
                     step_id="edit_existing",
@@ -290,9 +303,13 @@ class IntentionalOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
 
         # EXECUTOR: read_text() on the loop. v0.3.0..v0.3.3 hit this
         # every time the user clicked "edit" on an existing rule.
-        current = await _read_in_executor(
-            self.hass, rule_dir, self._selected_file
-        ) or ""
+        if rule_store is not None:
+            current = rule_store.contents
+            self._selected_file = RULE_STORE_FILENAME
+        else:
+            current = await _read_in_executor(
+                self.hass, rule_dir, self._selected_file
+            ) or ""
         return self.async_show_form(
             step_id="edit_existing",
             data_schema=vol.Schema(
@@ -310,6 +327,10 @@ class IntentionalOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
     ) -> FlowResult:
         """Create a new rule file."""
         rule_dir = self.config_entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR)
+        rule_store = _storage_rule_store(self.hass, self.config_entry.entry_id)
+        if rule_store is not None:
+            self._selected_file = RULE_STORE_FILENAME
+            return await self.async_step_edit_existing(user_input)
 
         if user_input is not None:
             filename = user_input["filename"].strip()
@@ -354,6 +375,22 @@ class IntentionalOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
     ) -> FlowResult:
         """Pick a file to delete, then delete it."""
         rule_dir = self.config_entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR)
+        rule_store = _storage_rule_store(self.hass, self.config_entry.entry_id)
+        if rule_store is not None:
+            if user_input is not None:
+                err = await rule_store.async_delete(RULE_STORE_FILENAME)
+                if err:
+                    return self.async_show_form(
+                        step_id="delete_pick",
+                        data_schema=vol.Schema({vol.Required("filename"): vol.In({RULE_STORE_FILENAME: RULE_STORE_FILENAME})}),
+                        errors={"base": err},
+                    )
+                await self.hass.services.async_call(DOMAIN, "reload", blocking=True)
+                return self.async_create_entry(title="", data={})
+            return self.async_show_form(
+                step_id="delete_pick",
+                data_schema=vol.Schema({vol.Required("filename"): vol.In({RULE_STORE_FILENAME: RULE_STORE_FILENAME})}),
+            )
 
         if user_input is not None:
             filename = user_input["filename"]

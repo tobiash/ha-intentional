@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-06-08
+
+### Added
+- **Storage-backed authored rules**. Intentional now stores authored rules in Home Assistant storage and imports existing YAML files once when no stored rule document exists. YAML remains the Configure-panel, API, import, and export format through a synthetic `stored-rules.yaml` document.
+- **More natural Home Assistant rule entities**. Authored rules appear as config switch entities with richer status attributes such as `active`, `condition_firing`, `targets`, `desired`, `authority`, `confidence`, `reason`, `labels`, and `active_intent_count`.
+- **Reload rules button** as a Home Assistant config entity.
+
+### Changed
+- **Reduced entity registry bloat** by no longer creating per-target intent sensors or per-target clear-manual-override buttons. Legacy per-target entries are cleaned from the registry on setup; per-target override clearing remains available through the `intentional.clear` service.
+- **Rule entity lifecycle** now reconciles with stored authored rules, dynamically adding new rule switches and removing deleted rule switch registry entries on refresh.
+- **Documentation** now treats rules as authored intents stored in Home Assistant, with YAML as an editing/import/export format. The old VNext migration/design document was removed.
+
 ## [0.6.3] - 2026-06-08
 
 ### Fixed

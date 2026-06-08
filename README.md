@@ -2,166 +2,155 @@
 
 **Declarative, composable, intent-based automation for Home Assistant.**
 
-`ha-intentional` is a HACS-installable custom component for Home Assistant that replaces imperative `automation:` rules with a *declarative intent engine*. Instead of writing "when X, do Y, unless Z," you write **intents** — claims about how a device should be — and the engine resolves conflicts between them using priorities, modifiers, and time.
+`ha-intentional` is a HACS-installable custom component that turns Home Assistant automation into reconciliation: rules **observe** facts about the home, produce durable **intents** for how entities should be, and the engine reconciles actual state toward the resolved desired state.
+
+Core vocabulary:
+
+```text
+observe -> intent
+```
+
+Effects are explicit side-effect escape hatches for one-shot service calls. They are separate from durable target-state intents.
 
 ## Why?
 
-Home Assistant's `automation:` system is powerful but has a familiar scaling problem:
+Home Assistant automations are powerful, but large setups often drift into ordering and conflict problems:
 
-- Rules need to be **ordered manually** to handle conflicts ("if the rule order changes, the bedroom light stops working")
-- Adding a new automation can **silently break** older ones that depended on the order
-- **Modifiers** like "dim this to a max of 40%" require a separate `input_number` + script + automation, and the modifier *itself* needs to be coordinated
-- **Animations** (pulses, fades) require either Node-RED or per-rule `light.turn_on` chains
-- **Manual overrides** are basically impossible to do gracefully — once you touch the light, automations don't know what to do
+- Rules need manual ordering to avoid conflicts.
+- A new automation can silently break an older one.
+- Manual overrides need helper booleans, reset automations, and special cases.
+- Device modifiers such as brightness caps are hard to compose.
+- Ambient behavior often requires scripts or repeated service-call chains.
 
-`ha-intentional` solves all of these by changing the abstraction. You don't write rules. You write **intents** — claims with priority metadata. The engine resolves them.
+Intentional changes the abstraction. You write claims with priority metadata; the compositor resolves them by authority, confidence, recency, and field-level operators.
 
-## The mental model
-
-> An *intent* is a claim about how a target entity should be, with **priority metadata** explaining where the claim came from and how strongly it's held.
->
-> The *compositor* is a pure function: given a set of active intents for a target, compute the final value to apply. Higher-priority intents win. Modifiers (caps, floors, offsets, animations) compose across all intents.
->
-> Manual overrides are just intents with `authority: user` and a TTL. They lose gracefully when the TTL expires — no cleanup, no special-casing.
-
-## Quick example
+## Quick Example
 
 ```yaml
-# rules/01-ambient.yaml
-- id: brighten-when-dark
-  when: sensor.outdoor_light.illuminance < 50
-  emit:
-    target: light.living_room
-    set: { brightness_pct: 80 }
-  authority: automation
+- id: living-room-dark
+  observe:
+    sensor.outdoor_light.illuminance:
+      lt: 50
+  intent:
+    light.living_room:
+      state: on
+      brightness_pct: 80
+      color_temp_k: 2700
   confidence: 0.7
-  reason: "Dark outside"
+  reason: Dark outside
 
-# rules/02-tv.yaml
-- id: dim-when-tv
-  when: media_player.tv.state == "on"
-  emit:
-    target: light.living_room
-    cap: { brightness_pct: 40 }     # respects user, just caps
-    set: { color_temp_k: 2700 }
-  authority: automation
+- id: living-room-tv-cap
+  observe:
+    media_player.tv: on
+  intent:
+    light.living_room:
+      brightness_pct:
+        max: 40
+      color_temp_k: 2200
   confidence: 0.9
-  reason: "TV on"
+  reason: TV is on
 
-# rules/03-notifications.yaml
-- id: door-open-led
-  when: binary_sensor.front_door == "on"
-  emit:
-    target: light.monitor_back_led
-    animation:
-      kind: pulse
-      parameter: brightness_pct
-      values: [0, 100, 0]
-      duration: 2s
-      repeat: 4
-    set: { color: warm_white }
-  authority: automation
-  ttl: 20s
-  reason: "Front door opened"
-
-- id: doorbell-message
-  when: event.espnow_recv_doorbell.triggered == true and event.espnow_recv_doorbell.event_type == "ringer"
-  emit:
-    target: telegram_bot.send_message
-    set: { message: "Doorbell" }
-  authority: automation
-  reason: "Doorbell rang"
+- id: front-door-notification
+  observe:
+    changed:
+      binary_sensor.front_door:
+        to: on
+  effect:
+    service: notify.mobile_app_phone
+    data:
+      title: Door
+      message: Front door opened
 ```
 
-**What happens:**
-1. It's dark → living room brightens to 80%.
-2. You turn it up to 100% manually → user intent wins, light is 100%.
-3. TV turns on → dim rule's `cap: 40` clamps the light to 40% **even though the user set it to 100** (you wanted bright but the rule has a reason). Color temp drops to 2700K.
-4. You press the dashboard light toggle → fresh user intent at 80% with a 2-hour TTL → no rule can override `set` while the TTL is alive, but the TV cap still applies → 40%.
-5. TV turns off → dim intent expires → your 80% is back automatically.
-6. 2 hours later → user intent expires → bright-when-dark resumes control if still dark.
+What happens:
 
-**No rule ordering, no priority numbers, no separate "manual mode" tracking.** The compositor handles all of it.
+1. If it is dark, the living-room light is desired on at 80%.
+2. If the TV turns on, brightness is capped at 40% and color temperature becomes warmer.
+3. If you manually change the managed light, Intentional records that HA state as a `user` intent with a TTL.
+4. When the manual override expires or is cleared, automation resumes without reset helpers.
+5. Door notifications use `effect:` because they are side effects, not durable state.
 
 ## Features
 
-- **Declarative YAML rule format** — no Python, no DSL, designed to be writable by AI agents
-- **Rule inheritance** — share common rule defaults with `extends:` and override per room or mode
-- **Dwell timing** — HA-style `for:` conditions for motion, presence, and spike filtering, including helper-driven durations
-- **Comfort, energy, and cleaning targets** — drive climate, humidifier, fan, water-heater, vacuum, and lawn mower entities from the same intent model
-- **Helper targets** — drive counters, input helpers, number/select entities, and datetime helpers
-- **Security targets** — control locks, valves, sirens, and alarm panels through resolved intents
-- **Notification targets** — send `notify.*` messages from the same intent engine
-- **Action targets** — trigger buttons, input buttons, remotes, scenes, scripts, and automations without repeated service-call churn
-- **Timer targets** — start, pause, cancel, and finish HA timers from resolved intents
-- **Three-tier authority** — `sensor` < `automation` < `user` — with confidence as a tiebreaker
-- **Per-field modifiers** — `set`, `cap`, `floor`, `offset`, `multiply`, with `merge: true` for partial updates
-- **Time** — `transition` and `easing` for smooth changes
-- **Animations** — `pulse`, `breath`, `cycle`, `flash` with device-native fallbacks
-- **Generated values** — periodically sample durable values such as RGB colors from a palette, with fixed or random intervals and transitions
-- **Manual override tracking** — managed-target HA state drift becomes a user intent with TTL
-- **Manual override controls** — HA buttons can clear manual overrides globally or per target
-- **Hot reload** — edit a rule file, the engine reloads without restarting Home Assistant
-- **UI rule editor** — edit rule files in the HA Configure panel, no SSH needed
-- **UI enable switches** — toggle individual rules or globally disable all Intentional automation from Home Assistant
-- **HTTP API** — 6 endpoints for external agents (`/api/intentional/*`); auth via HA bearer token
-- **Zero-config** — discover the rule directory, validate on load, log errors clearly
-- **HACS-installable** — one-click install, standard HA integration patterns
-- **CI-tested** — GitHub Actions runs lint, bundle sync, pure E2E, and Home Assistant integration checks
+- **Structured rules** using `observe:`, `intent:`, and optional `effect:`.
+- **Reconciliation loop** that compares desired records with actual HA state and skips redundant calls.
+- **Authority tiers**: `sensor < automation < user`, with confidence and recency tiebreakers.
+- **Field-level operators**: direct values, `min`/`floor`, `max`/`cap`, `offset`, and `multiply`.
+- **Dwell and lifecycle**: `observe.for`, target `ttl`, target `linger`, and restart-safe lifecycle persistence.
+- **Transition policies**: `apply.transition.assert`, `change`, and `withdraw` for HA-native light transitions.
+- **Generated values**: sample durable fields, such as RGB colors, on fixed or random intervals.
+- **Manual override handling**: state drift on managed targets becomes a temporary user intent.
+- **HA UI controls**: global automation switch, per-rule enable switches, reload, and clear-manual-override controls.
+- **YAML editor** in the integration Configure panel, backed by Home Assistant storage.
+- **Agent-friendly HTTP API** for schema, validation, dry run, world model, stored rules, and explanations.
+- **Hot reload** after rule edits.
+- **HACS installable** with CI-covered bundle sync and Home Assistant integration tests.
 
 ## Installation
 
-### HACS (recommended)
+### HACS
 
-1. Install [HACS](https://hacs.xyz/) if you don't have it
-2. HACS → Integrations → ⋯ (top right) → Custom repositories
-3. Add `https://github.com/tobiash/ha-intentional` as **Integration**
-4. Install, restart Home Assistant
-5. Settings → Devices & Services → Add Integration → "Intentional"
-6. Set your rule directory (default: `/config/intentional/rules/`)
-7. Create that directory and start writing rule files
+1. Install [HACS](https://hacs.xyz/) if needed.
+2. HACS -> Integrations -> Custom repositories.
+3. Add `https://github.com/tobiash/ha-intentional` as an **Integration**.
+4. Install and restart Home Assistant.
+5. Settings -> Devices & Services -> Add Integration -> `Intentional`.
+6. Set the rule directory, usually `/config/intentional/rules/`.
 
 ### Manual
 
 ```bash
 cd /config/custom_components
 git clone https://github.com/tobiash/ha-intentional.git intentional
-# Restart Home Assistant
-# Settings → Devices & Services → Add Integration → "Intentional"
 ```
 
-## Rule directory structure
+Restart Home Assistant, then add the `Intentional` integration from Settings.
 
-```
+## Stored Rules And YAML
+
+Intentional stores authored rules in Home Assistant storage. YAML remains the
+authoring, import, export, API, and Configure-panel format, but live YAML files
+are no longer the source of truth.
+
+On first setup, if the storage document does not exist yet, Intentional imports
+existing YAML files from the configured rule directory, for example:
+
+```text
 /config/intentional/
-├── rules/                    # your rule files
-│   ├── 01-ambient.yaml       # sensor-driven rules
-│   ├── 02-automation.yaml    # device-state rules (TV, motion, etc.)
-│   ├── 03-notifications.yaml # animations and alerts
-│   └── 04-manual-scenes.yaml # user-only rules (movie, bedtime, focus)
-├── examples/                 # optional, copy/rename to rules/
-└── README.md                 # your own notes (optional)
+└── rules/
+    ├── living-room.yaml
+    ├── office.yaml
+    └── notifications.yaml
 ```
 
-Rule files are loaded in alphabetical order. The order is for **organization**, not priority — priority is per-intent, derived from `authority` and `confidence`.
+After import, rule switches and reloads operate from HA storage. The old files
+are left untouched as a migration backup.
 
-## Home Assistant UI controls
+The stored YAML document may be either a list of rules or a document with
+`scenes:` and `rules:`:
 
-Intentional exposes HA entities so common control tasks do not require YAML edits
-or Developer Tools service calls:
+```yaml
+scenes:
+  movie:
+    intent:
+      light.living_room:
+        state: on
+        brightness_pct: 15
+        color_temp_k: 2200
 
-- `switch.intentional_automation_enabled` globally enables/disables all
-  Intentional automation. Turning it off withdraws active automation intents and
-  prevents rules/effects from firing until it is turned back on.
-- One rule switch is created for each authored YAML rule. Toggling a rule switch
-  persists `enabled: true/false` in the rule file and reloads rules.
-- Clear-manual-override buttons are created globally and per known target. They
-  drop user/manual override intents immediately while leaving rule files intact.
+rules:
+  - id: movie-mode
+    observe:
+      input_boolean.movie_mode: on
+    intent:
+      include: scene.movie
+```
 
-## Generated values
+See [`docs/rules.md`](docs/rules.md) for the rule reference and [`examples/`](examples/) for copyable examples.
 
-Use field-local `generate` when an active intent should vary a durable desired
-state over time. This is useful for ambient lights such as monitor backlights:
+## Generated Values
+
+Use field-local `generate` when an active intent should vary durable desired state over time, such as an ambient monitor backlight:
 
 ```yaml
 - id: monitor-backlight-random
@@ -187,50 +176,54 @@ state over time. This is useful for ambient lights such as monitor backlights:
             max: 25s
 ```
 
-Generated values are sampled, held until the next interval, persisted across
-restarts, and reconciled like ordinary target state.
+Generated values are held until the next interval, persisted across restarts, and reconciled like ordinary target state.
 
-## HTTP API (v0.3+)
+## Home Assistant UI Controls
 
-The integration exposes a small JSON-over-HTTP API on HA's existing web server (port 8123), so external agents (and humans via curl) can observe and modify the engine without going through the UI.
+Intentional exposes entities for common control tasks:
 
-All endpoints require a HA long-lived access token in the `Authorization: Bearer` header.
+- `switch.intentional_automation_enabled` globally enables or disables rule evaluation and automation effects.
+- `switch.intentional_rule_<rule_id>` toggles an authored rule and persists `enabled: true/false` in HA storage.
+- `button.intentional_reload_rules` reloads the stored rule document.
+- `button.intentional_clear_all_manual_overrides` clears every user/manual override intent.
+
+Intentional does not create one entity per runtime intent or one control per
+target. Per-target manual override clearing remains available through the
+`intentional.clear` service with a `target` value.
+
+## HTTP API
+
+All API endpoints use Home Assistant's normal bearer-token authentication:
 
 ```bash
-TOKEN="<your long-lived access token>"
-HA="http://localhost:8123"
+TOKEN="<long-lived access token>"
+HA="http://homeassistant.local:8123"
 
-# Health check
 curl -H "Authorization: Bearer $TOKEN" "$HA/api/intentional/health"
-
-# List rule files
+curl -H "Authorization: Bearer $TOKEN" "$HA/api/intentional/world"
 curl -H "Authorization: Bearer $TOKEN" "$HA/api/intentional/rules"
-
-# Read a rule file
-curl -H "Authorization: Bearer $TOKEN" "$HA/api/intentional/rules/welcome.yaml"
-
-# Write a rule file (validates YAML first)
-curl -X PUT -H "Authorization: Bearer $TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{"contents": "- id: new-rule\n  when: time_of_day == '\"'\"'12:00'\"'\"'\n  emit:\n    target: light.x\n    set:\n      state: on\n"}' \
-     "$HA/api/intentional/rules/new-rule.yaml"
-
-# Engine state (active intents grouped by target)
-curl -H "Authorization: Bearer $TOKEN" "$HA/api/intentional/state"
-
-# Debug: why is light.x in this state?
-curl -H "Authorization: Bearer $TOKEN" "$HA/api/intentional/explain/light.x"
 ```
 
-For the full endpoint list, see `docs/api.md` (or read the docstrings at the top of `custom_components/intentional/api.py`).
+Useful agent endpoints:
 
-## Authoring rules
+- `GET /api/intentional/schema`
+- `POST /api/intentional/validate`
+- `POST /api/intentional/dry-run`
+- `GET /api/intentional/world`
+- `GET /api/intentional/explain/<target>`
+- `PATCH /api/intentional/rules/id/<rule_id>`
 
-See [`docs/rules.md`](docs/rules.md) for the full schema reference, and [`examples/`](examples/) for working rule files.
+See [`docs/api.md`](docs/api.md) for the full endpoint reference.
+
+## Services
+
+- `intentional.fire`: emit a temporary user-authority intent for a target.
+- `intentional.clear`: clear user/manual override intents globally or per target.
+- `intentional.reload`: reload rules from HA storage.
 
 ## Status
 
-**v0.1.0** — initial release. Compositor, animations, YAML loader, manual override detection, hot reload, and HACS packaging are all working. Tested against Home Assistant 2026.5+.
+Current releases focus on the `observe -> intent` rule format, reconciliation status, generated durable values, and Home Assistant UI controls. The DSL is still marked `vnext-draft` in the machine-readable schema while the project converges on final compatibility guarantees.
 
 ## License
 

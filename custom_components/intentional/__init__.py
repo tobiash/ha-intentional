@@ -29,7 +29,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
 
-from ._engine import Engine, RuleLoadError, load_rules
+from ._engine import Engine, RuleLoadError
 from ._engine.ha_adapter import (
     ServicePlanSignature,
     clear_state_change_pulses,
@@ -43,7 +43,7 @@ from ._engine.ha_adapter import (
     sync_state_object_into_engine,
     sync_time_context_into_engine,
 )
-from ._engine.yaml_loader import Rule, RuleDirFingerprint, rule_dir_fingerprint
+from ._engine.yaml_loader import Rule
 from .const import (
     ATTR_TARGET,
     ATTR_TICK_INTERVAL_MS,
@@ -57,13 +57,13 @@ from .const import (
     STORAGE_KEY,
     STORAGE_VERSION,
 )
+from .rule_store import StorageRuleStore, rule_store_key
 from .sensor import IntentionalSummarySensor, IntentionalTargetSensor
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH, Platform.BUTTON]
 MANUAL_OVERRIDE_TTL_SECONDS = 7200
-RULE_RELOAD_POLL_INTERVAL_MS = 2_000
 WITHDRAW_TO_OFF_DOMAINS = frozenset({"light", "switch", "input_boolean", "fan", "siren"})
 
 
@@ -225,6 +225,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     engine = Engine(selector_resolver=lambda selector: _resolve_intent_selector(hass, selector))
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = engine
+    rule_store = StorageRuleStore(hass, entry.entry_id)
+    hass.data[DOMAIN][rule_store_key(entry.entry_id)] = rule_store
 
     # Make sure the rule directory exists before we try to load from it.
     # On first install, /config/intentional/rules doesn't exist yet —
@@ -238,27 +240,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except OSError as err:
             _LOGGER.warning("Could not create rule directory %s: %s", rule_dir, err)
 
-    # Initial rule load
+    # Initial rule load. Storage is the source of truth; existing YAML files are
+    # imported once when the storage document does not exist yet.
     try:
-        initial_rules = await hass.async_add_executor_job(load_rules, rule_dir)
+        initial_rules = await rule_store.async_load_or_import(rule_dir)
     except RuleLoadError as err:
-        _LOGGER.error("Could not load rules from %s: %s", rule_dir, err)
+        _LOGGER.error("Could not load stored rules: %s", err)
         # Don't fail the whole integration — let the user fix the file
         # and call `intentional.reload` to retry. We log the error.
         initial_rules = []
     except Exception as err:
         raise ConfigEntryNotReady(f"Failed to load rules: {err}") from err
-
-    # Copy the starter rule pack on first install (zero rules loaded).
-    # This makes the integration useful out of the box — the user sees
-    # the summary sensor flip to >0 intents the moment setup completes.
-    if not initial_rules:
-        copied = await _maybe_install_starter_rules(hass, rule_dir)
-        if copied:
-            try:
-                initial_rules = await hass.async_add_executor_job(load_rules, rule_dir)
-            except RuleLoadError as err:
-                _LOGGER.error("Could not load starter rules from %s: %s", rule_dir, err)
 
     store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
     lifecycle_records = await store.async_load()
@@ -266,13 +258,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     engine.load_rules(initial_rules)
     if isinstance(lifecycle_records, dict):
         engine.import_lifecycle_records(lifecycle_records)
-    _LOGGER.info("Loaded %d rules from %s", len(initial_rules), rule_dir)
-
-    rule_fingerprint = await hass.async_add_executor_job(
-        rule_dir_fingerprint,
-        rule_dir,
-    )
-    next_rule_check_ms = engine.now_ms() + RULE_RELOAD_POLL_INTERVAL_MS
+    _LOGGER.info("Loaded %d stored rule(s)", len(initial_rules))
 
     # Set up platforms (sensors)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -299,7 +285,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     stop_event = asyncio.Event()
 
     async def _tick_loop() -> None:
-        nonlocal _active_scenes, next_rule_check_ms, rule_fingerprint
+        nonlocal _active_scenes
         while not stop_event.is_set():
             # Sleep with a timeout so we can react to stop_event promptly.
             try:
@@ -309,14 +295,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             except TimeoutError:
                 pass  # normal tick interval
             # Drive the engine's evaluation cycle
-            if engine.now_ms() >= next_rule_check_ms:
-                rule_fingerprint = await _maybe_reload_rules_for_changed_files(
-                    hass,
-                    engine,
-                    rule_dir,
-                    rule_fingerprint,
-                )
-                next_rule_check_ms = engine.now_ms() + RULE_RELOAD_POLL_INTERVAL_MS
             sync_time_context_into_engine(engine)
             _sync_state_into_engine(hass, engine)
             engine.evaluate_all()
@@ -349,11 +327,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(_stop_tick_loop)
 
     # Set up services
-    async def _set_rule_fingerprint(value: RuleDirFingerprint) -> None:
-        nonlocal rule_fingerprint
-        rule_fingerprint = value
-
-    await _register_services(hass, engine, rule_dir, entry, _set_rule_fingerprint)
+    await _register_services(hass, engine, rule_store, entry)
 
     # Register HTTP API views. Guarded for test environments where the
     # http component may not be loaded (e.g. tests that don't exercise
@@ -387,6 +361,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id, None)
+        hass.data[DOMAIN].pop(rule_store_key(entry.entry_id), None)
     return unload_ok
 
 
@@ -450,33 +425,6 @@ async def _maybe_install_starter_rules(hass: HomeAssistant, rule_dir: str) -> in
     except OSError as err:
         _LOGGER.warning("Could not install starter rules: %s", err)
         return 0
-
-
-async def _maybe_reload_rules_for_changed_files(
-    hass: HomeAssistant,
-    engine: Engine,
-    rule_dir: str,
-    previous_fingerprint: RuleDirFingerprint,
-) -> RuleDirFingerprint:
-    """Reload rules when the rule directory fingerprint changes."""
-    current_fingerprint = await hass.async_add_executor_job(
-        rule_dir_fingerprint,
-        rule_dir,
-    )
-    if current_fingerprint == previous_fingerprint:
-        return previous_fingerprint
-
-    try:
-        new_rules = await hass.async_add_executor_job(load_rules, rule_dir)
-    except RuleLoadError as err:
-        _LOGGER.error("Rule auto-reload failed: %s", err)
-        return previous_fingerprint
-
-    engine.load_rules(new_rules)
-    sync_time_context_into_engine(engine)
-    engine.evaluate_all()
-    _LOGGER.info("Auto-reloaded %d rules from %s", len(new_rules), rule_dir)
-    return current_fingerprint
 
 
 def _sync_state_into_engine(hass: HomeAssistant, engine: Engine) -> None:
@@ -752,9 +700,8 @@ async def _refresh_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
 async def _register_services(
     hass: HomeAssistant,
     engine: Engine,
-    rule_dir: str,
+    rule_store: StorageRuleStore,
     entry: ConfigEntry,
-    set_rule_fingerprint,
 ) -> None:
     """Register the fire and reload services."""
 
@@ -819,20 +766,17 @@ async def _register_services(
     async def _reload_service(_call: ServiceCall) -> None:
         """Handle the `intentional.reload` service call.
 
-        Re-reads rule files from disk. Same effect as saving a file in
-        the rule directory (which the directory watcher picks up).
+        Re-reads stored rules. Same effect as saving through the YAML editor
+        or HTTP API.
         """
         try:
-            new_rules = await hass.async_add_executor_job(load_rules, rule_dir)
+            new_rules = await rule_store.async_rules()
         except RuleLoadError as err:
             _LOGGER.error("Rule reload failed: %s", err)
             return
         engine.load_rules(new_rules)
         sync_time_context_into_engine(engine)
         engine.evaluate_all()
-        await set_rule_fingerprint(
-            await hass.async_add_executor_job(rule_dir_fingerprint, rule_dir)
-        )
         await _refresh_entities(hass, entry)
 
     hass.services.async_register(DOMAIN, SERVICE_FIRE, _fire_service, schema=FIRE_SERVICE_SCHEMA)

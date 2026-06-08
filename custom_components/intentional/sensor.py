@@ -18,7 +18,10 @@ from typing import Any
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from ._engine.presentation import intent_sensor_state, value_summary
@@ -48,24 +51,31 @@ async def async_setup_entry(
     summary = IntentionalSummarySensor(hass, engine, entry)
     async_add_entities([summary])
 
-    # Per-target sensors — one per known target
-    target_entities = [
-        IntentionalTargetSensor(hass, engine, entry, target)
-        for target in engine.list_known_targets()
-    ]
-    async_add_entities(target_entities)
+    _cleanup_legacy_target_sensors(hass, entry)
 
     # Listen for refresh events from __init__.py and call async_write_ha_state
     async def _on_refresh(event) -> None:
         if event.data.get("entry_id") != entry.entry_id:
             return
-        for entity in target_entities:
-            entity.async_write_ha_state()
         summary.async_write_ha_state()
 
     entry.async_on_unload(
         hass.bus.async_listen(f"{DOMAIN}_refresh", _on_refresh)
     )
+
+
+def _cleanup_legacy_target_sensors(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Remove old per-target intent sensors to avoid registry bloat."""
+    registry = er.async_get(hass)
+    prefix = f"{entry.entry_id}_"
+    for entity_id, registry_entry in list(registry.entities.items()):
+        if registry_entry.platform != DOMAIN:
+            continue
+        if registry_entry.domain != Platform.SENSOR:
+            continue
+        unique_id = registry_entry.unique_id
+        if unique_id.startswith(prefix):
+            registry.async_remove(entity_id)
 
 
 class IntentionalTargetSensor(SensorEntity):
@@ -79,6 +89,8 @@ class IntentionalTargetSensor(SensorEntity):
     _attr_has_entity_name = True
     _attr_icon = "mdi:target"
     _attr_translation_key = "target_intent"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
 
     def __init__(self, hass: HomeAssistant, engine, entry: ConfigEntry, target: str) -> None:
         self.hass = hass
@@ -149,6 +161,7 @@ class IntentionalSummarySensor(SensorEntity):
     _attr_icon = "mdi:palette"
     _attr_unique_id = "intentional_summary"
     _attr_translation_key = "summary"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, hass: HomeAssistant, engine, entry: ConfigEntry) -> None:
         self.hass = hass

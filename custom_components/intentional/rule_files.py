@@ -281,6 +281,18 @@ def _delete_rule_file(rule_dir: str, filename: str) -> str | None:
     return RuleWorkspace(rule_dir).delete(filename)
 
 
+def _read_rule_dir_as_yaml(rule_dir: str) -> str:
+    """Read all YAML files in rule_dir into one YAML stream for import."""
+    path = Path(rule_dir)
+    if not path.exists() or not path.is_dir():
+        return ""
+    parts = []
+    for entry in sorted([*path.glob("*.yaml"), *path.glob("*.yml")]):
+        if entry.is_file():
+            parts.append(entry.read_text(encoding="utf-8"))
+    return "\n---\n".join(part.strip() for part in parts if part.strip())
+
+
 def _starter_template() -> str:
     """Return a starter YAML rule template for new files.
 
@@ -290,15 +302,14 @@ def _starter_template() -> str:
     summary sensor). The user can then edit it.
     """
     return (
-        "# New rule file\n"
+        "# New Intentional rule document\n"
         "# Edit and save — the integration will validate and reload.\n"
-        "# Tip: Developer Tools → Actions → intentional.reload to apply.\n"
         "\n"
         "- id: example-rule\n"
-        "  when: time_of_day == '12:00'\n"
-        "  emit:\n"
-        "    target: light.example\n"
-        "    set:\n"
+        "  observe:\n"
+        "    input_boolean.intentional_example_enabled: 'on'\n"
+        "  intent:\n"
+        "    light.example:\n"
         "      state: 'on'\n"
     )
 

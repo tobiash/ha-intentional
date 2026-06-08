@@ -77,6 +77,7 @@ from .rule_files import (  # noqa: TID252
     _read_rule_file,
     _write_rule_file,
 )
+from .rule_store import RULE_STORE_FILENAME, StorageRuleStore, rule_store_key  # noqa: TID252
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -107,6 +108,15 @@ def _rule_dir_for(hass: HomeAssistant) -> str:
     if entry is None:
         return DEFAULT_RULE_DIR
     return entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR)
+
+
+def _rule_store_for(hass: HomeAssistant) -> StorageRuleStore | None:
+    """Return storage-backed rule store for the first config entry, if loaded."""
+    entry = _entry_for_view(hass)
+    if entry is None:
+        return None
+    store = hass.data.get(DOMAIN, {}).get(rule_store_key(entry.entry_id))
+    return store if isinstance(store, StorageRuleStore) else None
 
 
 def _error(message: str, code: str, status: int = 400) -> web.Response:
@@ -170,6 +180,14 @@ class IntentionalRulesView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
+        store = _rule_store_for(hass)
+        if store is not None:
+            return web.json_response({
+                "rule_dir": "homeassistant_storage",
+                "count": 1,
+                "files": store.list_files(),
+                "source": "storage",
+            })
         rule_dir = _rule_dir_for(hass)
         files = await _rule_file_job(hass, _list_rule_files, rule_dir)
         return web.json_response({
@@ -198,6 +216,18 @@ class IntentionalRuleView(HomeAssistantView):
         hass = request.app["hass"]
         if not _is_safe_filename(filename):
             return _error(f"Invalid filename: {filename!r}", "invalid_filename", 400)
+        store = _rule_store_for(hass)
+        if store is not None:
+            contents = store.read(filename)
+            if contents is None:
+                return _error(f"Rule file not found: {filename}", "not_found", 404)
+            return web.json_response({
+                "filename": filename,
+                "contents": contents,
+                "size": len(contents),
+                "generation": store.generation,
+                "source": "storage",
+            })
         rule_dir = _rule_dir_for(hass)
         contents = await _rule_file_job(hass, _read_rule_file, rule_dir, filename)
         if contents is None:
@@ -224,6 +254,21 @@ class IntentionalRuleView(HomeAssistantView):
         if not isinstance(contents, str):
             return _error("Request body must be {\"contents\": \"<yaml>\"}", "bad_request", 400)
 
+        store = _rule_store_for(hass)
+        if store is not None:
+            filename = RULE_STORE_FILENAME
+            err = await store.async_write(filename, contents)
+            if err:
+                return _error(err, "validation_failed", 400)
+            await hass.services.async_call(DOMAIN, "reload", blocking=True)
+            return web.json_response({
+                "filename": filename,
+                "status": "saved",
+                "size": len(contents),
+                "generation": store.generation,
+                "source": "storage",
+            }, status=200)
+
         rule_dir = _rule_dir_for(hass)
         err = await _rule_file_job(hass, _write_rule_file, rule_dir, filename, contents)
         if err:
@@ -240,6 +285,13 @@ class IntentionalRuleView(HomeAssistantView):
         hass = request.app["hass"]
         if not _is_safe_filename(filename):
             return _error(f"Invalid filename: {filename!r}", "invalid_filename", 400)
+        store = _rule_store_for(hass)
+        if store is not None:
+            err = await store.async_delete(filename)
+            if err:
+                return _error(err, "delete_failed", 500)
+            await hass.services.async_call(DOMAIN, "reload", blocking=True)
+            return web.json_response({"filename": filename, "status": "deleted", "source": "storage"})
         rule_dir = _rule_dir_for(hass)
         err = await _rule_file_job(hass, _delete_rule_file, rule_dir, filename)
         if err:
@@ -269,14 +321,22 @@ class IntentionalRuleByIDView(HomeAssistantView):
                 "bad_request",
                 400,
             )
-        result = await _rule_file_job(
-            hass,
-            _patch_rule_by_id,
-            _rule_dir_for(hass),
-            rule_id,
-            contents,
-            expected_generation=expected_generation,
-        )
+        store = _rule_store_for(hass)
+        if store is not None:
+            result = await store.async_patch_rule_by_id(
+                rule_id,
+                contents,
+                expected_generation=expected_generation,
+            )
+        else:
+            result = await _rule_file_job(
+                hass,
+                _patch_rule_by_id,
+                _rule_dir_for(hass),
+                rule_id,
+                contents,
+                expected_generation=expected_generation,
+            )
         if "error" in result:
             status = 409 if result["error"] == "generation_mismatch" else 400
             return web.json_response(result, status=status)

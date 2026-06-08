@@ -4,7 +4,8 @@
 
 | Version | Supported          |
 |---------|--------------------|
-| 0.1.x   | :white_check_mark: |
+| 0.6.x   | :white_check_mark: |
+| < 0.6   | :x:                |
 
 ## Reporting a vulnerability
 
@@ -16,7 +17,9 @@ Do not open a public issue for security vulnerabilities.
 
 ## Scope
 
-The `when:` expression parser and evaluator are designed to be safe against
-injection attacks. They parse to an AST and evaluate that, never using
-`eval()` or `exec()` on user input. If you find a way to inject Python
-execution through a rule file, that's a security bug — please report it.
+Rule files are parsed as YAML and structured `observe:` trees. Jinja templates
+are evaluated only for scalar values under `intent` and `effect.data`; target
+names, field names, operator names, and service names are not templated. Rule
+evaluation must not execute arbitrary Python. If you find a way to inject code
+execution through a rule file or API payload, that's a security bug. Please
+report it privately.

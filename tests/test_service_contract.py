@@ -94,6 +94,7 @@ def test_rule_control_entities_have_translations() -> None:
 
         assert entity["switch"]["global_enabled"]["name"] == "Automation enabled"
         assert entity["switch"]["rule_enabled"]["name"] == "Rule enabled"
+        assert entity["button"]["reload_rules"]["name"] == "Reload rules"
         assert entity["button"]["clear_manual_overrides"]["name"] == "Clear manual overrides"
 
 

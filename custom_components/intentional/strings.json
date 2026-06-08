@@ -80,6 +80,9 @@
       }
     },
     "button": {
+      "reload_rules": {
+        "name": "Reload rules"
+      },
       "clear_manual_overrides": {
         "name": "Clear manual overrides"
       }

@@ -942,6 +942,35 @@ class TestStructuredDiagnostics:
             }
         ]
 
+    def test_list_rule_statuses_reports_rule_entity_attributes(self) -> None:
+        engine = Engine()
+        engine.load_rules([
+            _rule(
+                "office-light",
+                'binary_sensor.office == "on"',
+                target="light.office",
+                set={"state": "on", "brightness_pct": 40},
+                confidence=0.6,
+                reason="Office occupied",
+                labels=("office", "light"),
+            )
+        ])
+        engine.update_state("binary_sensor.office", "on")
+        engine.evaluate_all()
+
+        status = engine.list_rule_statuses()["office-light"]
+
+        assert status["enabled"] is True
+        assert status["active"] is True
+        assert status["condition_firing"] is True
+        assert status["active_intent_count"] == 1
+        assert status["targets"] == ["light.office"]
+        assert status["desired"] == {"set": {"state": "on", "brightness_pct": 40}}
+        assert status["authority"] == "automation"
+        assert status["confidence"] == 0.6
+        assert status["reason"] == "Office occupied"
+        assert status["labels"] == ["office", "light"]
+
 
 # ── TTL expiry ───────────────────────────────────────────────────────
 

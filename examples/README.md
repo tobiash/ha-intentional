@@ -1,148 +1,152 @@
-# 01 — Ambient rules
+# Examples
 
-Sensor-driven rules that set baselines based on environment state.
-These are the foundation — other rules layer modifiers on top.
+Copy these patterns into the Intentional YAML editor, or place them in
+`/config/intentional/rules/` before first setup to import them into Home
+Assistant storage.
+
+## Ambient Light
 
 ```yaml
-- id: brighten-when-dark
-  when: sensor.outdoor_light.illuminance < 50
-  emit:
-    target: light.living_room
-    set: { brightness_pct: 80 }
-  authority: automation
+- id: living-room-dark
+  observe:
+    sensor.outdoor_light.illuminance:
+      lt: 50
+  intent:
+    light.living_room:
+      state: on
+      brightness_pct: 80
+      color_temp_k: 2700
   confidence: 0.7
-  reason: "Dark outside"
+  reason: Dark outside
 
-- id: dim-when-bright
-  when: sensor.outdoor_light.illuminance > 5000
-  emit:
-    target: light.living_room
-    set: { brightness_pct: 30 }
-  authority: automation
+- id: living-room-bright-cap
+  observe:
+    sensor.outdoor_light.illuminance:
+      gt: 5000
+  intent:
+    light.living_room:
+      brightness_pct:
+        max: 30
   confidence: 0.7
-  reason: "Bright outside"
+  reason: Bright outside
 ```
 
-# 02 — Device state rules
-
-Rules that respond to the state of other devices. The classic "TV on"
-scenario from the README.
+## TV Mode Modifier
 
 ```yaml
-- id: dim-when-tv
-  when: media_player.living_room_tv.state == "on"
-  emit:
-    target: light.living_room
-    cap: { brightness_pct: 40 }      # respects user, just caps
-    set: { color_temp_k: 2700 }      # warm white for movie viewing
-  authority: automation
-  confidence: 0.9
-  reason: "TV is on, dim lights for viewing"
-
-- id: gentle-wake-on-motion
-  when: binary_sensor.bedroom_motion.state == "on" and time_of_day == "night"
-  emit:
-    target: light.bedroom
-    cap: { brightness_pct: 30 }      # never wake anyone up fully
-    transition: 2s
-    easing: ease-in
-    ttl: 5m                          # auto-release after 5 minutes
-  authority: automation
-  confidence: 0.6
-  reason: "Motion detected at night"
-```
-
-# 03 — Notification animations
-
-Time-varying intents that flash, pulse, or cycle to notify. These
-demonstrate the animation system. The example is a real-world use case:
-"flash the monitor back-LED when the front door opens."
-
-```yaml
-- id: door-open-led-pulse
-  when: binary_sensor.front_door.state == "on"
-  emit:
-    target: light.monitor_back_led
-    animation:
-      kind: pulse
-      parameter: brightness_pct
-      values: [0, 100, 0]
-      duration: 2s
-      repeat: 4
-      easing: sine
-    set: { color: warm_white, color_temp_k: 2700 }
-    transition: 0.3s
-  authority: automation
-  ttl: 20s                          # animation is ~16s, give a buffer
-  reason: "Front door opened"
-
-- id: phone-ringing-color-cycle
-  when: sensor.phone.state == "ringing"
-  emit:
-    target: light.office_desk
-    animation:
-      kind: cycle
-      parameter: color_temp_k
-      values: [2200, 6500]
-      period: 3s
-    set: { brightness_pct: 80 }
-  authority: automation
-  reason: "Phone is ringing"
-```
-
-# 04 — Manual / user scenes
-
-User-triggered scenes. These typically come from a dashboard button,
-a voice command via an automation, or a script. The TTL means they
-auto-release — your "movie scene" doesn't lock out the lights forever.
-
-```yaml
-- id: movie-scene
-  trigger: manual
-  emit:
-    target: light.living_room
-    set:
-      brightness_pct: 15
+- id: living-room-tv-mode
+  observe:
+    media_player.living_room_tv: on
+  intent:
+    light.living_room:
+      brightness_pct:
+        max: 40
       color_temp_k: 2200
-      effect: candle
-    transition: 3s
-    easing: ease-in
-  authority: user
-  ttl: 2h
-  reason: "Manual: Movie scene"
-
-- id: focus-mode-suppresses-notifications
-  when: input_boolean.focus_mode.state == "on"
-  emit:
-    target: light.office_desk
-    set: { brightness_pct: 0 }
-  authority: user
-  reason: "Focus mode active"
-  blocks: [phone-ringing-color-cycle]    # suppress notifications
+  confidence: 0.9
+  reason: TV is on
 ```
 
-# 05 — Modifier-based composition
-
-Rules that only contribute modifiers (cap, floor, offset, multiply)
-without setting a value. Multiple modifiers compose additively.
+## Presence With Linger
 
 ```yaml
-- id: peak-tariff-energy-cap
-  when: utility_meter.peak.state == "on"
-  emit:
-    target: light.*
-    cap: { brightness_pct: 60 }      # cap for ALL lights during peak
-    set: { color_temp_k: 4000 }      # colder = more efficient LED
-  authority: automation
-  confidence: 0.8
-  reason: "Peak energy tariff — cap brightness"
+- id: office-presence-light
+  observe:
+    binary_sensor.office_occupancy: on
+    schedule.office_working_hours: on
+    for: 2s
+  intent:
+    light.office:
+      state: on
+      brightness_pct: 100
+      color_temp_k: 4000
+      linger: 190s
+      apply:
+        transition:
+          assert: 3s
+          change: 4s
+          withdraw: 7s
+  reason: Office occupied during working hours
+```
 
-- id: always-on-hallway-base
-  when: sun.sun.state == "below_horizon"
-  emit:
-    target: light.hallway
-    floor: { brightness_pct: 3 }     # base glow, never fully off
-  authority: automation
-  confidence: 0.5
-  reason: "Hallway base glow at night"
+## Generated Backlight
+
+```yaml
+- id: office-monitor-backlight
+  observe:
+    binary_sensor.office_occupancy: on
+  intent:
+    light.monitor_backlight:
+      state: on
+      brightness_pct: 35
+      rgb_color:
+        generate:
+          kind: sample
+          from:
+            - [255, 120, 40]
+            - [255, 70, 120]
+            - [140, 70, 255]
+            - [40, 170, 255]
+          every:
+            min: 45s
+            max: 4m
+          transition:
+            min: 8s
+            max: 25s
+      linger: 90s
+  confidence: 0.35
+  reason: Gently varying occupied-office backlight
+```
+
+## Door Notification Effect
+
+```yaml
+- id: front-door-opened-notification
+  observe:
+    changed:
+      binary_sensor.front_door:
+        to: on
+  effect:
+    service: notify.mobile_app_phone
+    data:
+      title: Door
+      message: Front door opened
+```
+
+## Reusable Scene
+
+```yaml
+scenes:
+  movie:
+    intent:
+      light.living_room:
+        state: on
+        brightness_pct: 15
+        color_temp_k: 2200
+      cover.living_room_blinds:
+        state: closed
+
+rules:
+  - id: movie-mode
+    observe:
+      input_boolean.movie_mode: on
+    intent:
+      include: scene.movie
+    authority: user
+    confidence: 1.0
+    reason: Movie mode
+```
+
+## Clear Manual Override When Empty
+
+Prefer HA UI buttons for manual clearing. A rule can also clear overrides through an effect:
+
+```yaml
+- id: clear-office-light-override-when-empty
+  observe:
+    binary_sensor.office_occupancy: off
+    for: 5m
+  effect:
+    service: intentional.clear
+    data:
+      target: light.office
 ```

@@ -1,205 +1,197 @@
-# HTTP API (v0.3+)
+# HTTP API
 
-The integration exposes a JSON-over-HTTP API on Home Assistant's existing web server (port 8123). All endpoints require authentication via a long-lived access token (the same kind you use for the regular HA REST API).
-
-## Authentication
+Intentional exposes a JSON-over-HTTP API on Home Assistant's existing web server. All endpoints require the normal Home Assistant bearer token.
 
 ```bash
-curl -H "Authorization: Bearer <long-lived-token>" http://localhost:8123/api/intentional/...
+curl -H "Authorization: Bearer <long-lived-token>" \
+  http://homeassistant.local:8123/api/intentional/health
 ```
 
-Long-lived tokens are created in **HA → Profile → Long-Lived Access Tokens**.
+Long-lived tokens are created in Home Assistant under Profile -> Long-Lived Access Tokens.
 
 ## Endpoints
 
-### `GET /api/intentional/health`
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/intentional/health` | Integration status, version, rule count, active intent count. |
+| `GET` | `/api/intentional/rules` | List rule documents. Storage-backed installs expose `stored-rules.yaml`. |
+| `GET` | `/api/intentional/rules/{filename}` | Read a rule document. |
+| `PUT` | `/api/intentional/rules/{filename}` | Validate, write, and reload a rule document. |
+| `DELETE` | `/api/intentional/rules/{filename}` | Clear/delete a rule document and reload. |
+| `PATCH` | `/api/intentional/rules/id/{rule_id}` | Generation-guarded update by authored rule ID. |
+| `POST` | `/api/intentional/reload` | Reload rules from disk. |
+| `GET` | `/api/intentional/state` | Active intents grouped by target. |
+| `GET` | `/api/intentional/explain/{target}` | Detailed explanation for one target. |
+| `GET` | `/api/intentional/schema` | Machine-readable DSL capabilities. |
+| `POST` | `/api/intentional/validate` | Validate proposed YAML. |
+| `POST` | `/api/intentional/dry-run` | Evaluate proposed YAML with optional state overrides. |
+| `GET` | `/api/intentional/world` | Agent-friendly desired/actual world model. |
 
-Integration health check. Returns 200 if the integration is configured, 503 otherwise.
+## Health
 
-**Response:**
+```http
+GET /api/intentional/health
+```
+
 ```json
 {
   "status": "ok",
-  "version": "0.4.1",
+  "version": "0.6.3",
   "rule_dir": "/config/intentional/rules",
-  "rule_count": 3,
-  "active_intent_count": 1
+  "rule_count": 4,
+  "active_intent_count": 2
 }
 ```
 
-### `GET /api/intentional/rules`
+## Rule Documents
 
-List all rule files in the configured rule directory.
+Rules are stored in Home Assistant storage. Existing YAML files are imported on
+first setup if no stored rule document exists. For compatibility, the API still
+uses file-shaped endpoints; a storage-backed install exposes a synthetic
+`stored-rules.yaml` document.
 
-**Response:**
+List documents:
+
+```http
+GET /api/intentional/rules
+```
+
 ```json
 {
   "rule_dir": "/config/intentional/rules",
   "count": 2,
   "files": [
-    {"filename": "01-ambient.yaml", "size": "412"},
-    {"filename": "02-scenes.yaml", "size": "287"}
+    {"filename": "stored-rules.yaml", "size": "812", "generation": "...", "source": "storage"}
   ]
 }
 ```
 
-### `GET /api/intentional/rules/{filename}`
+Read the storage document:
 
-Read a rule file's contents.
+```http
+GET /api/intentional/rules/stored-rules.yaml
+```
 
-**Response:**
+Write the storage document:
+
+```http
+PUT /api/intentional/rules/stored-rules.yaml
+```
+
 ```json
 {
-  "filename": "welcome.yaml",
-  "contents": "- id: ...",
-  "size": 412
+  "contents": "- id: office-light\n  observe:\n    binary_sensor.office_occupancy: on\n  intent:\n    light.office:\n      state: on\n"
 }
 ```
 
-**Errors:**
-- `404` if file doesn't exist
-- `400` if filename contains path-traversal characters
+The integration validates YAML before writing to HA storage and calls
+`intentional.reload` after a successful write or delete.
 
-### `PUT /api/intentional/rules/{filename}`
+## Patch By Rule ID
 
-Write a rule file. Validates YAML before writing. Triggers `intentional.reload` on success.
+```http
+PATCH /api/intentional/rules/id/office-light
+```
 
-**Request body:**
 ```json
 {
-  "contents": "- id: new-rule\n  when: ..."
+  "expected_generation": "sha256:...",
+  "contents": "- id: office-light\n  enabled: false\n  observe:\n    binary_sensor.office_occupancy: on\n  intent:\n    light.office:\n      state: on\n"
 }
 ```
 
-**Response:**
+If the stored generation does not match, the endpoint returns `409` with `generation_mismatch`. This lets agents avoid overwriting concurrent user edits.
+
+## State And Explain
+
+`GET /api/intentional/state` returns active intents grouped by target plus resolved values.
+
+`GET /api/intentional/explain/{target}` returns the active intents, resolved value, winning intent, rule firing state, and modifier details for one target.
+
+## Schema
+
+```http
+GET /api/intentional/schema
+```
+
+Returns machine-readable capabilities, including supported top-level fields, observation operators, field operators, target metadata, and selector filters. The schema currently reports `dsl_version: vnext-draft`.
+
+## Validate
+
+```http
+POST /api/intentional/validate
+```
+
 ```json
 {
-  "filename": "new-rule.yaml",
-  "status": "saved",
-  "size": 287
+  "contents": "- id: office-light\n  observe:\n    binary_sensor.office_occupancy: on\n  intent:\n    light.office:\n      state: on\n"
 }
 ```
 
-**Errors:**
-- `400` if YAML is invalid (with the validation error in the `error` field)
+Successful response:
 
-### `DELETE /api/intentional/rules/{filename}`
-
-Delete a rule file. Triggers `intentional.reload` on success.
-
-**Response:**
 ```json
 {
-  "filename": "rule.yaml",
-  "status": "deleted"
+  "valid": true,
+  "rule_count": 1,
+  "normalized": [],
+  "warnings": []
 }
 ```
 
-### `POST /api/intentional/reload`
+Invalid YAML returns `400` with `valid: false` and an `errors` array.
 
-Trigger the `intentional.reload` service. Useful after editing rule files outside the API (e.g. via SSH) and for tests.
+## Dry Run
 
-**Response:**
-```json
-{
-  "status": "reloaded",
-  "rule_count": 3
-}
+```http
+POST /api/intentional/dry-run
 ```
 
-### `GET /api/intentional/state`
-
-Engine state snapshot: all active intents grouped by target, with the resolved value for each target.
-
-**Response:**
 ```json
 {
-  "rule_count": 3,
-  "active_intent_count": 1,
-  "by_target": {
-    "light.living_room": [
-      {
-        "rule_id": "movie-button",
-        "target": "light.living_room",
-        "set": {"brightness_pct": 30},
-        "cap": {},
-        "floor": {},
-        "offset": {},
-        "multiply": {},
-        "authority": "user",
-        "authority_name": "USER",
-        "confidence": 100,
-        "ttl_ms": 7200000,
-        "reason": "manual override",
-        "created_at_ms": 1717500000000
-      }
-    ]
-  },
-  "resolved": {
-    "light.living_room": {
-      "value": {"brightness_pct": 30},
-      "ttl_remaining_ms": 7199000
-    }
+  "contents": "- id: office-light\n  observe:\n    binary_sensor.office_occupancy: on\n  intent:\n    light.office:\n      state: on\n      brightness_pct: 70\n",
+  "state_overrides": {
+    "binary_sensor.office_occupancy.state": "on"
   }
 }
 ```
 
-This is the primary endpoint for agents that need to observe what the engine is currently doing.
+Response:
 
-### `GET /api/intentional/explain/{target}`
-
-Detailed explanation of why a target is in its current state. Useful for debugging conflicts.
-
-**Response:**
 ```json
 {
-  "target": "light.living_room",
-  "resolved": {
-    "value": {"brightness_pct": 30},
-    "ttl_remaining_ms": 7199000
-  },
-  "active_intents": [
-    {
-      "rule_id": "movie-button",
-      "authority": "user",
-      "authority_name": "USER",
-      "reason": "manual override",
-      "set": {"brightness_pct": 30}
-    },
-    {
-      "rule_id": "energy-cap",
-      "authority": "automation",
-      "authority_name": "AUTOMATION",
-      "reason": "evening energy cap",
-      "cap": {"brightness_pct": 50}
-    }
+  "valid": true,
+  "active_targets": ["light.office"],
+  "resolved_targets": [
+    {"target": "light.office", "value": {"state": "on", "brightness_pct": 70}}
   ],
-  "winning_intent": { ... },
-  "rules_for_target": [
-    {
-      "rule_id": "movie-button",
-      "firing": true,
-      "condition_firing": true,
-      "blocked_by": [],
-      "for_remaining_ms": null
-    },
-    {
-      "rule_id": "energy-cap",
-      "firing": true,
-      "condition_firing": true,
-      "blocked_by": [],
-      "for_remaining_ms": null
-    }
-  ]
+  "effects": [],
+  "errors": []
 }
 ```
 
-The `winning_intent` is the highest-priority active intent — that's the rule whose `set:` block determined the final value. The `cap:` from the lower-priority rule still applied (as a modifier), which is why the final value is 30 (the manual set) even though the cap is 50.
-For each rule, `condition_firing` reports whether the `when` expression matched before `for:` dwell timing and `blocks:` suppression; `firing` reports whether the rule is effective after both. `for_remaining_ms` is the remaining dwell time before a matching rule becomes effective, or `null` when no dwell wait is pending.
+`state_overrides` keys use `<entity_id>.<field>`. Use `.state` for the entity state.
 
-## Error format
+## World Model
 
-All errors return:
+```http
+GET /api/intentional/world
+```
+
+Returns an agent-friendly snapshot containing:
+
+- `desired_records`: resolved desired targets, reasons, conditions, and actual snapshots where available.
+- `lifecycle`: persisted lifecycle state such as generated values and global enabled state.
+- `selector_diagnostics`: selector resolution details.
+- `health`: rule and intent counts.
+- `entities`: actual HA state snapshots for desired targets.
+
+`desired_records[].conditions` includes `DesiredResolved` and, when an actual HA state is available, `ActualMatchesDesired`.
+
+## Error Format
+
+Errors use this shape:
+
 ```json
 {
   "error": "Rule validation failed: ...",
@@ -207,18 +199,17 @@ All errors return:
 }
 ```
 
-HTTP status codes:
-- `400` — bad input (invalid filename, invalid YAML, etc.)
-- `404` — resource not found
-- `500` — internal error
-- `503` — integration not configured
+Common status codes:
 
-## Rate limits
+- `400`: bad input, invalid JSON, invalid filename, or invalid YAML.
+- `404`: rule file not found.
+- `409`: generation mismatch on rule-ID patch.
+- `500`: internal error.
+- `503`: integration not configured.
 
-None imposed by the integration itself. The integration inherits HA's general API rate limits, which are very permissive for local traffic.
+## See Also
 
-## See also
-
-- `custom_components/intentional/api.py` — implementation
-- `tests/test_api.py` — unit tests (skip without HA installed)
-- `tests/test_integration.py` — integration tests covering the full request lifecycle
+- `custom_components/intentional/api.py`
+- `custom_components/intentional/rule_files.py`
+- `tests/test_api.py`
+- `tests/test_service_contract.py`

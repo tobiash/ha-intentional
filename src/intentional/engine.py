@@ -713,6 +713,67 @@ class Engine:
             "errors": self.log,
         }
 
+    def list_rule_statuses(self) -> dict[str, dict[str, Any]]:
+        """Return authored-rule status for HA entities and agent UIs."""
+        firing, condition_firing, blocked_by, for_remaining = self._firing_rule_diagnostics()
+        active_counts: dict[str, int] = {}
+        now = self.now_ms()
+        for intent in self._active_intents:
+            if intent.rule_id and not intent.is_expired(into_the_future_ms=now):
+                active_counts[intent.rule_id] = active_counts.get(intent.rule_id, 0) + 1
+
+        statuses: dict[str, dict[str, Any]] = {}
+        for rule_id, parsed in self._rules.items():
+            rule = parsed.rule
+            targets = []
+            if rule.target:
+                targets.append(rule.target)
+            if rule.scene:
+                targets.append(rule.scene)
+            targets.extend(
+                _selector_summary(selector)
+                for selector in rule.intent_selectors
+            )
+            desired: dict[str, Any] = {}
+            if rule.set:
+                desired["set"] = dict(rule.set)
+            if rule.cap:
+                desired["cap"] = dict(rule.cap)
+            if rule.floor:
+                desired["floor"] = dict(rule.floor)
+            if rule.offset:
+                desired["offset"] = dict(rule.offset)
+            if rule.multiply:
+                desired["multiply"] = dict(rule.multiply)
+            if rule.effects:
+                desired["effects"] = [
+                    {
+                        "domain": effect.domain,
+                        "service": effect.service,
+                        "target": dict(effect.target),
+                        "data": dict(effect.data),
+                    }
+                    for effect in rule.effects
+                ]
+
+            statuses[rule_id] = {
+                "rule_id": rule_id,
+                "enabled": rule.enabled,
+                "active": rule_id in firing,
+                "condition_firing": rule_id in condition_firing,
+                "active_intent_count": active_counts.get(rule_id, 0),
+                "targets": targets,
+                "desired": desired,
+                "authority": rule.authority.value,
+                "confidence": rule.confidence,
+                "reason": rule.reason,
+                "labels": list(rule.labels),
+                "notes": rule.notes,
+                "blocked_by": sorted(blocked_by.get(rule_id, [])),
+                "for_remaining_ms": for_remaining.get(rule_id),
+            }
+        return statuses
+
     def explain(self, target: str) -> str:
         """Return a human-readable explanation of a target's resolved value."""
         intents = self.list_active_intents(target)
@@ -776,6 +837,15 @@ def _intent_to_diagnostic_dict(intent: Intent | None) -> dict[str, Any] | None:
         "created_at_ms": intent.created_at_ms,
         "ignore_when": intent.ignore_when,
     }
+
+
+def _selector_summary(selector: Any) -> str:
+    parts = []
+    for field in ("domain", "area", "label"):
+        value = getattr(selector, field, None)
+        if value:
+            parts.append(f"{field}={value}")
+    return "select:" + (",".join(parts) if parts else "*")
 
 
 def _linger_intent(intent: Intent, linger_ms: int, now: int) -> Intent:
