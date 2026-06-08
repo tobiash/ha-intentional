@@ -1433,7 +1433,7 @@ def service_plan_matches_state(plan: ServicePlanSignature, state: Any) -> bool:
             if field in {"entity_id", "transition"}:
                 continue
             actual = _state_field_value(state, field)
-            if actual is not None and not _values_match(actual, expected):
+            if actual is not None and not _values_match(actual, expected, field=field):
                 return False
     return True
 
@@ -1600,20 +1600,21 @@ def _state_field_value(state: Any, field: str) -> Any:
     return None
 
 
-def _values_match(actual: Any, expected: Any) -> bool:
+def _values_match(actual: Any, expected: Any, *, field: str | None = None) -> bool:
     """Compare HA state attributes with service data, allowing small rounding gaps."""
     if isinstance(actual, list | tuple) and isinstance(expected, list | tuple):
         if len(actual) != len(expected):
             return False
         return all(
-            _values_match(actual_item, expected_item)
+            _values_match(actual_item, expected_item, field=field)
             for actual_item, expected_item in zip(actual, expected, strict=True)
         )
+    tolerance = 25 if field in {"color_temp_kelvin", "color_temp_k"} else 1
     if isinstance(actual, int | float) and isinstance(expected, int | float):
-        return abs(float(actual) - float(expected)) <= 1
+        return abs(float(actual) - float(expected)) <= tolerance
     if isinstance(expected, int | float):
         try:
-            return abs(float(actual) - float(expected)) <= 1
+            return abs(float(actual) - float(expected)) <= tolerance
         except (TypeError, ValueError):
             pass
     return actual == expected

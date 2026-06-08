@@ -807,6 +807,29 @@ def test_service_plan_matches_equivalent_actual_light_state() -> None:
     )
 
 
+def test_service_plan_matches_constrained_light_color_temperature() -> None:
+    from intentional.ha_adapter import (
+        service_calls_for_resolved_target,
+        service_plan_matches_state,
+        service_plan_signature,
+    )
+
+    calls = service_calls_for_resolved_target(
+        "light.desk",
+        {"state": "on", "color_temp_k": 2700},
+    )
+    signature = service_plan_signature(calls)
+
+    assert service_plan_matches_state(
+        signature,
+        SimpleNamespace(
+            entity_id="light.desk",
+            state="on",
+            attributes={"color_temp_kelvin": 2702},
+        ),
+    )
+
+
 def test_service_plan_does_not_match_conflicting_actual_light_state() -> None:
     from intentional.ha_adapter import (
         service_calls_for_resolved_target,
