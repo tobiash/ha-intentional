@@ -1401,9 +1401,19 @@ def emit_manual_override_for_state_drift(
     state: Any,
     *,
     ttl_ms: int,
+    now_ms: int | None = None,
+    drift_suppressed_until: dict[str, int] | None = None,
     reason: str = "Manual HA state change",
 ) -> bool:
     """Emit a USER intent when a managed target drifts from the applied plan."""
+    if drift_suppressed_until is not None:
+        suppress_until = drift_suppressed_until.get(state.entity_id)
+        if suppress_until is not None:
+            if now_ms is None:
+                raise ValueError("now_ms is required with drift_suppressed_until")
+            if now_ms < suppress_until:
+                return False
+            drift_suppressed_until.pop(state.entity_id, None)
     if not invalidate_service_plan_for_state_change(last_applied, state):
         return False
     if not engine.has_active_target(state.entity_id):

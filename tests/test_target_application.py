@@ -784,6 +784,110 @@ def test_state_drift_does_not_emit_manual_override_for_matching_state() -> None:
     )
 
 
+def test_state_drift_does_not_emit_manual_override_during_owned_transition() -> None:
+    from intentional.engine import Engine
+    from intentional.ha_adapter import (
+        emit_manual_override_for_state_drift,
+        service_calls_for_resolved_target,
+        service_plan_signature,
+    )
+    from intentional.intent import Authority
+    from intentional.yaml_loader import Rule
+
+    engine = Engine(clock_fn=lambda: 1000)
+    engine.load_rules([
+        Rule(
+            id="ambient",
+            when="input_boolean.work == 'on'",
+            target="light.desk",
+            set={"state": "on", "rgb_color": [75, 180, 255]},
+        )
+    ])
+    engine.update_state("input_boolean.work", "on")
+    engine.evaluate_all()
+    calls = service_calls_for_resolved_target(
+        "light.desk",
+        {"state": "on", "rgb_color": [75, 180, 255]},
+        transition_ms=20_000,
+    )
+    last_applied = {"light.desk": service_plan_signature(calls)}
+    drift_suppressed_until = {"light.desk": 30_000}
+
+    emitted = emit_manual_override_for_state_drift(
+        engine,
+        last_applied,
+        SimpleNamespace(
+            entity_id="light.desk",
+            state="on",
+            attributes={"rgb_color": [166, 184, 156], "brightness": 86},
+        ),
+        ttl_ms=7_200_000,
+        now_ms=15_000,
+        drift_suppressed_until=drift_suppressed_until,
+    )
+
+    assert emitted is False
+    assert "light.desk" in last_applied
+    assert drift_suppressed_until == {"light.desk": 30_000}
+    assert all(
+        intent.authority is not Authority.USER
+        for intent in engine.list_active_intents("light.desk")
+    )
+
+
+def test_state_drift_emits_manual_override_after_transition_grace_expires() -> None:
+    from intentional.engine import Engine
+    from intentional.ha_adapter import (
+        emit_manual_override_for_state_drift,
+        service_calls_for_resolved_target,
+        service_plan_signature,
+    )
+    from intentional.intent import Authority
+    from intentional.yaml_loader import Rule
+
+    engine = Engine(clock_fn=lambda: 1000)
+    engine.load_rules([
+        Rule(
+            id="ambient",
+            when="input_boolean.work == 'on'",
+            target="light.desk",
+            set={"state": "on", "rgb_color": [75, 180, 255]},
+        )
+    ])
+    engine.update_state("input_boolean.work", "on")
+    engine.evaluate_all()
+    calls = service_calls_for_resolved_target(
+        "light.desk",
+        {"state": "on", "rgb_color": [75, 180, 255]},
+        transition_ms=20_000,
+    )
+    last_applied = {"light.desk": service_plan_signature(calls)}
+    drift_suppressed_until = {"light.desk": 30_000}
+
+    emitted = emit_manual_override_for_state_drift(
+        engine,
+        last_applied,
+        SimpleNamespace(
+            entity_id="light.desk",
+            state="on",
+            attributes={"rgb_color": [166, 184, 156], "brightness": 86},
+        ),
+        ttl_ms=7_200_000,
+        now_ms=31_000,
+        drift_suppressed_until=drift_suppressed_until,
+    )
+
+    assert emitted is True
+    assert "light.desk" not in last_applied
+    assert drift_suppressed_until == {}
+    manual = [
+        intent
+        for intent in engine.list_active_intents("light.desk")
+        if intent.authority is Authority.USER
+    ]
+    assert len(manual) == 1
+
+
 def test_service_plan_matches_equivalent_actual_light_state() -> None:
     from intentional.ha_adapter import (
         service_calls_for_resolved_target,

@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -65,6 +66,7 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH, Platform.BUTTON]
 MANUAL_OVERRIDE_TTL_SECONDS = 7200
 WITHDRAW_TO_OFF_DOMAINS = frozenset({"light", "switch", "input_boolean", "fan", "siren"})
+DRIFT_TRANSITION_GRACE_MS = 2_000
 
 
 @dataclass(frozen=True)
@@ -274,6 +276,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # service calls.
     _last_applied_targets: dict[str, ServicePlanSignature] = {}
     _last_resolved_targets: dict[str, _ResolvedTargetState] = {}
+    _drift_suppressed_until: dict[str, int] = {}
     # Track state-change pulses that should stay true through one apply cycle.
     _state_change_pulses: set[str] = set()
     # Event used to signal the tick loop to stop. We use an event rather
@@ -305,7 +308,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             await _apply_pending_effects(hass, engine)
             # Apply resolved target intents to HA entities.
-            await _apply_resolved_targets(hass, engine, _last_applied_targets, _last_resolved_targets)
+            await _apply_resolved_targets(
+                hass,
+                engine,
+                _last_applied_targets,
+                _last_resolved_targets,
+                _drift_suppressed_until,
+            )
             if _state_change_pulses:
                 clear_state_change_pulses(engine, _state_change_pulses)
                 _state_change_pulses.clear()
@@ -348,6 +357,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass,
                 engine,
                 _last_applied_targets,
+                _drift_suppressed_until,
                 _state_change_pulses,
             ),
         )
@@ -466,6 +476,7 @@ def _on_ha_state_change_factory(
     hass: HomeAssistant,
     engine: Engine,
     last_applied: dict[str, ServicePlanSignature] | None = None,
+    drift_suppressed_until: dict[str, int] | None = None,
     state_change_pulses: set[str] | None = None,
 ):
     """Return a state_changed listener that pushes updates into the engine."""
@@ -486,6 +497,8 @@ def _on_ha_state_change_factory(
                 last_applied,
                 new_state,
                 ttl_ms=MANUAL_OVERRIDE_TTL_SECONDS * 1000,
+                now_ms=_monotonic_ms(),
+                drift_suppressed_until=drift_suppressed_until,
             )
         # Re-evaluate immediately for snappy response
         sync_time_context_into_engine(engine)
@@ -567,6 +580,7 @@ async def _apply_resolved_targets(
     engine: Engine,
     last_applied: dict[str, ServicePlanSignature],
     last_resolved: dict[str, _ResolvedTargetState] | None = None,
+    drift_suppressed_until: dict[str, int] | None = None,
 ) -> None:
     """Apply resolved target intents to HA entities via service calls."""
     if last_resolved is None:
@@ -616,6 +630,11 @@ async def _apply_resolved_targets(
                 break
         else:
             last_applied[target] = signature
+            _suppress_drift_during_transition(
+                drift_suppressed_until,
+                target,
+                transition_ms,
+            )
             last_resolved[target] = _resolved_target_state(resolved)
 
     for stale_target in set(last_resolved) - active_targets:
@@ -623,10 +642,11 @@ async def _apply_resolved_targets(
         withdraw_value = _default_withdraw_value(stale_target, previous)
         if withdraw_value is None:
             continue
+        transition_ms = previous.transition_withdraw_ms if previous.transition_withdraw_ms is not None else previous.transition_ms
         calls = service_calls_for_resolved_target(
             stale_target,
             withdraw_value,
-            transition_ms=previous.transition_withdraw_ms if previous.transition_withdraw_ms is not None else previous.transition_ms,
+            transition_ms=transition_ms,
         )
         if not calls:
             continue
@@ -654,6 +674,11 @@ async def _apply_resolved_targets(
                 break
         else:
             last_applied[stale_target] = signature
+            _suppress_drift_during_transition(
+                drift_suppressed_until,
+                stale_target,
+                transition_ms,
+            )
 
 
 def _resolved_target_state(resolved: Any) -> _ResolvedTargetState:
@@ -685,6 +710,20 @@ def _default_withdraw_value(target: str, previous: _ResolvedTargetState) -> dict
     if previous.value.get("state") != "on":
         return None
     return {"state": "off"}
+
+
+def _suppress_drift_during_transition(
+    drift_suppressed_until: dict[str, int] | None,
+    target: str,
+    transition_ms: int,
+) -> None:
+    if drift_suppressed_until is None or transition_ms <= 0:
+        return
+    drift_suppressed_until[target] = _monotonic_ms() + transition_ms + DRIFT_TRANSITION_GRACE_MS
+
+
+def _monotonic_ms() -> int:
+    return int(time.monotonic() * 1000)
 
 
 async def _refresh_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
