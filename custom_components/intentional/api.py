@@ -344,6 +344,81 @@ class IntentionalRuleByIDView(HomeAssistantView):
         return web.json_response({"status": "saved", **result})
 
 
+class IntentionalRuleHistoryView(HomeAssistantView):
+    """GET /api/intentional/rules/history — list stored rule snapshots."""
+
+    url = "/api/intentional/rules/history"
+    name = "api:intentional:rule_history"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        store = _rule_store_for(hass)
+        if store is None:
+            return _error("Rule history is only available for storage-backed rules", "not_available", 404)
+        history = store.list_history()
+        return web.json_response({
+            "current_generation": store.generation,
+            "count": len(history),
+            "history": history,
+        })
+
+
+class IntentionalRuleHistoryGenerationView(HomeAssistantView):
+    """GET /api/intentional/rules/history/<generation> — read one snapshot."""
+
+    url = r"/api/intentional/rules/history/{generation:.+}"
+    name = "api:intentional:rule_history_generation"
+    requires_auth = True
+
+    async def get(self, request: web.Request, generation: str) -> web.Response:
+        hass = request.app["hass"]
+        store = _rule_store_for(hass)
+        if store is None:
+            return _error("Rule history is only available for storage-backed rules", "not_available", 404)
+        record = store.read_history(generation)
+        if record is None:
+            return _error(f"Rule history generation not found: {generation}", "not_found", 404)
+        return web.json_response(record)
+
+
+class IntentionalRuleRollbackView(HomeAssistantView):
+    """POST /api/intentional/rules/rollback — restore a history snapshot."""
+
+    url = "/api/intentional/rules/rollback"
+    name = "api:intentional:rule_rollback"
+    requires_auth = True
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        store = _rule_store_for(hass)
+        if store is None:
+            return _error("Rule rollback is only available for storage-backed rules", "not_available", 404)
+        try:
+            data = await request.json()
+        except (ValueError, json.JSONDecodeError) as err:
+            return _error(f"Invalid JSON: {err}", "bad_request", 400)
+        generation = data.get("generation")
+        expected_generation = data.get("expected_generation")
+        if not isinstance(generation, str) or not isinstance(expected_generation, str):
+            return _error(
+                "Request body must include string `generation` and `expected_generation`",
+                "bad_request",
+                400,
+            )
+        result = await store.async_rollback(
+            generation,
+            expected_generation=expected_generation,
+        )
+        if "error" in result:
+            status = 409 if result["error"] == "generation_mismatch" else 400
+            if result["error"] == "history_not_found":
+                status = 404
+            return web.json_response(result, status=status)
+        await hass.services.async_call(DOMAIN, "reload", blocking=True)
+        return web.json_response({"status": "restored", **result})
+
+
 # ── Reload ─────────────────────────────────────────────────────────
 
 
@@ -620,6 +695,9 @@ def register_api(hass: HomeAssistant) -> None:
     views = [
         IntentionalHealthView,
         IntentionalRulesView,
+        IntentionalRuleHistoryView,
+        IntentionalRuleHistoryGenerationView,
+        IntentionalRuleRollbackView,
         IntentionalRuleView,
         IntentionalRuleByIDView,
         IntentionalReloadView,

@@ -79,6 +79,21 @@ def test_rule_view_supports_get_put_delete() -> None:
     assert hasattr(IntentionalRuleView, "delete")
 
 
+def test_rule_history_views_have_correct_urls() -> None:
+    from custom_components.intentional.api import (
+        IntentionalRuleHistoryGenerationView,
+        IntentionalRuleHistoryView,
+        IntentionalRuleRollbackView,
+    )
+
+    assert IntentionalRuleHistoryView.url == "/api/intentional/rules/history"
+    assert IntentionalRuleHistoryView.requires_auth is True
+    assert "{generation" in IntentionalRuleHistoryGenerationView.url
+    assert IntentionalRuleHistoryGenerationView.requires_auth is True
+    assert IntentionalRuleRollbackView.url == "/api/intentional/rules/rollback"
+    assert IntentionalRuleRollbackView.requires_auth is True
+
+
 def test_reload_view_accepts_post() -> None:
     from custom_components.intentional.api import IntentionalReloadView
 
@@ -148,6 +163,9 @@ def test_all_views_require_auth() -> None:
         IntentionalExplainView,
         IntentionalHealthView,
         IntentionalReloadView,
+        IntentionalRuleHistoryGenerationView,
+        IntentionalRuleHistoryView,
+        IntentionalRuleRollbackView,
         IntentionalRulesView,
         IntentionalRuleView,
         IntentionalStateView,
@@ -156,6 +174,9 @@ def test_all_views_require_auth() -> None:
     for view_cls in [
         IntentionalHealthView,
         IntentionalRulesView,
+        IntentionalRuleHistoryView,
+        IntentionalRuleHistoryGenerationView,
+        IntentionalRuleRollbackView,
         IntentionalRuleView,
         IntentionalReloadView,
         IntentionalStateView,
@@ -208,6 +229,21 @@ def test_register_api_is_callable() -> None:
     assert callable(register_api)
 
 
+def test_register_api_registers_history_before_filename_route() -> None:
+    from custom_components.intentional.api import register_api
+
+    registered = []
+    hass = SimpleNamespace(
+        http=SimpleNamespace(register_view=lambda view: registered.append(view.url))
+    )
+
+    register_api(hass)
+
+    assert registered.index("/api/intentional/rules/history") < registered.index(
+        "/api/intentional/rules/{filename:.+}"
+    )
+
+
 # ── URL pattern coverage ────────────────────────────────────────────
 
 
@@ -217,6 +253,9 @@ def test_url_patterns_are_unique() -> None:
         IntentionalExplainView,
         IntentionalHealthView,
         IntentionalReloadView,
+        IntentionalRuleHistoryGenerationView,
+        IntentionalRuleHistoryView,
+        IntentionalRuleRollbackView,
         IntentionalRulesView,
         IntentionalRuleView,
         IntentionalStateView,
@@ -225,6 +264,9 @@ def test_url_patterns_are_unique() -> None:
     urls = [
         IntentionalHealthView.url,
         IntentionalRulesView.url,
+        IntentionalRuleHistoryView.url,
+        IntentionalRuleHistoryGenerationView.url,
+        IntentionalRuleRollbackView.url,
         IntentionalRuleView.url,
         IntentionalReloadView.url,
         IntentionalStateView.url,
@@ -239,6 +281,9 @@ def test_all_urls_under_api_intentional() -> None:
         IntentionalExplainView,
         IntentionalHealthView,
         IntentionalReloadView,
+        IntentionalRuleHistoryGenerationView,
+        IntentionalRuleHistoryView,
+        IntentionalRuleRollbackView,
         IntentionalRulesView,
         IntentionalRuleView,
         IntentionalStateView,
@@ -247,6 +292,9 @@ def test_all_urls_under_api_intentional() -> None:
     for view_cls in [
         IntentionalHealthView,
         IntentionalRulesView,
+        IntentionalRuleHistoryView,
+        IntentionalRuleHistoryGenerationView,
+        IntentionalRuleRollbackView,
         IntentionalRuleView,
         IntentionalReloadView,
         IntentionalStateView,

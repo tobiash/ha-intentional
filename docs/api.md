@@ -19,6 +19,9 @@ Long-lived tokens are created in Home Assistant under Profile -> Long-Lived Acce
 | `PUT` | `/api/intentional/rules/{filename}` | Validate, write, and reload a rule document. |
 | `DELETE` | `/api/intentional/rules/{filename}` | Clear/delete a rule document and reload. |
 | `PATCH` | `/api/intentional/rules/id/{rule_id}` | Generation-guarded update by authored rule ID. |
+| `GET` | `/api/intentional/rules/history` | List previous storage-backed rule document generations. |
+| `GET` | `/api/intentional/rules/history/{generation}` | Read one previous rule document generation. |
+| `POST` | `/api/intentional/rules/rollback` | Restore a previous generation and reload. |
 | `POST` | `/api/intentional/reload` | Reload rules from disk. |
 | `GET` | `/api/intentional/state` | Active intents grouped by target. |
 | `GET` | `/api/intentional/explain/{target}` | Detailed explanation for one target. |
@@ -101,6 +104,57 @@ PATCH /api/intentional/rules/id/office-light
 ```
 
 If the stored generation does not match, the endpoint returns `409` with `generation_mismatch`. This lets agents avoid overwriting concurrent user edits.
+
+## History And Rollback
+
+Storage-backed rules keep a bounded history of previous documents. Every
+successful write, delete, patch-by-rule-id, enable toggle, and rollback records
+the document being replaced before saving the new one.
+
+List previous generations:
+
+```http
+GET /api/intentional/rules/history
+```
+
+```json
+{
+  "current_generation": "...",
+  "count": 2,
+  "history": [
+    {
+      "generation": "...",
+      "created_at": "2026-06-09T21:55:01.000000+00:00",
+      "reason": "patch:office-light",
+      "size": 812,
+      "rule_count": 4
+    }
+  ]
+}
+```
+
+Read a snapshot, including its YAML contents:
+
+```http
+GET /api/intentional/rules/history/{generation}
+```
+
+Restore a previous generation:
+
+```http
+POST /api/intentional/rules/rollback
+```
+
+```json
+{
+  "generation": "generation-to-restore",
+  "expected_generation": "current-generation"
+}
+```
+
+Rollback is optimistic. If `expected_generation` is stale, the endpoint returns
+`409` with `generation_mismatch`. The pre-rollback current document is also
+recorded in history, so a rollback can itself be undone.
 
 ## State And Explain
 

@@ -7,6 +7,7 @@ while detaching the source of truth from files on disk.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any
 
@@ -24,6 +25,7 @@ from .rule_files import (
 
 RULE_STORE_VERSION = 1
 RULE_STORE_FILENAME = "stored-rules.yaml"
+RULE_HISTORY_LIMIT = 25
 
 
 class StorageRuleStore:
@@ -37,12 +39,14 @@ class StorageRuleStore:
             f"intentional_rules_{entry_id}_v1",
         )
         self._contents = "[]\n"
+        self._history: list[dict[str, Any]] = []
 
     async def async_load_or_import(self, rule_dir: str) -> list[Rule]:
         """Load stored rules, importing YAML files once if storage is empty."""
         data = await self._store.async_load()
         if isinstance(data, dict) and isinstance(data.get("contents"), str):
             self._contents = data["contents"]
+            self._history = _valid_history(data.get("history"))
             return load_rules_from_string(self._contents)
 
         imported = await self._hass.async_add_executor_job(
@@ -59,6 +63,7 @@ class StorageRuleStore:
         await self._store.async_save({
             "contents": self._contents,
             "generation": self.generation,
+            "history": self._history,
         })
 
     @property
@@ -94,6 +99,7 @@ class StorageRuleStore:
             load_rules_from_string(contents)
         except RuleLoadError as err:
             return f"Rule validation failed: {err}"
+        self._record_history("write")
         self._contents = contents
         await self.async_save()
         return None
@@ -102,6 +108,7 @@ class StorageRuleStore:
         """Clear all stored rules through the synthetic file API."""
         if filename != RULE_STORE_FILENAME:
             return f"Storage-backed rules must be deleted as {RULE_STORE_FILENAME}"
+        self._record_history("delete")
         self._contents = "[]\n"
         await self.async_save()
         return None
@@ -122,9 +129,50 @@ class StorageRuleStore:
             return {"error": "validation_failed", "message": str(err)}
         if not any(rule.id == rule_id for rule in replacement_rules):
             return {"error": "rule_id_missing"}
+        self._record_history(f"patch:{rule_id}")
         self._contents = contents
         await self.async_save()
         return {"filename": RULE_STORE_FILENAME, "generation": self.generation}
+
+    def list_history(self, *, include_contents: bool = False) -> list[dict[str, Any]]:
+        """Return stored rule document history, newest first."""
+        return [
+            _history_public_record(record, include_contents=include_contents)
+            for record in self._history
+        ]
+
+    def read_history(self, generation: str) -> dict[str, Any] | None:
+        """Return one history snapshot by generation."""
+        for record in self._history:
+            if record.get("generation") == generation:
+                return _history_public_record(record, include_contents=True)
+        return None
+
+    async def async_rollback(
+        self,
+        generation: str,
+        *,
+        expected_generation: str,
+    ) -> dict[str, Any]:
+        """Restore a previous rule document generation."""
+        if self.generation != expected_generation:
+            return {"error": "generation_mismatch"}
+        record = self.read_history(generation)
+        if record is None:
+            return {"error": "history_not_found"}
+        contents = record["contents"]
+        try:
+            load_rules_from_string(contents)
+        except RuleLoadError as err:
+            return {"error": "validation_failed", "message": str(err)}
+        self._record_history(f"rollback:{generation}")
+        self._contents = contents
+        await self.async_save()
+        return {
+            "filename": RULE_STORE_FILENAME,
+            "generation": self.generation,
+            "restored_generation": generation,
+        }
 
     def list_rules(self) -> list[dict[str, Any]]:
         """Return authored rule IDs with enabled metadata."""
@@ -156,6 +204,7 @@ class StorageRuleStore:
             load_rules_from_string(updated)
         except RuleLoadError as err:
             return {"error": "validation_failed", "message": str(err)}
+        self._record_history(f"enabled:{rule_id}:{enabled}")
         self._contents = updated
         await self.async_save()
         return {
@@ -168,7 +217,68 @@ class StorageRuleStore:
         """Return parsed stored rules."""
         return load_rules_from_string(self._contents)
 
+    def _record_history(self, reason: str) -> None:
+        """Record the current document before replacing it."""
+        if self._history and self._history[0].get("generation") == self.generation:
+            return
+        self._history.insert(0, _history_record(self._contents, reason=reason))
+        self._history = self._history[:RULE_HISTORY_LIMIT]
+
 
 def rule_store_key(entry_id: str) -> str:
     """Return hass.data key for a rule store."""
     return f"{entry_id}_rule_store"
+
+
+def _history_record(contents: str, *, reason: str) -> dict[str, Any]:
+    return {
+        "generation": _generation_for(contents),
+        "contents": contents,
+        "created_at": datetime.now(UTC).isoformat(),
+        "reason": reason,
+        "size": len(contents.encode("utf-8")),
+        "rule_count": _rule_count(contents),
+    }
+
+
+def _history_public_record(record: dict[str, Any], *, include_contents: bool) -> dict[str, Any]:
+    result = {
+        "generation": record["generation"],
+        "created_at": record.get("created_at", ""),
+        "reason": record.get("reason", "unknown"),
+        "size": record.get("size", len(str(record.get("contents", "")).encode("utf-8"))),
+        "rule_count": record.get("rule_count", _rule_count(str(record.get("contents", "")))),
+    }
+    if include_contents:
+        result["contents"] = record.get("contents", "")
+    return result
+
+
+def _valid_history(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    history: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        contents = item.get("contents")
+        generation = item.get("generation")
+        if not isinstance(contents, str) or not isinstance(generation, str):
+            continue
+        history.append({
+            **item,
+            "generation": generation,
+            "contents": contents,
+        })
+    return history[:RULE_HISTORY_LIMIT]
+
+
+def _generation_for(contents: str) -> str:
+    return sha256(contents.encode("utf-8")).hexdigest()
+
+
+def _rule_count(contents: str) -> int:
+    try:
+        return len(load_rules_from_string(contents))
+    except RuleLoadError:
+        return 0
