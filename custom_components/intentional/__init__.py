@@ -80,10 +80,11 @@ class _ResolvedTargetState:
     transition_ms: int
     transition_withdraw_ms: int | None
 
-# Declaring http/frontend/panel_custom as dependencies tells HA to ensure API
-# and UI helpers are available before this integration's setup runs. The setup
-# still guards UI registration so headless test environments can import safely.
-DEPENDENCIES = ["http", "frontend", "panel_custom"]
+# Declaring http as a dependency tells HA to ensure API helpers are available.
+# The frontend panel is registered opportunistically when the frontend is loaded;
+# it must not be a hard dependency because headless HA test installs often lack
+# the separate hass_frontend package.
+DEPENDENCIES = ["http"]
 FRONTEND_URL_PATH = "/api/intentional/frontend"
 PANEL_URL_PATH = "intentional"
 FRONTEND_STATIC_REGISTERED = "frontend_static_registered"
@@ -394,6 +395,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def _register_frontend_panel(hass: HomeAssistant) -> None:
     """Serve and register the Intentional rule editor panel."""
+    from homeassistant.components import frontend, panel_custom
+
+    if not frontend.async_panel_exists(hass, "profile"):
+        _LOGGER.debug("Skipping Intentional panel registration; frontend is not loaded")
+        return
+
     domain_data = hass.data.setdefault(DOMAIN, {})
     if not domain_data.get(FRONTEND_STATIC_REGISTERED):
         frontend_path = Path(__file__).parent / "frontend"
@@ -401,8 +408,6 @@ async def _register_frontend_panel(hass: HomeAssistant) -> None:
             StaticPathConfig(FRONTEND_URL_PATH, str(frontend_path), True),
         ])
         domain_data[FRONTEND_STATIC_REGISTERED] = True
-
-    from homeassistant.components import frontend, panel_custom
 
     if frontend.async_panel_exists(hass, PANEL_URL_PATH):
         frontend.async_remove_panel(hass, PANEL_URL_PATH, warn_if_unknown=False)

@@ -25,6 +25,7 @@ def test_integration_registers_frontend_panel_asset() -> None:
 
     assert 'FRONTEND_URL_PATH = "/api/intentional/frontend"' in source
     assert 'PANEL_URL_PATH = "intentional"' in source
+    assert 'DEPENDENCIES = ["http"]' in source
     assert "async_register_static_paths" in source
     assert "panel_custom.async_register_panel" in source
     assert 'webcomponent_name="intentional-panel"' in source
