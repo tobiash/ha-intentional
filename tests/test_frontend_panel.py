@@ -14,10 +14,22 @@ def test_frontend_panel_asset_is_bundled() -> None:
 
     assert 'customElements.define("intentional-panel"' in source
     assert '"rules/document"' in source
+    assert '`rules/id/${encodeURIComponent(selectedRuleId)}`' in source
     assert '"validate"' in source
     assert '"dry-run"' in source
     assert '"rules/history"' in source
     assert '"rules/rollback"' in source
+
+
+def test_frontend_panel_has_focused_rule_editor() -> None:
+    source = PANEL_PATH.read_text()
+
+    assert '_editorMode = "rule"' in source
+    assert 'Save Rule' in source
+    assert 'Document YAML' in source
+    assert 'extractRuleBlock' in source
+    assert 'replaceRuleBlock' in source
+    assert '_uniqueRules()' in source
 
 
 def test_integration_registers_frontend_panel_asset() -> None:

@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.4] - 2026-06-10
+
+### Changed
+- **Sidebar rule editor now uses a focused rule workflow**. The rules list is de-duplicated by authored rule id, selecting a rule opens a per-rule YAML editor, and the primary save action patches that rule instead of forcing full-document editing.
+- **New rule creation is visible and editable**. The New button opens a draft rule in the focused editor instead of silently appending YAML to the full document.
+- **Full-document YAML editing is now an explicit advanced mode** behind the Document YAML action.
+
 ## [0.7.3] - 2026-06-10
 
 ### Added

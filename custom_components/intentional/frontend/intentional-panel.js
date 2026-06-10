@@ -9,6 +9,8 @@ class IntentionalPanel extends HTMLElement {
     this._history = [];
     this._rules = [];
     this._selectedRuleId = "";
+    this._selectedRuleContents = "";
+    this._editorMode = "rule";
     this._contents = "";
     this._dirty = false;
     this._busy = false;
@@ -61,6 +63,8 @@ class IntentionalPanel extends HTMLElement {
       this._document = document;
       this._contents = document.contents || "";
       this._history = history.history || [];
+      this._selectedRuleId = "";
+      this._selectedRuleContents = "";
       this._dirty = false;
       await this._validate({ quiet: true });
     } catch (err) {
@@ -73,7 +77,7 @@ class IntentionalPanel extends HTMLElement {
 
   async _validate({ quiet = false } = {}) {
     try {
-      const validation = await this._api("POST", "validate", { contents: this._contents });
+      const validation = await this._api("POST", "validate", { contents: this._candidateContents() });
       this._validation = validation;
       this._rules = validation.normalized || [];
       this._error = quiet ? this._error : "";
@@ -94,7 +98,7 @@ class IntentionalPanel extends HTMLElement {
     this._preview = null;
     this._render();
     try {
-      this._preview = await this._api("POST", "dry-run", { contents: this._contents });
+      this._preview = await this._api("POST", "dry-run", { contents: this._candidateContents() });
       this._error = "";
     } catch (err) {
       this._error = err.message || String(err);
@@ -105,6 +109,10 @@ class IntentionalPanel extends HTMLElement {
   }
 
   async _save() {
+    if (this._editorMode === "rule" && this._selectedRuleId) {
+      await this._saveRule();
+      return;
+    }
     if (!(await this._validate())) {
       return;
     }
@@ -120,6 +128,41 @@ class IntentionalPanel extends HTMLElement {
       this._dirty = false;
       this._error = "";
       await this._loadHistory();
+    } catch (err) {
+      this._error = err.message || String(err);
+    } finally {
+      this._busy = false;
+      this._render();
+    }
+  }
+
+  async _saveRule() {
+    const selectedRuleId = this._selectedRuleId;
+    const selectedRuleContents = this._selectedRuleContents.trim();
+    if (!selectedRuleContents) {
+      this._error = "Selected rule is empty";
+      this._render();
+      return;
+    }
+    this._busy = true;
+    this._render();
+    try {
+      let saved;
+      if (selectedRuleId === "__new__") {
+        saved = await this._api("PUT", "rules/document", {
+          contents: this._candidateContents(),
+          expected_generation: this._document?.generation,
+        });
+      } else {
+        saved = await this._api("PATCH", `rules/id/${encodeURIComponent(selectedRuleId)}`, {
+          contents: selectedRuleContents,
+          expected_generation: this._document?.generation,
+        });
+      }
+      await this._load();
+      const nextId = extractRuleId(selectedRuleContents) || saved?.rule_id || selectedRuleId;
+      this._selectRule(nextId, { render: false });
+      this._error = "";
     } catch (err) {
       this._error = err.message || String(err);
     } finally {
@@ -154,14 +197,22 @@ class IntentionalPanel extends HTMLElement {
   }
 
   _newRule() {
-    const template = `\n---\n- id: new-rule\n  enabled: false\n  reason: Describe why this rule exists\n  observe:\n    input_boolean.example: true\n  intent:\n    light.example:\n      state: true\n      brightness_pct: 50\n      apply:\n        transition:\n          assert: 2s\n          change: 4s\n          withdraw: 6s\n  confidence: 0.5\n`;
-    this._contents = `${this._contents.trimEnd()}${template}`;
+    const nextNumber = this._uniqueRules().length + 1;
+    this._selectedRuleId = "__new__";
+    this._selectedRuleContents = `- id: new-rule-${nextNumber}\n  enabled: false\n  reason: Describe why this rule exists\n  observe:\n    input_boolean.example: true\n  intent:\n    light.example:\n      state: true\n      brightness_pct: 50\n      apply:\n        transition:\n          assert: 2s\n          change: 4s\n          withdraw: 6s\n  confidence: 0.5\n`;
+    this._editorMode = "rule";
     this._dirty = true;
+    this._validation = null;
+    this._preview = null;
     this._render();
   }
 
   _onInput(event) {
-    this._contents = event.target.value;
+    if (this._editorMode === "rule") {
+      this._selectedRuleContents = event.target.value;
+    } else {
+      this._contents = event.target.value;
+    }
     this._dirty = true;
     this._validation = null;
     this._preview = null;
@@ -171,33 +222,110 @@ class IntentionalPanel extends HTMLElement {
     }
   }
 
-  _selectRule(ruleId) {
-    this._selectedRuleId = ruleId;
-    const index = this._contents.indexOf(`id: ${ruleId}`);
-    const editor = this.shadowRoot.querySelector("textarea");
-    if (index >= 0 && editor) {
-      editor.focus();
-      editor.setSelectionRange(index, index + ruleId.length + 4);
+  _selectRule(ruleId, { render = true } = {}) {
+    if (this._dirty && !confirm("Discard unsaved editor changes?")) {
+      return;
     }
+    this._selectedRuleId = ruleId;
+    this._selectedRuleContents = extractRuleBlock(this._contents, ruleId);
+    this._editorMode = "rule";
+    this._dirty = false;
+    this._validation = null;
+    this._preview = null;
+    if (render) {
+      this._render();
+    }
+  }
+
+  _showDocument() {
+    if (this._dirty && !confirm("Discard unsaved editor changes?")) {
+      return;
+    }
+    this._editorMode = "document";
+    this._selectedRuleId = "";
+    this._selectedRuleContents = "";
+    this._dirty = false;
     this._render();
   }
 
   _ruleStatus(rule) {
     if (rule.enabled === false) return "disabled";
+    if (rule.count > 1) return `${rule.count} targets`;
     if (rule.target) return rule.target;
     return "multi-target or effect";
   }
 
+  _candidateContents() {
+    if (this._editorMode !== "rule" || !this._selectedRuleId) {
+      return this._contents;
+    }
+    const ruleContents = this._selectedRuleContents.trimEnd();
+    if (this._selectedRuleId === "__new__") {
+      return `${this._contents.trimEnd()}\n---\n${ruleContents}\n`;
+    }
+    return replaceRuleBlock(this._contents, this._selectedRuleId, `${ruleContents}\n`);
+  }
+
+  _uniqueRules() {
+    const rules = new Map();
+    for (const rule of this._rules) {
+      const existing = rules.get(rule.id);
+      if (existing) {
+        existing.count += 1;
+        continue;
+      }
+      rules.set(rule.id, { ...rule, count: 1 });
+    }
+    return [...rules.values()];
+  }
+
   _renderRules() {
-    if (!this._rules.length) {
+    const rules = this._uniqueRules();
+    if (!rules.length) {
       return `<div class="empty">No parsed rules yet. Validate the document to refresh this list.</div>`;
     }
-    return this._rules.map((rule) => `
+    return rules.map((rule) => `
       <button class="rule ${this._selectedRuleId === rule.id ? "selected" : ""}" data-rule-id="${escapeHtml(rule.id)}">
         <span class="rule-title">${escapeHtml(rule.id)}</span>
         <span class="rule-meta">${escapeHtml(this._ruleStatus(rule))}</span>
       </button>
     `).join("");
+  }
+
+  _renderEditor() {
+    const isRuleMode = this._editorMode === "rule";
+    const title = isRuleMode ? (this._selectedRuleId === "__new__" ? "New Rule" : "Rule") : "Document YAML";
+    const value = isRuleMode ? this._selectedRuleContents : this._contents;
+    const empty = isRuleMode && !this._selectedRuleId;
+    return `
+      <section class="card editor">
+        <div class="card-header">
+          <div>
+            <h2>${escapeHtml(title)}</h2>
+            <p>${escapeHtml(this._editorHelpText())}</p>
+          </div>
+          <div class="actions">
+            <button class="secondary small" data-action="show-document">Document YAML</button>
+            <button class="secondary small" data-action="validate">Validate</button>
+            <button class="secondary small" data-action="dry-run">Dry-run</button>
+          </div>
+        </div>
+        ${empty ? `<div class="empty focus-empty">Select a rule on the left, or create one with New.</div>` : `<textarea spellcheck="false">${escapeHtml(value)}</textarea>`}
+      </section>
+    `;
+  }
+
+  _editorHelpText() {
+    if (this._editorMode !== "rule") {
+      return "Advanced bulk edit of the complete storage document.";
+    }
+    if (this._selectedRuleId === "__new__") {
+      return "Edit this rule, then Save to append it to the storage document.";
+    }
+    if (!this._selectedRuleId) {
+      return "Focused rule editor.";
+    }
+    return `Editing ${this._selectedRuleId}. Save patches only this rule.`;
   }
 
   _renderHistory() {
@@ -236,6 +364,7 @@ class IntentionalPanel extends HTMLElement {
     if (!this.shadowRoot) return;
     const version = this._health?.version ? `v${this._health.version}` : "";
     const generation = this._document?.generation ? this._document.generation.slice(0, 12) : "not loaded";
+    const saveLabel = this._editorMode === "rule" ? "Save Rule" : "Save Document";
     this.shadowRoot.innerHTML = `
       <style>${styles}</style>
       <main class="${this._narrow ? "narrow" : ""}">
@@ -246,7 +375,7 @@ class IntentionalPanel extends HTMLElement {
           </div>
           <div class="actions">
             <button class="secondary" data-action="reload" ${this._busy ? "disabled" : ""}>Reload</button>
-            <button data-action="save" ${this._busy || !this._dirty ? "disabled" : ""}>Save</button>
+            <button data-action="save" ${this._busy || !this._dirty ? "disabled" : ""}>${saveLabel}</button>
           </div>
         </header>
         ${this._error ? `<div class="banner">${escapeHtml(this._error)}</div>` : ""}
@@ -258,16 +387,7 @@ class IntentionalPanel extends HTMLElement {
             </div>
             ${this._renderRules()}
           </aside>
-          <section class="card editor">
-            <div class="card-header">
-              <h2>Document</h2>
-              <div class="actions">
-                <button class="secondary small" data-action="validate">Validate</button>
-                <button class="secondary small" data-action="dry-run">Dry-run</button>
-              </div>
-            </div>
-            <textarea spellcheck="false">${escapeHtml(this._contents)}</textarea>
-          </section>
+          ${this._renderEditor()}
           <aside class="card inspector">
             <h2>Validation</h2>
             ${this._renderValidation()}
@@ -297,7 +417,57 @@ class IntentionalPanel extends HTMLElement {
     if (action === "validate") this._validate();
     if (action === "dry-run") this._dryRun();
     if (action === "new-rule") this._newRule();
+    if (action === "show-document") this._showDocument();
   }
+}
+
+function extractRuleId(contents) {
+  const match = String(contents || "").match(/^\s*-\s+id:\s*([^\n#]+)/m);
+  return match ? match[1].trim().replace(/^['"]|['"]$/g, "") : "";
+}
+
+function extractRuleBlock(contents, ruleId) {
+  const bounds = findRuleBlock(contents, ruleId);
+  if (!bounds) return "";
+  const lines = String(contents || "").split("\n");
+  return lines.slice(bounds.start, bounds.end).join("\n").trimEnd() + "\n";
+}
+
+function replaceRuleBlock(contents, ruleId, replacement) {
+  const bounds = findRuleBlock(contents, ruleId);
+  if (!bounds) return contents;
+  const lines = String(contents || "").split("\n");
+  const nextLines = [
+    ...lines.slice(0, bounds.start),
+    ...String(replacement).trimEnd().split("\n"),
+    ...lines.slice(bounds.end),
+  ];
+  return nextLines.join("\n").trimEnd() + "\n";
+}
+
+function findRuleBlock(contents, ruleId) {
+  const lines = String(contents || "").split("\n");
+  const idPattern = new RegExp(`^\\s*-\\s+id:\\s*['\"]?${escapeRegExp(ruleId)}['\"]?\\s*(?:#.*)?$`);
+  let start = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (idPattern.test(lines[index])) {
+      start = index;
+      break;
+    }
+  }
+  if (start < 0) return null;
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (/^---\s*$/.test(lines[index]) || /^\s*-\s+id:\s*/.test(lines[index])) {
+      end = index;
+      break;
+    }
+  }
+  return { start, end };
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function escapeHtml(value) {
