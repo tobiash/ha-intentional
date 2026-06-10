@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import voluptuous as vol
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, State
@@ -33,9 +34,11 @@ from homeassistant.helpers.typing import ConfigType
 from ._engine import Engine, RuleLoadError
 from ._engine.ha_adapter import (
     ServicePlanSignature,
+    clear_pending_state_drift,
     clear_state_change_pulses,
     emit_manual_override_for_state_drift,
     manual_set_from_service_data,
+    pending_drift_targets,
     pulse_state_change,
     scene_activation_plan,
     service_calls_for_resolved_target,
@@ -67,6 +70,7 @@ PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH, Platform.BUTTON]
 MANUAL_OVERRIDE_TTL_SECONDS = 7200
 WITHDRAW_TO_OFF_DOMAINS = frozenset({"light", "switch", "input_boolean", "fan", "siren"})
 DRIFT_TRANSITION_GRACE_MS = 2_000
+DRIFT_CONFIRMATION_MS = 1_500
 
 
 @dataclass(frozen=True)
@@ -76,12 +80,13 @@ class _ResolvedTargetState:
     transition_ms: int
     transition_withdraw_ms: int | None
 
-# Declaring http as a dependency tells HA to ensure hass.http is
-# available before this integration's setup runs. This is the
-# official HA pattern for integrations that register HTTP views.
-# The register_api call is additionally guarded so the integration
-# still works in headless setups where http might not be loaded.
-DEPENDENCIES = ["http"]
+# Declaring http/frontend/panel_custom as dependencies tells HA to ensure API
+# and UI helpers are available before this integration's setup runs. The setup
+# still guards UI registration so headless test environments can import safely.
+DEPENDENCIES = ["http", "frontend", "panel_custom"]
+FRONTEND_URL_PATH = "/api/intentional/frontend"
+PANEL_URL_PATH = "intentional"
+FRONTEND_STATIC_REGISTERED = "frontend_static_registered"
 
 # Service schemas
 FIRE_SERVICE_SCHEMA = vol.Schema(
@@ -277,6 +282,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _last_applied_targets: dict[str, ServicePlanSignature] = {}
     _last_resolved_targets: dict[str, _ResolvedTargetState] = {}
     _drift_suppressed_until: dict[str, int] = {}
+    _drift_candidates: dict[str, Any] = {}
     # Track state-change pulses that should stay true through one apply cycle.
     _state_change_pulses: set[str] = set()
     # Event used to signal the tick loop to stop. We use an event rather
@@ -301,6 +307,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             sync_time_context_into_engine(engine)
             _sync_state_into_engine(hass, engine)
             engine.evaluate_all()
+            _confirm_pending_state_drift(
+                hass,
+                engine,
+                _last_applied_targets,
+                _drift_suppressed_until,
+                _drift_candidates,
+            )
             engine.tick(tick_interval_ms)
             # Activate any newly-firing scene rules
             _active_scenes = await _activate_scene_rules(
@@ -314,6 +327,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _last_applied_targets,
                 _last_resolved_targets,
                 _drift_suppressed_until,
+                _drift_candidates,
             )
             if _state_change_pulses:
                 clear_state_change_pulses(engine, _state_change_pulses)
@@ -348,6 +362,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if getattr(hass, "http", None) is not None:
         from .api import register_api
         register_api(hass)
+        await _register_frontend_panel(hass)
+        entry.async_on_unload(lambda: _remove_frontend_panel(hass))
 
     # Subscribe to state changes to keep engine in sync
     entry.async_on_unload(
@@ -358,6 +374,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 engine,
                 _last_applied_targets,
                 _drift_suppressed_until,
+                _drift_candidates,
                 _state_change_pulses,
             ),
         )
@@ -373,6 +390,41 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN].pop(entry.entry_id, None)
         hass.data[DOMAIN].pop(rule_store_key(entry.entry_id), None)
     return unload_ok
+
+
+async def _register_frontend_panel(hass: HomeAssistant) -> None:
+    """Serve and register the Intentional rule editor panel."""
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    if not domain_data.get(FRONTEND_STATIC_REGISTERED):
+        frontend_path = Path(__file__).parent / "frontend"
+        await hass.http.async_register_static_paths([
+            StaticPathConfig(FRONTEND_URL_PATH, str(frontend_path), True),
+        ])
+        domain_data[FRONTEND_STATIC_REGISTERED] = True
+
+    from homeassistant.components import frontend, panel_custom
+
+    if frontend.async_panel_exists(hass, PANEL_URL_PATH):
+        frontend.async_remove_panel(hass, PANEL_URL_PATH, warn_if_unknown=False)
+
+    await panel_custom.async_register_panel(
+        hass,
+        frontend_url_path=PANEL_URL_PATH,
+        webcomponent_name="intentional-panel",
+        sidebar_title="Intentional",
+        sidebar_icon="mdi:target",
+        module_url=f"{FRONTEND_URL_PATH}/intentional-panel.js",
+        config={"domain": DOMAIN},
+        require_admin=True,
+        config_panel_domain=DOMAIN,
+    )
+
+
+def _remove_frontend_panel(hass: HomeAssistant) -> None:
+    """Remove the Intentional rule editor panel on unload."""
+    from homeassistant.components import frontend
+
+    frontend.async_remove_panel(hass, PANEL_URL_PATH, warn_if_unknown=False)
 
 
 async def _maybe_install_starter_rules(hass: HomeAssistant, rule_dir: str) -> int:
@@ -477,6 +529,7 @@ def _on_ha_state_change_factory(
     engine: Engine,
     last_applied: dict[str, ServicePlanSignature] | None = None,
     drift_suppressed_until: dict[str, int] | None = None,
+    drift_candidates: dict[str, Any] | None = None,
     state_change_pulses: set[str] | None = None,
 ):
     """Return a state_changed listener that pushes updates into the engine."""
@@ -499,12 +552,43 @@ def _on_ha_state_change_factory(
                 ttl_ms=MANUAL_OVERRIDE_TTL_SECONDS * 1000,
                 now_ms=_monotonic_ms(),
                 drift_suppressed_until=drift_suppressed_until,
+                drift_candidates=drift_candidates,
+                confirmation_ms=DRIFT_CONFIRMATION_MS,
             )
         # Re-evaluate immediately for snappy response
         sync_time_context_into_engine(engine)
         engine.evaluate_all()
 
     return _listener
+
+
+def _confirm_pending_state_drift(
+    hass: HomeAssistant,
+    engine: Engine,
+    last_applied: dict[str, ServicePlanSignature],
+    drift_suppressed_until: dict[str, int],
+    drift_candidates: dict[str, Any],
+) -> None:
+    """Promote only stable observed drift to manual override."""
+    states = getattr(hass, "states", None)
+    if states is None:
+        return
+    now_ms = _monotonic_ms()
+    for target in pending_drift_targets(drift_candidates):
+        state = states.get(target)
+        if state is None:
+            clear_pending_state_drift(drift_candidates, target)
+            continue
+        emit_manual_override_for_state_drift(
+            engine,
+            last_applied,
+            state,
+            ttl_ms=MANUAL_OVERRIDE_TTL_SECONDS * 1000,
+            now_ms=now_ms,
+            drift_suppressed_until=drift_suppressed_until,
+            drift_candidates=drift_candidates,
+            confirmation_ms=DRIFT_CONFIRMATION_MS,
+        )
 
 
 async def _activate_scene_rules(
@@ -581,6 +665,7 @@ async def _apply_resolved_targets(
     last_applied: dict[str, ServicePlanSignature],
     last_resolved: dict[str, _ResolvedTargetState] | None = None,
     drift_suppressed_until: dict[str, int] | None = None,
+    drift_candidates: dict[str, Any] | None = None,
 ) -> None:
     """Apply resolved target intents to HA entities via service calls."""
     if last_resolved is None:
@@ -630,6 +715,8 @@ async def _apply_resolved_targets(
                 break
         else:
             last_applied[target] = signature
+            if drift_candidates is not None:
+                clear_pending_state_drift(drift_candidates, target)
             _suppress_drift_during_transition(
                 drift_suppressed_until,
                 target,
@@ -674,6 +761,8 @@ async def _apply_resolved_targets(
                 break
         else:
             last_applied[stale_target] = signature
+            if drift_candidates is not None:
+                clear_pending_state_drift(drift_candidates, stale_target)
             _suppress_drift_during_transition(
                 drift_suppressed_until,
                 stale_target,

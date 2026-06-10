@@ -81,11 +81,14 @@ def test_rule_view_supports_get_put_delete() -> None:
 
 def test_rule_history_views_have_correct_urls() -> None:
     from custom_components.intentional.api import (
+        IntentionalRuleDocumentView,
         IntentionalRuleHistoryGenerationView,
         IntentionalRuleHistoryView,
         IntentionalRuleRollbackView,
     )
 
+    assert IntentionalRuleDocumentView.url == "/api/intentional/rules/document"
+    assert IntentionalRuleDocumentView.requires_auth is True
     assert IntentionalRuleHistoryView.url == "/api/intentional/rules/history"
     assert IntentionalRuleHistoryView.requires_auth is True
     assert "{generation" in IntentionalRuleHistoryGenerationView.url
@@ -163,6 +166,7 @@ def test_all_views_require_auth() -> None:
         IntentionalExplainView,
         IntentionalHealthView,
         IntentionalReloadView,
+        IntentionalRuleDocumentView,
         IntentionalRuleHistoryGenerationView,
         IntentionalRuleHistoryView,
         IntentionalRuleRollbackView,
@@ -174,6 +178,7 @@ def test_all_views_require_auth() -> None:
     for view_cls in [
         IntentionalHealthView,
         IntentionalRulesView,
+        IntentionalRuleDocumentView,
         IntentionalRuleHistoryView,
         IntentionalRuleHistoryGenerationView,
         IntentionalRuleRollbackView,
@@ -185,6 +190,24 @@ def test_all_views_require_auth() -> None:
         assert view_cls.requires_auth is True, (
             f"{view_cls.__name__} must require auth"
         )
+
+
+def test_rule_document_response_has_no_file_semantics() -> None:
+    from custom_components.intentional.api import _rule_document_response
+
+    store = SimpleNamespace(
+        contents="- id: one\n  when: sensor.x == 'on'\n  emit:\n    target: light.x\n",
+        generation="abc123",
+        list_rules=lambda: [{"id": "one"}],
+    )
+
+    assert _rule_document_response(store) == {
+        "contents": store.contents,
+        "size": len(store.contents.encode("utf-8")),
+        "generation": "abc123",
+        "rule_count": 1,
+        "source": "storage",
+    }
 
 
 # ── Error format consistency ───────────────────────────────────────
@@ -242,6 +265,9 @@ def test_register_api_registers_history_before_filename_route() -> None:
     assert registered.index("/api/intentional/rules/history") < registered.index(
         "/api/intentional/rules/{filename:.+}"
     )
+    assert registered.index("/api/intentional/rules/document") < registered.index(
+        "/api/intentional/rules/{filename:.+}"
+    )
 
 
 # ── URL pattern coverage ────────────────────────────────────────────
@@ -253,6 +279,7 @@ def test_url_patterns_are_unique() -> None:
         IntentionalExplainView,
         IntentionalHealthView,
         IntentionalReloadView,
+        IntentionalRuleDocumentView,
         IntentionalRuleHistoryGenerationView,
         IntentionalRuleHistoryView,
         IntentionalRuleRollbackView,
@@ -264,6 +291,7 @@ def test_url_patterns_are_unique() -> None:
     urls = [
         IntentionalHealthView.url,
         IntentionalRulesView.url,
+        IntentionalRuleDocumentView.url,
         IntentionalRuleHistoryView.url,
         IntentionalRuleHistoryGenerationView.url,
         IntentionalRuleRollbackView.url,
@@ -281,6 +309,7 @@ def test_all_urls_under_api_intentional() -> None:
         IntentionalExplainView,
         IntentionalHealthView,
         IntentionalReloadView,
+        IntentionalRuleDocumentView,
         IntentionalRuleHistoryGenerationView,
         IntentionalRuleHistoryView,
         IntentionalRuleRollbackView,
@@ -292,6 +321,7 @@ def test_all_urls_under_api_intentional() -> None:
     for view_cls in [
         IntentionalHealthView,
         IntentionalRulesView,
+        IntentionalRuleDocumentView,
         IntentionalRuleHistoryView,
         IntentionalRuleHistoryGenerationView,
         IntentionalRuleRollbackView,

@@ -17,6 +17,15 @@ Endpoints
 - ``GET    /api/intentional/rules``
     List all rule files in the configured rule directory.
 
+- ``GET    /api/intentional/rules/document``
+    Read the storage-backed authored rule document.
+
+- ``PUT    /api/intentional/rules/document``
+    Replace the storage-backed authored rule document.
+
+- ``DELETE /api/intentional/rules/document``
+    Clear the storage-backed authored rule document.
+
 - ``GET    /api/intentional/rules/<filename>``
     Read a rule file's contents.
 
@@ -195,6 +204,60 @@ class IntentionalRulesView(HomeAssistantView):
             "count": len(files),
             "files": files,
         })
+
+
+class IntentionalRuleDocumentView(HomeAssistantView):
+    """GET / PUT / DELETE the storage-backed authored rule document."""
+
+    url = "/api/intentional/rules/document"
+    name = "api:intentional:rule_document"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        store = _rule_store_for(hass)
+        if store is None:
+            return _error("Rule document is only available for storage-backed rules", "not_available", 404)
+        return web.json_response(_rule_document_response(store))
+
+    async def put(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        store = _rule_store_for(hass)
+        if store is None:
+            return _error("Rule document is only available for storage-backed rules", "not_available", 404)
+        try:
+            data = await request.json()
+        except (ValueError, json.JSONDecodeError) as err:
+            return _error(f"Invalid JSON: {err}", "bad_request", 400)
+        contents = data.get("contents")
+        if not isinstance(contents, str):
+            return _error("Request body must include string `contents`", "bad_request", 400)
+        expected_generation = data.get("expected_generation")
+        if expected_generation is not None and expected_generation != store.generation:
+            return web.json_response({"error": "generation_mismatch"}, status=409)
+        err = await store.async_write(RULE_STORE_FILENAME, contents)
+        if err:
+            return _error(err, "validation_failed", 400)
+        await hass.services.async_call(DOMAIN, "reload", blocking=True)
+        return web.json_response({"status": "saved", **_rule_document_response(store)}, status=200)
+
+    async def delete(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        store = _rule_store_for(hass)
+        if store is None:
+            return _error("Rule document is only available for storage-backed rules", "not_available", 404)
+        try:
+            data = await request.json()
+        except (ValueError, json.JSONDecodeError):
+            data = {}
+        expected_generation = data.get("expected_generation")
+        if expected_generation is not None and expected_generation != store.generation:
+            return web.json_response({"error": "generation_mismatch"}, status=409)
+        err = await store.async_delete(RULE_STORE_FILENAME)
+        if err:
+            return _error(err, "delete_failed", 500)
+        await hass.services.async_call(DOMAIN, "reload", blocking=True)
+        return web.json_response({"status": "deleted", **_rule_document_response(store)})
 
 
 class IntentionalRuleView(HomeAssistantView):
@@ -683,6 +746,16 @@ def _rule_to_api_dict(rule: Any) -> dict[str, Any]:
     }
 
 
+def _rule_document_response(store: StorageRuleStore) -> dict[str, Any]:
+    return {
+        "contents": store.contents,
+        "size": len(store.contents.encode("utf-8")),
+        "generation": store.generation,
+        "rule_count": len(store.list_rules()),
+        "source": "storage",
+    }
+
+
 # ── Registration ───────────────────────────────────────────────────
 
 
@@ -695,6 +768,7 @@ def register_api(hass: HomeAssistant) -> None:
     views = [
         IntentionalHealthView,
         IntentionalRulesView,
+        IntentionalRuleDocumentView,
         IntentionalRuleHistoryView,
         IntentionalRuleHistoryGenerationView,
         IntentionalRuleRollbackView,

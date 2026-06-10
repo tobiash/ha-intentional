@@ -1062,6 +1062,26 @@ class TestManualIntents:
         assert resolved.winning_intent.authority is Authority.USER
         assert resolved.value == {"brightness_pct": 100}
 
+    def test_emit_user_intent_replaces_existing_manual_intent_for_target(self) -> None:
+        engine = Engine()
+        engine.emit_user_intent(
+            target="light.x",
+            set={"brightness_pct": 100},
+            ttl_ms=2000,
+            reason="Manual HA state change",
+        )
+        engine.emit_user_intent(
+            target="light.x",
+            set={"brightness_pct": 40},
+            ttl_ms=2000,
+            reason="Manual HA state change",
+        )
+
+        intents = engine.list_active_intents("light.x")
+        assert len(intents) == 1
+        assert intents[0].authority is Authority.USER
+        assert engine.resolve("light.x").value == {"brightness_pct": 40}
+
     def test_clear_user_intents_only_removes_manual_intents(self) -> None:
         engine = Engine()
         engine.load_rules([_rule("r1", 'sensor.x.state == "on"', set={"state": "on"})])

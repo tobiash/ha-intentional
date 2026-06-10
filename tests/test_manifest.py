@@ -128,6 +128,12 @@ def test_manifest_required_fields() -> None:
     assert not missing, f"manifest.json is missing required fields: {missing}"
 
 
+def test_manifest_declares_frontend_dependencies() -> None:
+    manifest = _read_manifest()
+
+    assert {"frontend", "http", "panel_custom"}.issubset(manifest["dependencies"])
+
+
 def test_manifest_version_is_semver() -> None:
     manifest = _read_manifest()
     assert re.fullmatch(r"\d+\.\d+\.\d+", manifest["version"]), (

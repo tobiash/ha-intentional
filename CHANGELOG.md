@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.3] - 2026-06-10
+
+### Added
+- **Storage-native authored rule document API** at `/api/intentional/rules/document`, so editors can read/write the HA storage document without synthetic file semantics.
+- **Bundled Intentional sidebar panel** for storage-backed rule editing. The first version provides a rule list, YAML document editor, validation, dry-run preview, save, and rollback history.
+- **Repo-local AI agent skill** at `.agents/skills/intentional-api/SKILL.md` documenting safe use of the Intentional HTTP API for inspection, edits, dry-run, history, rollback, and debugging.
+
+### Fixed
+- **Manual override drift handling**. HA state drift is now observed first and only promoted to a user override after it remains stable beyond a confirmation window outside owned transition grace periods. Promoted user/manual intents for the same target replace the previous target-scoped manual override instead of accumulating duplicate active intents.
+
 ## [0.7.2] - 2026-06-08
 
 ### Added

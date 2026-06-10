@@ -79,9 +79,9 @@ What happens:
 - **Dwell and lifecycle**: `observe.for`, target `ttl`, target `linger`, and restart-safe lifecycle persistence.
 - **Transition policies**: `apply.transition.assert`, `change`, and `withdraw` for HA-native light transitions.
 - **Generated values**: sample durable fields, such as RGB colors, on fixed or random intervals.
-- **Manual override handling**: state drift on managed targets becomes a temporary user intent.
-- **HA UI controls**: global automation switch, per-rule enable switches, reload, and clear-manual-override controls.
-- **YAML editor** in the integration Configure panel, backed by Home Assistant storage.
+- **Manual override handling**: stable state drift on managed targets becomes a temporary user intent.
+- **HA UI controls**: sidebar rule editor, global automation switch, per-rule enable switches, reload, and clear-manual-override controls.
+- **Storage-backed YAML editor** for validation, dry-run preview, save, and rollback history.
 - **Agent-friendly HTTP API** for schema, validation, dry run, world model, stored rules, and explanations.
 - **Hot reload** after rule edits.
 - **HACS installable** with CI-covered bundle sync and Home Assistant integration tests.
@@ -109,8 +109,9 @@ Restart Home Assistant, then add the `Intentional` integration from Settings.
 ## Stored Rules And YAML
 
 Intentional stores authored rules in Home Assistant storage. YAML remains the
-authoring, import, export, API, and Configure-panel format, but live YAML files
-are no longer the source of truth.
+authoring, import, export, API, and advanced-editor format, but live YAML files
+are no longer the source of truth. The Intentional sidebar panel edits the
+storage document directly.
 
 On first setup, if the storage document does not exist yet, Intentional imports
 existing YAML files from the configured rule directory, for example:
@@ -182,6 +183,7 @@ Generated values are held until the next interval, persisted across restarts, an
 
 Intentional exposes entities for common control tasks:
 
+- `Intentional` sidebar panel edits the storage-backed rule document with validation, dry-run preview, save, and rollback history.
 - `switch.intentional_automation_enabled` globally enables or disables rule evaluation and automation effects.
 - `switch.intentional_rule_<rule_id>` toggles an authored rule and persists `enabled: true/false` in HA storage.
 - `button.intentional_reload_rules` reloads the stored rule document.

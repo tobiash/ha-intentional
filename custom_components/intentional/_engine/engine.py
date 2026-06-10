@@ -215,6 +215,7 @@ class Engine:
         reason: str = "Manual user action",
     ) -> Intent:
         """Inject a user-authority intent. Used for manual overrides."""
+        self.clear_user_intents(target=target)
         intent = Intent(
             target=target,
             set=set or {},

@@ -14,10 +14,13 @@ Long-lived tokens are created in Home Assistant under Profile -> Long-Lived Acce
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/intentional/health` | Integration status, version, rule count, active intent count. |
-| `GET` | `/api/intentional/rules` | List rule documents. Storage-backed installs expose `stored-rules.yaml`. |
-| `GET` | `/api/intentional/rules/{filename}` | Read a rule document. |
-| `PUT` | `/api/intentional/rules/{filename}` | Validate, write, and reload a rule document. |
-| `DELETE` | `/api/intentional/rules/{filename}` | Clear/delete a rule document and reload. |
+| `GET` | `/api/intentional/rules/document` | Read the storage-backed authored rule document. |
+| `PUT` | `/api/intentional/rules/document` | Validate, write, and reload the storage-backed authored rule document. |
+| `DELETE` | `/api/intentional/rules/document` | Clear the storage-backed authored rule document and reload. |
+| `GET` | `/api/intentional/rules` | Compatibility list endpoint. Storage-backed installs expose `stored-rules.yaml`. |
+| `GET` | `/api/intentional/rules/{filename}` | Compatibility file-shaped read endpoint. |
+| `PUT` | `/api/intentional/rules/{filename}` | Compatibility file-shaped write endpoint. |
+| `DELETE` | `/api/intentional/rules/{filename}` | Compatibility file-shaped clear/delete endpoint. |
 | `PATCH` | `/api/intentional/rules/id/{rule_id}` | Generation-guarded update by authored rule ID. |
 | `GET` | `/api/intentional/rules/history` | List previous storage-backed rule document generations. |
 | `GET` | `/api/intentional/rules/history/{generation}` | Read one previous rule document generation. |
@@ -49,46 +52,63 @@ GET /api/intentional/health
 ## Rule Documents
 
 Rules are stored in Home Assistant storage. Existing YAML files are imported on
-first setup if no stored rule document exists. For compatibility, the API still
-uses file-shaped endpoints; a storage-backed install exposes a synthetic
-`stored-rules.yaml` document.
+first setup if no stored rule document exists. The primary editing surface is a
+single storage-backed authored rule document, not a filesystem file.
 
-List documents:
-
-```http
-GET /api/intentional/rules
-```
-
-```json
-{
-  "rule_dir": "/config/intentional/rules",
-  "count": 2,
-  "files": [
-    {"filename": "stored-rules.yaml", "size": "812", "generation": "...", "source": "storage"}
-  ]
-}
-```
+The bundled Intentional sidebar panel uses this endpoint for its document
+editor, validation, dry-run preview, and history/rollback controls.
 
 Read the storage document:
 
 ```http
-GET /api/intentional/rules/stored-rules.yaml
+GET /api/intentional/rules/document
+```
+
+```json
+{
+  "contents": "- id: office-light\n  observe:\n    binary_sensor.office_occupancy: on\n  intent:\n    light.office:\n      state: on\n",
+  "size": 118,
+  "generation": "...",
+  "rule_count": 1,
+  "source": "storage"
+}
 ```
 
 Write the storage document:
 
 ```http
-PUT /api/intentional/rules/stored-rules.yaml
+PUT /api/intentional/rules/document
 ```
 
 ```json
 {
+  "expected_generation": "current-generation",
   "contents": "- id: office-light\n  observe:\n    binary_sensor.office_occupancy: on\n  intent:\n    light.office:\n      state: on\n"
+}
+```
+
+Clear the storage document:
+
+```http
+DELETE /api/intentional/rules/document
+```
+
+```json
+{
+  "expected_generation": "current-generation"
 }
 ```
 
 The integration validates YAML before writing to HA storage and calls
 `intentional.reload` after a successful write or delete.
+
+`expected_generation` is optional for full-document writes/deletes, but editors
+should send it to avoid overwriting concurrent changes. A stale generation
+returns `409` with `generation_mismatch`.
+
+The older `/api/intentional/rules` and `/api/intentional/rules/{filename}`
+routes remain for compatibility with clients that still expect file-shaped rule
+documents.
 
 ## Patch By Rule ID
 
@@ -161,6 +181,17 @@ recorded in history, so a rollback can itself be undone.
 `GET /api/intentional/state` returns active intents grouped by target plus resolved values.
 
 `GET /api/intentional/explain/{target}` returns the active intents, resolved value, winning intent, rule firing state, and modifier details for one target.
+
+## Manual Drift Overrides
+
+Intentional treats HA state changes on managed targets as observations first. A
+state mismatch is promoted to a `USER` manual override only after it remains
+stable beyond the confirmation window and is not inside an owned transition
+grace period. This avoids treating HA transition frames, device-side clamping, or
+integration echo lag as user intent.
+
+When a drift observation is promoted, it replaces any existing manual override
+for that target instead of stacking duplicate user intents.
 
 ## Schema
 

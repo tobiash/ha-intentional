@@ -1403,31 +1403,73 @@ def emit_manual_override_for_state_drift(
     ttl_ms: int,
     now_ms: int | None = None,
     drift_suppressed_until: dict[str, int] | None = None,
+    drift_candidates: dict[str, tuple[int, FrozenValue]] | None = None,
+    confirmation_ms: int = 0,
     reason: str = "Manual HA state change",
 ) -> bool:
     """Emit a USER intent when a managed target drifts from the applied plan."""
+    entity_id = state.entity_id
     if drift_suppressed_until is not None:
-        suppress_until = drift_suppressed_until.get(state.entity_id)
+        suppress_until = drift_suppressed_until.get(entity_id)
         if suppress_until is not None:
             if now_ms is None:
                 raise ValueError("now_ms is required with drift_suppressed_until")
             if now_ms < suppress_until:
+                if drift_candidates is not None:
+                    drift_candidates.pop(entity_id, None)
                 return False
-            drift_suppressed_until.pop(state.entity_id, None)
-    if not invalidate_service_plan_for_state_change(last_applied, state):
+            drift_suppressed_until.pop(entity_id, None)
+    plan = last_applied.get(entity_id)
+    if plan is None:
+        if drift_candidates is not None:
+            drift_candidates.pop(entity_id, None)
         return False
-    if not engine.has_active_target(state.entity_id):
+    if service_plan_matches_state(plan, state):
+        if drift_candidates is not None:
+            drift_candidates.pop(entity_id, None)
+        return False
+    if not engine.has_active_target(entity_id):
+        if drift_candidates is not None:
+            drift_candidates.pop(entity_id, None)
         return False
     set_dict = manual_set_from_state_object(state)
     if not set_dict:
+        if drift_candidates is not None:
+            drift_candidates.pop(entity_id, None)
         return False
+    if drift_candidates is not None and confirmation_ms > 0:
+        if now_ms is None:
+            raise ValueError("now_ms is required with drift_candidates")
+        candidate_signature = _freeze_signature_value(set_dict)
+        candidate = drift_candidates.get(entity_id)
+        if candidate is None or candidate[1] != candidate_signature:
+            drift_candidates[entity_id] = (now_ms, candidate_signature)
+            return False
+        first_seen_ms, _signature = candidate
+        if now_ms - first_seen_ms < confirmation_ms:
+            return False
+        drift_candidates.pop(entity_id, None)
+    last_applied.pop(entity_id, None)
     engine.emit_user_intent(
-        target=state.entity_id,
+        target=entity_id,
         set=set_dict,
         ttl_ms=ttl_ms,
         reason=reason,
     )
     return True
+
+
+def pending_drift_targets(drift_candidates: dict[str, tuple[int, FrozenValue]]) -> tuple[str, ...]:
+    """Return targets with unconfirmed drift observations."""
+    return tuple(sorted(drift_candidates))
+
+
+def clear_pending_state_drift(
+    drift_candidates: dict[str, tuple[int, FrozenValue]],
+    target: str,
+) -> None:
+    """Forget any unconfirmed drift observation for a target."""
+    drift_candidates.pop(target, None)
 
 
 def service_plan_matches_state(plan: ServicePlanSignature, state: Any) -> bool:
