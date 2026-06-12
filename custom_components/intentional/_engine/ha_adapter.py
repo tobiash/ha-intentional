@@ -357,6 +357,8 @@ def manual_set_from_service_data(data: dict[str, Any]) -> dict[str, Any]:
 
 def _add_light_turn_fields(service_data: dict[str, Any], value: dict[str, Any]) -> None:
     for key, val in value.items():
+        if val is None:
+            continue
         if key in {"state", "update_entity"}:
             continue
         if key in LIGHT_BRIGHTNESS_FIELDS or key in LIGHT_COLOR_FIELDS:
@@ -364,12 +366,12 @@ def _add_light_turn_fields(service_data: dict[str, Any], value: dict[str, Any]) 
         service_data[key] = val
 
     for key in LIGHT_BRIGHTNESS_FIELDS:
-        if key in value:
+        if key in value and value[key] is not None:
             service_data[key] = value[key]
             break
 
     for key in LIGHT_COLOR_FIELDS:
-        if key in value:
+        if key in value and value[key] is not None:
             service_data[LIGHT_FIELD_ALIASES.get(key, key)] = value[key]
             break
 

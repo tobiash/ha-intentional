@@ -1480,6 +1480,30 @@ def test_light_service_payload_uses_single_brightness_and_color_descriptor() -> 
     )
 
 
+def test_light_service_payload_omits_none_optional_fields() -> None:
+    from intentional.ha_adapter import service_call_for_resolved_target
+
+    call = service_call_for_resolved_target(
+        "light.h6046",
+        {
+            "state": "on",
+            "brightness_pct": 35,
+            "rgb_color": [255, 150, 90],
+            "effect": None,
+        },
+    )
+
+    assert call == (
+        "light",
+        "turn_on",
+        {
+            "entity_id": "light.h6046",
+            "brightness_pct": 35,
+            "rgb_color": [255, 150, 90],
+        },
+    )
+
+
 def test_update_entity_appends_homeassistant_update_after_target_service() -> None:
     from intentional.ha_adapter import service_calls_for_resolved_target
 
