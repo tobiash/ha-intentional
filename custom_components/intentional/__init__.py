@@ -284,7 +284,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # frequently, so identical resolved values should not produce repeated HA
     # service calls.
     _last_applied_targets: dict[str, ServicePlanSignature] = {}
-    _last_resolved_targets: dict[str, _ResolvedTargetState] = {}
+    _last_resolved_targets: dict[str, _ResolvedTargetState] = _restore_pending_withdraws(
+        lifecycle_records if isinstance(lifecycle_records, dict) else None,
+        linger_rule_ids={rule.id for rule in initial_rules if rule.linger_ms},
+        now_ms=engine.now_ms(),
+    )
     _drift_suppressed_until: dict[str, int] = {}
     _drift_candidates: dict[str, Any] = {}
     _service_failure_backoff: dict[tuple[str, ServicePlanSignature], int] = {}
@@ -350,7 +354,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 ):
                     _last_applied_targets.pop(stale_target, None)
             # Push resolved values to entities
-            await store.async_save(engine.export_lifecycle_records())
+            lifecycle_snapshot = engine.export_lifecycle_records()
+            lifecycle_snapshot["pending_withdraws"] = _export_pending_withdraws(
+                engine,
+                _last_resolved_targets,
+            )
+            await store.async_save(lifecycle_snapshot)
             await _refresh_entities(hass, entry)
 
     if hasattr(hass, "async_create_background_task"):
@@ -944,6 +953,110 @@ def _resolved_target_state(resolved: Any) -> _ResolvedTargetState:
         transition_ms=resolved.transition_ms,
         transition_withdraw_ms=winner.transition_withdraw_ms if winner is not None else None,
     )
+
+
+def _export_pending_withdraws(
+    engine: Engine,
+    last_resolved: dict[str, _ResolvedTargetState],
+) -> list[dict[str, Any]]:
+    active_targets = set(engine.list_active_targets())
+    records: list[dict[str, Any]] = []
+    for target, state in sorted(last_resolved.items()):
+        if target in active_targets:
+            continue
+        records.append({
+            "target": target,
+            "value": dict(state.value),
+            "winner_key": list(state.winner_key) if state.winner_key is not None else None,
+            "transition_ms": state.transition_ms,
+            "transition_withdraw_ms": state.transition_withdraw_ms,
+        })
+    return records
+
+
+def _restore_pending_withdraws(
+    records: dict[str, Any] | None,
+    *,
+    linger_rule_ids: set[str] | None = None,
+    now_ms: int | None = None,
+) -> dict[str, _ResolvedTargetState]:
+    restored: dict[str, _ResolvedTargetState] = {}
+    if not records:
+        return restored
+    for raw in records.get("pending_withdraws", []):
+        if not isinstance(raw, dict):
+            continue
+        restored_state = _resolved_target_state_from_record(raw, value_key="value")
+        if restored_state is not None:
+            target, state = restored_state
+            restored[target] = state
+    if linger_rule_ids is None or now_ms is None:
+        return restored
+    for raw in records.get("intents", []):
+        if not isinstance(raw, dict):
+            continue
+        rule_id = str(raw.get("rule_id") or "")
+        if rule_id not in linger_rule_ids or not raw.get("ignore_when"):
+            continue
+        ttl_ms = raw.get("ttl_ms")
+        if ttl_ms is None:
+            continue
+        try:
+            expires_at_ms = int(raw.get("created_at_ms") or 0) + int(ttl_ms)
+        except (TypeError, ValueError):
+            continue
+        if expires_at_ms > now_ms:
+            continue
+        restored_state = _resolved_target_state_from_record(raw, value_key="set")
+        if restored_state is not None:
+            target, state = restored_state
+            restored[target] = state
+    return restored
+
+
+def _resolved_target_state_from_record(
+    raw: dict[str, Any],
+    *,
+    value_key: str,
+) -> tuple[str, _ResolvedTargetState] | None:
+    target = raw.get("target")
+    value = raw.get(value_key)
+    if not isinstance(target, str) or not isinstance(value, dict):
+        return None
+    winner_key_raw = raw.get("winner_key")
+    winner_key = None
+    if (
+        isinstance(winner_key_raw, list | tuple)
+        and len(winner_key_raw) == 2
+        and isinstance(winner_key_raw[0], str)
+    ):
+        try:
+            winner_key = (winner_key_raw[0], int(winner_key_raw[1]))
+        except (TypeError, ValueError):
+            winner_key = None
+    elif value_key == "set":
+        rule_id = raw.get("rule_id")
+        created_at_ms = raw.get("created_at_ms")
+        if isinstance(rule_id, str):
+            try:
+                winner_key = (rule_id, int(created_at_ms or 0))
+            except (TypeError, ValueError):
+                winner_key = None
+    try:
+        return target, _ResolvedTargetState(
+            value=dict(value),
+            winner_key=winner_key,
+            transition_ms=int(raw.get("transition_ms") or 0),
+            transition_withdraw_ms=_optional_int(raw.get("transition_withdraw_ms")),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
 
 
 def _transition_ms_for_resolved_change(

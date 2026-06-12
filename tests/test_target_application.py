@@ -3526,6 +3526,63 @@ async def test_apply_resolved_targets_retries_ignored_activation_after_grace(mon
 
 
 @pytest.mark.asyncio
+async def test_expired_linger_restores_as_pending_withdraw_after_restart() -> None:
+    pytest.importorskip("homeassistant", reason="homeassistant not installed")
+
+    from custom_components.intentional import _apply_resolved_targets, _restore_pending_withdraws
+    from custom_components.intentional._engine import Engine
+
+    engine = Engine(clock_fn=lambda: 10_000)
+    records = {
+        "version": 1,
+        "intents": [
+            {
+                "target": "light.desk",
+                "set": {"state": "on", "brightness_pct": 40},
+                "merge": False,
+                "cap": {},
+                "floor": {},
+                "offset": {},
+                "multiply": {},
+                "transition_ms": 2_000,
+                "transition_assert_ms": 2_000,
+                "transition_change_ms": None,
+                "transition_withdraw_ms": 6_000,
+                "easing": "linear",
+                "authority": "automation",
+                "confidence": 0.8,
+                "ttl_ms": 1_000,
+                "reason": "presence",
+                "rule_id": "presence",
+                "ignore_when": True,
+                "created_at_ms": 8_000,
+                "animation": None,
+                "generators": {},
+            }
+        ],
+    }
+    last_resolved = _restore_pending_withdraws(
+        records,
+        linger_rule_ids={"presence"},
+        now_ms=engine.now_ms(),
+    )
+    services = _FakeServices()
+    states = _FakeStates({"light.desk": SimpleNamespace(entity_id="light.desk", state="on", attributes={"brightness": 102})})
+    hass = SimpleNamespace(services=services, states=states)
+
+    await _apply_resolved_targets(hass, engine, {}, last_resolved, {})
+
+    assert services.calls == [
+        (
+            "light",
+            "turn_off",
+            {"entity_id": "light.desk", "transition": 6.0},
+            False,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_apply_resolved_targets_backs_off_failed_service_signature() -> None:
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
