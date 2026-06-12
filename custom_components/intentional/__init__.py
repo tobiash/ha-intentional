@@ -353,7 +353,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await store.async_save(engine.export_lifecycle_records())
             await _refresh_entities(hass, entry)
 
-    hass.async_create_task(_tick_loop(), name=f"{DOMAIN}_tick")
+    if hasattr(hass, "async_create_background_task"):
+        hass.async_create_background_task(_tick_loop(), name=f"{DOMAIN}_tick")
+    else:
+        hass.async_create_task(_tick_loop(), name=f"{DOMAIN}_tick")
 
     def _stop_tick_loop() -> None:
         """Signal the tick loop to stop on entry unload."""

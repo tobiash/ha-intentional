@@ -177,3 +177,19 @@ def test_no_blocking_io_in_async_paths() -> None:
         "Offenders:\n"
         + "\n".join(f"  {INIT_PY.name}:{ln}: {desc}" for ln, desc in finder.offenders)
     )
+
+
+def test_tick_loop_is_background_task() -> None:
+    """The long-lived tick loop must not block Home Assistant startup.
+
+    ``hass.async_create_task`` tasks created during setup are included in HA's
+    bootstrap wait set. The Intentional tick loop is intentionally long-lived,
+    so it must be registered as a background task on HA versions that support it.
+    """
+    source = INIT_PY.read_text()
+
+    assert "async_create_background_task(_tick_loop()" in source
+    assert "async_create_task(_tick_loop()" in source
+    assert source.index("async_create_background_task(_tick_loop()") < source.index(
+        "async_create_task(_tick_loop()"
+    )
