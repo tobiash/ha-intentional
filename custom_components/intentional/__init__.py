@@ -770,12 +770,21 @@ async def _apply_resolved_targets(
                 if _monotonic_ms() < retry_after:
                     continue
                 service_failure_backoff.pop(backoff_key, None)
-        if last_applied.get(target) == signature:
-            last_resolved[target] = _resolved_target_state(resolved)
-            continue
         has_pending_withdraw = _last_applied_is_withdraw_signature(target, previous, last_applied)
         states = getattr(hass, "states", None)
         current_state = states.get(target) if states is not None else None
+        if last_applied.get(target) == signature:
+            if current_state is None or service_plan_matches_state(signature, current_state):
+                last_resolved[target] = _resolved_target_state(resolved)
+                continue
+            suppress_until = (
+                drift_suppressed_until.get(target)
+                if drift_suppressed_until is not None
+                else None
+            )
+            if suppress_until is not None and _monotonic_ms() < suppress_until:
+                last_resolved[target] = _resolved_target_state(resolved)
+                continue
         if (
             not has_pending_withdraw
             and current_state is not None

@@ -3457,6 +3457,75 @@ async def test_apply_resolved_targets_suppresses_duplicate_calls() -> None:
 
 
 @pytest.mark.asyncio
+async def test_apply_resolved_targets_retries_ignored_activation_after_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("homeassistant", reason="homeassistant not installed")
+
+    import custom_components.intentional as integration
+    from custom_components.intentional import _apply_resolved_targets
+    from custom_components.intentional._engine import Engine
+    from custom_components.intentional._engine.yaml_loader import Rule
+
+    now_ms = 1_000
+    monkeypatch.setattr(integration, "_monotonic_ms", lambda: now_ms)
+    engine = Engine(clock_fn=lambda: 1000)
+    engine.load_rules([
+        Rule(
+            id="desk-on",
+            when="input_boolean.work == 'on'",
+            target="light.desk",
+            set={"state": "on", "brightness_pct": 60},
+        )
+    ])
+    engine.update_state("input_boolean.work", "on")
+    engine.evaluate_all()
+
+    services = _FakeServices()
+    states = _FakeStates({"light.desk": SimpleNamespace(entity_id="light.desk", state="off", attributes={})})
+    hass = SimpleNamespace(services=services, states=states)
+    last_applied = {}
+    last_resolved = {}
+    drift_suppressed_until = {}
+
+    await _apply_resolved_targets(
+        hass,
+        engine,
+        last_applied,
+        last_resolved,
+        drift_suppressed_until,
+    )
+    await _apply_resolved_targets(
+        hass,
+        engine,
+        last_applied,
+        last_resolved,
+        drift_suppressed_until,
+    )
+    now_ms = max(drift_suppressed_until.values()) + 1
+    await _apply_resolved_targets(
+        hass,
+        engine,
+        last_applied,
+        last_resolved,
+        drift_suppressed_until,
+    )
+
+    assert services.calls == [
+        (
+            "light",
+            "turn_on",
+            {"entity_id": "light.desk", "brightness_pct": 60},
+            False,
+        ),
+        (
+            "light",
+            "turn_on",
+            {"entity_id": "light.desk", "brightness_pct": 60},
+            False,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_apply_resolved_targets_backs_off_failed_service_signature() -> None:
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
