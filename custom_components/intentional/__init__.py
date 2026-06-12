@@ -773,9 +773,14 @@ async def _apply_resolved_targets(
         if last_applied.get(target) == signature:
             last_resolved[target] = _resolved_target_state(resolved)
             continue
+        has_pending_withdraw = _last_applied_is_withdraw_signature(target, previous, last_applied)
         states = getattr(hass, "states", None)
         current_state = states.get(target) if states is not None else None
-        if current_state is not None and service_plan_matches_state(signature, current_state):
+        if (
+            not has_pending_withdraw
+            and current_state is not None
+            and service_plan_matches_state(signature, current_state)
+        ):
             last_applied[target] = signature
             last_resolved[target] = _resolved_target_state(resolved)
             record_diagnostic(hass, "service_skipped_matching_state", target=target)
@@ -951,6 +956,27 @@ def _default_withdraw_value(target: str, previous: _ResolvedTargetState) -> dict
     if previous.value.get("state") != "on":
         return None
     return {"state": "off"}
+
+
+def _last_applied_is_withdraw_signature(
+    target: str,
+    previous: _ResolvedTargetState | None,
+    last_applied: dict[str, ServicePlanSignature],
+) -> bool:
+    if previous is None:
+        return False
+    withdraw_value = _default_withdraw_value(target, previous)
+    if withdraw_value is None:
+        return False
+    transition_ms = previous.transition_withdraw_ms if previous.transition_withdraw_ms is not None else previous.transition_ms
+    calls = service_calls_for_resolved_target(
+        target,
+        withdraw_value,
+        transition_ms=transition_ms,
+    )
+    if not calls:
+        return False
+    return last_applied.get(target) == service_plan_signature(calls)
 
 
 def _state_has_user_context(state: State) -> bool:
