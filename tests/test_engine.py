@@ -108,6 +108,30 @@ class TestRuleEvaluation:
         assert world["authored_rules"][0]["rule_id"] == "living-room-presence"
         assert world["active_rules"] == []
 
+    def test_rule_status_active_includes_lingering_intents(self) -> None:
+        from intentional.yaml_loader import load_rules_from_string
+
+        engine = Engine(clock_fn=lambda: 1000)
+        engine.load_rules(load_rules_from_string('''
+- id: living-room-presence
+  observe:
+    binary_sensor.living_room_presence: on
+  intent:
+    light.sofa:
+      state: on
+      linger: 2m
+'''))
+        engine.update_state("binary_sensor.living_room_presence", "on")
+        engine.evaluate_all()
+        engine.update_state("binary_sensor.living_room_presence", "off")
+        engine.evaluate_all()
+
+        status = engine.list_authored_rule_statuses()["living-room-presence"]
+
+        assert status["active"] is True
+        assert status["condition_firing"] is False
+        assert status["active_intent_count"] == 1
+
     def test_global_disable_withdraws_active_rule_intents(self) -> None:
         from intentional.yaml_loader import load_rules_from_string
 

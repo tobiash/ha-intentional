@@ -806,7 +806,7 @@ class Engine:
         return {
             "rule_id": rule_id,
             "enabled": rule.enabled,
-            "active": rule_id in firing,
+            "active": rule_id in firing or active_counts.get(rule_id, 0) > 0,
             "condition_firing": rule_id in condition_firing,
             "active_intent_count": active_counts.get(rule_id, 0),
             "targets": targets,
