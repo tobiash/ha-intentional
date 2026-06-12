@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.13] - 2026-06-12
+
+### Fixed
+- **Withdraw reconciliation** now keeps withdrawn light/switch targets pending until Home Assistant reports the target state matches the requested off state, retrying the withdraw after the transition/grace window if the device ignored the first off call.
+- **False drift overrides from owned actions** are reduced by suppressing drift detection briefly after Intentional service calls and by shortening auto-detected drift override TTLs. Explicit `intentional.fire` manual overrides keep their normal TTL.
+- **User changes after withdraw** with Home Assistant user context cancel pending withdraw retries so Intentional does not fight an explicit UI/service action.
+
 ## [0.7.12] - 2026-06-12
 
 ### Fixed
