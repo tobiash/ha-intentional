@@ -408,7 +408,12 @@ def test_state_change_invalidates_cached_service_plan_for_entity() -> None:
 
     invalidated = invalidate_service_plan_for_state_change(
         last_applied,
-        SimpleNamespace(entity_id="light.desk", state="off", attributes={}),
+        SimpleNamespace(
+            entity_id="light.desk",
+            state="off",
+            attributes={},
+            context=SimpleNamespace(user_id="user-1"),
+        ),
     )
 
     assert invalidated is True
@@ -724,6 +729,7 @@ def test_state_drift_emits_manual_override_for_managed_target() -> None:
             entity_id="light.desk",
             state="off",
             attributes={},
+            context=SimpleNamespace(user_id="user-1"),
         ),
         ttl_ms=7_200_000,
     )
@@ -815,6 +821,7 @@ def test_state_drift_requires_stable_confirmation_when_candidates_are_tracked() 
         entity_id="light.desk",
         state="off",
         attributes={},
+        context=SimpleNamespace(user_id="user-1"),
     )
 
     first = emit_manual_override_for_state_drift(
@@ -889,7 +896,12 @@ def test_state_drift_matching_state_clears_pending_candidate() -> None:
     emit_manual_override_for_state_drift(
         engine,
         last_applied,
-        SimpleNamespace(entity_id="light.desk", state="off", attributes={}),
+        SimpleNamespace(
+            entity_id="light.desk",
+            state="off",
+            attributes={},
+            context=SimpleNamespace(user_id="user-1"),
+        ),
         ttl_ms=7_200_000,
         now_ms=10_000,
         drift_candidates=drift_candidates,
@@ -950,7 +962,12 @@ def test_state_drift_changed_candidate_restarts_confirmation_window() -> None:
     changed = emit_manual_override_for_state_drift(
         engine,
         last_applied,
-        SimpleNamespace(entity_id="light.desk", state="off", attributes={}),
+        SimpleNamespace(
+            entity_id="light.desk",
+            state="off",
+            attributes={},
+            context=SimpleNamespace(user_id="user-1"),
+        ),
         ttl_ms=7_200_000,
         now_ms=11_500,
         drift_candidates=drift_candidates,
@@ -959,7 +976,12 @@ def test_state_drift_changed_candidate_restarts_confirmation_window() -> None:
     confirmed = emit_manual_override_for_state_drift(
         engine,
         last_applied,
-        SimpleNamespace(entity_id="light.desk", state="off", attributes={}),
+        SimpleNamespace(
+            entity_id="light.desk",
+            state="off",
+            attributes={},
+            context=SimpleNamespace(user_id="user-1"),
+        ),
         ttl_ms=7_200_000,
         now_ms=13_000,
         drift_candidates=drift_candidates,
@@ -975,6 +997,58 @@ def test_state_drift_changed_candidate_restarts_confirmation_window() -> None:
     ]
     assert len(manual) == 1
     assert manual[0].set == {"state": "off"}
+
+
+def test_state_drift_retries_ignored_light_turn_on_without_manual_override() -> None:
+    from intentional.engine import Engine
+    from intentional.ha_adapter import (
+        emit_manual_override_for_state_drift,
+        service_calls_for_resolved_target,
+        service_plan_signature,
+    )
+    from intentional.intent import Authority
+    from intentional.yaml_loader import Rule
+
+    engine = Engine(clock_fn=lambda: 1000)
+    engine.load_rules([
+        Rule(
+            id="desk-on",
+            when="input_boolean.work == 'on'",
+            target="light.desk",
+            set={"state": "on", "brightness_pct": 60},
+        )
+    ])
+    engine.update_state("input_boolean.work", "on")
+    engine.evaluate_all()
+    calls = service_calls_for_resolved_target(
+        "light.desk",
+        {"state": "on", "brightness_pct": 60},
+    )
+    last_applied = {"light.desk": service_plan_signature(calls)}
+    drift_candidates = {"light.desk": (10_000, (("state", "off"),))}
+
+    emitted = emit_manual_override_for_state_drift(
+        engine,
+        last_applied,
+        SimpleNamespace(
+            entity_id="light.desk",
+            state="off",
+            attributes={},
+            context=SimpleNamespace(user_id=None),
+        ),
+        ttl_ms=7_200_000,
+        now_ms=12_000,
+        drift_candidates=drift_candidates,
+        confirmation_ms=1_500,
+    )
+
+    assert emitted is False
+    assert drift_candidates == {}
+    assert "light.desk" not in last_applied
+    assert all(
+        intent.authority is not Authority.USER
+        for intent in engine.list_active_intents("light.desk")
+    )
 
 
 def test_state_drift_does_not_emit_manual_override_during_owned_transition() -> None:

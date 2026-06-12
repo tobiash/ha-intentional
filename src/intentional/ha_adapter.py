@@ -1434,6 +1434,11 @@ def emit_manual_override_for_state_drift(
         if drift_candidates is not None:
             drift_candidates.pop(entity_id, None)
         return False
+    if _state_change_looks_like_ignored_activation(plan, state):
+        if drift_candidates is not None:
+            drift_candidates.pop(entity_id, None)
+        last_applied.pop(entity_id, None)
+        return False
     set_dict = manual_set_from_state_object(state)
     if not set_dict:
         if drift_candidates is not None:
@@ -1459,6 +1464,24 @@ def emit_manual_override_for_state_drift(
         reason=reason,
     )
     return True
+
+
+def _state_change_looks_like_ignored_activation(
+    plan: ServicePlanSignature,
+    state: Any,
+) -> bool:
+    """True when HA still reports off after an Intentional turn_on call.
+
+    Some light integrations accept ``light.turn_on`` but the device never reaches
+    ``on``. Without this guard that stale off state is promoted to a manual
+    override, blocking retries for the drift TTL.
+    """
+    if str(getattr(state, "state", "")) != "off":
+        return False
+    context = getattr(state, "context", None)
+    if getattr(context, "user_id", None) is not None:
+        return False
+    return any(domain == "light" and service == "turn_on" for domain, service, _data in plan)
 
 
 def pending_drift_targets(drift_candidates: dict[str, tuple[int, FrozenValue]]) -> tuple[str, ...]:
