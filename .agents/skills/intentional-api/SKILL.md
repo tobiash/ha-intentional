@@ -35,8 +35,9 @@ Preserve the returned `generation`; use it as `expected_generation` on saves and
 2. Edit the returned `contents` locally.
 3. Validate with `POST /api/intentional/validate`.
 4. Dry-run with `POST /api/intentional/dry-run`.
-5. Save with `PUT /api/intentional/rules/document` and the original `expected_generation`.
-6. Re-check `GET /api/intentional/world` and relevant `GET /api/intentional/explain/{target}`.
+5. Simulate lifecycle behavior with `POST /api/intentional/simulate` when timing matters.
+6. Save with `PUT /api/intentional/rules/document` and the original `expected_generation`.
+7. Re-check `GET /api/intentional/world` and relevant `GET /api/intentional/explain/{target}`.
 
 Save payload:
 
@@ -61,8 +62,32 @@ Look for:
 
 - `active_intents`: all current claims.
 - `winning_intent`: claim currently controlling the target.
-- `rules_for_target`: firing, blocked, and dwell status.
+- `rules_for_target`: firing, blocked, lifecycle `phase`, dwell, hold, and timing status.
+- `phase`: `idle`, `waiting`, `active`, `held`, or `lingering`.
+- `active_for_ms`, `condition_active_for_ms`, `held_for_ms`: lifecycle timing clues.
 - `ActualMatchesDesired`: reconciliation status in `/world`.
+
+## Simulate Lifecycle
+
+Use `/simulate` to preview timing-sensitive rules without touching Home Assistant devices:
+
+```http
+POST /api/intentional/simulate
+```
+
+```json
+{
+  "contents": "- id: example\n  while:\n    binary_sensor.room_presence: on\n  hold:\n    until:\n      binary_sensor.room_presence: off\n      for: 15m\n  intent:\n    light.room:\n      state: on\n",
+  "timeline": [
+    {"states": {"binary_sensor.room_presence.state": "on"}},
+    {"advance_ms": 60000, "states": {"binary_sensor.room_presence.state": "off"}},
+    {"advance_ms": 840000},
+    {"advance_ms": 60000}
+  ]
+}
+```
+
+Each response step includes `now_ms`, `active_targets`, `resolved_targets`, and `active_rules` with lifecycle phase/timing fields.
 
 ## History And Rollback
 
@@ -90,6 +115,8 @@ Rollback records the pre-rollback document in history, so it can be undone.
 ## Rule Authoring Notes
 
 - Prefer `while -> intent` rules. Use `after` for dwell and `hold` for retention after the original situation changes.
+- Use `hold.until` with `for` for noisy false-off presence sensors, e.g. “hold until presence has been off for 15m”.
+- Use `group` for related modes and `profile` for reusable behavior names like `pass-through`, `settled`, or `occupied-session`.
 - Use durable target-state intents for ongoing desired state.
 - Use `effect:` only for side-effect service calls.
 - Use `apply.transition.assert/change/withdraw` for HA-native transitions.

@@ -217,6 +217,54 @@ class TestRuleSchemaValidation:
             "light.table": 300_000,
         }
 
+    def test_lifecycle_hold_until_normalizes_release_condition(self) -> None:
+        rules = load_rules_from_string("""
+- id: living-room-dark
+  while:
+    binary_sensor.living_room_presence: on
+    sensor.living_room_light:
+      lt: 100
+  hold:
+    until:
+      binary_sensor.living_room_presence: off
+      for: 15m
+  intent:
+    light.living_room:
+      state: on
+""")
+
+        assert rules[0].hold_until_when == 'binary_sensor.living_room_presence == "off"'
+        assert rules[0].hold_until_for_ms == 900_000
+
+    def test_rule_group_and_profile_metadata_loads(self) -> None:
+        rules = load_rules_from_string("""
+- id: living-room-pass-through
+  group: living-room-lighting
+  profile: pass-through
+  while:
+    binary_sensor.living_room_presence: on
+  intent:
+    light.living_room:
+      brightness_pct: 20
+""")
+
+        assert rules[0].group == "living-room-lighting"
+        assert rules[0].profile == "pass-through"
+
+    def test_lifecycle_rejects_empty_hold_until(self) -> None:
+        with pytest.raises(RuleLoadError, match="`hold.until` must contain at least one release condition"):
+            load_rules_from_string("""
+- id: empty-release
+  while:
+    binary_sensor.living_room_presence: on
+  hold:
+    until:
+      for: 15m
+  intent:
+    light.living_room:
+      state: on
+""")
+
     def test_vnext_observe_any_normalizes_to_or_expression(self) -> None:
         rules = load_rules_from_string("""
 - id: office-occupied

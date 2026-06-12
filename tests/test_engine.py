@@ -512,6 +512,88 @@ class TestRuleEvaluation:
         engine.evaluate_all()
         assert engine.resolve("light.living_room") is None
 
+    def test_hold_until_requires_stable_release_condition(self) -> None:
+        from intentional.yaml_loader import load_rules_from_string
+
+        engine = Engine(clock_fn=lambda: 1000)
+        engine.load_rules(load_rules_from_string('''
+- id: living-room-dark
+  group: living-room-lighting
+  profile: stable-presence
+  while:
+    binary_sensor.living_room_presence: on
+  hold:
+    until:
+      binary_sensor.living_room_presence: off
+      for: 15m
+  intent:
+    light.living_room:
+      state: on
+'''))
+
+        engine.update_state("binary_sensor.living_room_presence", "on")
+        engine.evaluate_all()
+        assert engine.resolve("light.living_room").value == {"state": "on"}
+
+        engine.update_state("binary_sensor.living_room_presence", "off")
+        engine.evaluate_all()
+        engine.advance_clock(14 * 60_000)
+        engine.evaluate_all()
+        assert engine.resolve("light.living_room").value == {"state": "on"}
+
+        engine.update_state("binary_sensor.living_room_presence", "on")
+        engine.evaluate_all()
+        engine.update_state("binary_sensor.living_room_presence", "off")
+        engine.evaluate_all()
+        engine.advance_clock(14 * 60_000)
+        engine.evaluate_all()
+        assert engine.resolve("light.living_room").value == {"state": "on"}
+
+        engine.advance_clock(60_000)
+        engine.evaluate_all()
+        assert engine.resolve("light.living_room") is None
+
+    def test_rule_status_reports_lifecycle_phase_and_timings(self) -> None:
+        from intentional.yaml_loader import load_rules_from_string
+
+        engine = Engine(clock_fn=lambda: 1000)
+        engine.load_rules(load_rules_from_string('''
+- id: living-room-dark
+  group: living-room-lighting
+  profile: stable-presence
+  while:
+    binary_sensor.living_room_presence: on
+  hold:
+    until:
+      binary_sensor.living_room_presence: off
+      for: 15m
+  intent:
+    light.living_room:
+      state: on
+'''))
+
+        assert engine.list_rule_statuses()["living-room-dark"]["phase"] == "idle"
+
+        engine.update_state("binary_sensor.living_room_presence", "on")
+        engine.evaluate_all()
+        engine.advance_clock(120_000)
+        active = engine.list_rule_statuses()["living-room-dark"]
+        assert active["group"] == "living-room-lighting"
+        assert active["profile"] == "stable-presence"
+        assert active["phase"] == "active"
+        assert active["active_for_ms"] == 120_000
+        assert active["condition_active_for_ms"] == 120_000
+        assert active["held_for_ms"] is None
+
+        engine.update_state("binary_sensor.living_room_presence", "off")
+        engine.evaluate_all()
+        engine.advance_clock(60_000)
+        held = engine.list_rule_statuses()["living-room-dark"]
+        assert held["phase"] == "held"
+        assert held["active_for_ms"] == 180_000
+        assert held["condition_active_for_ms"] is None
+        assert held["held_for_ms"] == 60_000
+
     def test_lifecycle_records_restore_edge_ttl_intent(self) -> None:
         from intentional.yaml_loader import load_rules_from_string
 
@@ -1011,6 +1093,12 @@ class TestStructuredDiagnostics:
                 "condition_firing": True,
                 "blocked_by": [],
                 "for_remaining_ms": None,
+                "phase": "active",
+                "active_for_ms": 0,
+                "condition_active_for_ms": 0,
+                "held_for_ms": None,
+                "group": "",
+                "profile": "",
             },
             {
                 "rule_id": "ambient",
@@ -1018,6 +1106,12 @@ class TestStructuredDiagnostics:
                 "condition_firing": True,
                 "blocked_by": ["movie-mode"],
                 "for_remaining_ms": None,
+                "phase": "idle",
+                "active_for_ms": None,
+                "condition_active_for_ms": 0,
+                "held_for_ms": None,
+                "group": "",
+                "profile": "",
             },
         ]
         assert explanation["winning_intent"]["rule_id"] == "movie-mode"
@@ -1047,6 +1141,12 @@ class TestStructuredDiagnostics:
                 "condition_firing": True,
                 "blocked_by": [],
                 "for_remaining_ms": 3_000,
+                "phase": "waiting",
+                "active_for_ms": None,
+                "condition_active_for_ms": 2_000,
+                "held_for_ms": None,
+                "group": "",
+                "profile": "",
             }
         ]
 

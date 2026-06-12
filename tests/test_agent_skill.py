@@ -17,5 +17,7 @@ def test_intentional_api_skill_is_bundled() -> None:
     assert "/api/intentional/rules/document" in source
     assert "expected_generation" in source
     assert "/api/intentional/dry-run" in source
+    assert "/api/intentional/simulate" in source
     assert "/api/intentional/rules/rollback" in source
     assert "Never echo the token" in source
+    assert "hold.until" in source

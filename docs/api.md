@@ -183,6 +183,15 @@ recorded in history, so a rollback can itself be undone.
 
 `GET /api/intentional/explain/{target}` returns the active intents, resolved value, winning intent, rule firing state, and modifier details for one target.
 
+Rule status objects in `/world`, `/explain/{target}.rules_for_target`, and rule
+switch attributes include lifecycle diagnostics:
+
+- `phase`: one of `idle`, `waiting`, `active`, `held`, or `lingering`.
+- `active_for_ms`: how long the rule has had active runtime intents.
+- `condition_active_for_ms`: how long the starting situation has been true.
+- `held_for_ms`: how long the rule has been retained by `hold` after the starting situation stopped.
+- `group` and `profile`: optional author metadata for modes and behavior profiles.
+
 ## Manual Drift Overrides
 
 Intentional treats HA state changes on managed targets as observations first. A
@@ -263,6 +272,36 @@ Response:
 ```
 
 `state_overrides` keys use `<entity_id>.<field>`. Use `.state` for the entity state.
+
+## Simulate
+
+```http
+POST /api/intentional/simulate
+```
+
+Evaluates proposed YAML over a timeline without applying services to Home
+Assistant. Use this for lifecycle rules involving `after`, `hold`, and stable
+absence with `hold.until.for`.
+
+```json
+{
+  "contents": "- id: living-room-dark\n  while:\n    binary_sensor.living_room_presence: on\n  hold:\n    until:\n      binary_sensor.living_room_presence: off\n      for: 15m\n  intent:\n    light.living_room:\n      state: on\n",
+  "timeline": [
+    {"states": {"binary_sensor.living_room_presence.state": "on"}},
+    {"advance_ms": 60000, "states": {"binary_sensor.living_room_presence.state": "off"}},
+    {"advance_ms": 840000},
+    {"advance_ms": 60000}
+  ]
+}
+```
+
+Each timeline step may include:
+
+- `advance_ms`: non-negative integer clock advance before evaluation.
+- `states`: mapping of `<entity_id>.<field>` to value. Use `.state` for normal entity state.
+
+Response steps include `now_ms`, `active_targets`, `resolved_targets`, and
+`active_rules` with lifecycle phase/timing fields.
 
 ## World Model
 

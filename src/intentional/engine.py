@@ -47,6 +47,7 @@ from intentional.generation import GeneratedFieldState, sample_generated_field
 from intentional.intent import Authority, Intent
 from intentional.lifecycle import export_lifecycle_records, restore_lifecycle_intents
 from intentional.records import Effect, IntentSelector
+from intentional.rule_lifecycle import dominant_phase, min_optional, rule_phase
 from intentional.selectors import observe_selectors_fire, selector_diagnostics
 from intentional.templates import TemplateRenderer
 from intentional.when_parser import TimeOfDay, WhenAST, evaluate_when, parse_when
@@ -69,6 +70,7 @@ class _ParsedRule:
     rule: Rule
     when_ast: WhenAST
     hold_when_ast: WhenAST | None = None
+    hold_until_ast: WhenAST | None = None
 
 
 class Engine:
@@ -94,6 +96,8 @@ class Engine:
         self._clock_offset_ms: int = 0  # for tests: advance_clock adds to this
         self._animation_started_at: dict[str, int] = {}  # rule_id → ms
         self._condition_true_since: dict[str, int] = {}  # rule_id → ms
+        self._hold_until_true_since: dict[str, int] = {}  # rule_id → ms
+        self._rule_held_since: dict[str, int] = {}  # rule_id → ms
         self._state_change_callbacks: list[StateChangeCallback] = []
         self._log: list[str] = []  # last N log lines for diagnostics
         self._active_effect_rule_ids: set[str] = set()
@@ -184,10 +188,16 @@ class Engine:
             try:
                 when_ast = parse_when(rule.when)
                 hold_when_ast = parse_when(rule.hold_when) if rule.hold_when else None
+                hold_until_ast = parse_when(rule.hold_until_when) if rule.hold_until_when else None
             except Exception as e:
                 self._log.append(f"Failed to parse when for {rule.id!r}: {e}")
                 continue
-            self._rules[rule.id] = _ParsedRule(rule=rule, when_ast=when_ast, hold_when_ast=hold_when_ast)
+            self._rules[rule.id] = _ParsedRule(
+                rule=rule,
+                when_ast=when_ast,
+                hold_when_ast=hold_when_ast,
+                hold_until_ast=hold_until_ast,
+            )
         # Drop level-rule intents on reload so active observations recreate
         # intents from the current rule definition (target/value/lifecycle).
         self._active_intents = [
@@ -197,6 +207,16 @@ class Engine:
         self._condition_true_since = {
             rule_id: since
             for rule_id, since in self._condition_true_since.items()
+            if rule_id in self._rules
+        }
+        self._hold_until_true_since = {
+            rule_id: since
+            for rule_id, since in self._hold_until_true_since.items()
+            if rule_id in self._rules
+        }
+        self._rule_held_since = {
+            rule_id: since
+            for rule_id, since in self._rule_held_since.items()
             if rule_id in self._rules
         }
 
@@ -308,11 +328,19 @@ class Engine:
             if intent.rule_id in firing:
                 # Rule still fires — keep
                 new_active.append(intent)
+                self._hold_until_true_since.pop(intent.rule_id, None)
+                self._rule_held_since.pop(intent.rule_id, None)
                 continue
             if intent.rule_id in self._rules:
                 parsed = self._rules[intent.rule_id]
                 rule = parsed.rule
+                if parsed.hold_until_ast is not None and not self._hold_until_released(parsed, now):
+                    self._rule_held_since.setdefault(intent.rule_id, now)
+                    new_active.append(intent)
+                    continue
                 if parsed.hold_when_ast is not None and self._eval_when(parsed.hold_when_ast):
+                    self._hold_until_true_since.pop(intent.rule_id, None)
+                    self._rule_held_since.setdefault(intent.rule_id, now)
                     new_active.append(intent)
                     continue
                 if rule.linger_ms and not intent.ignore_when:
@@ -406,6 +434,19 @@ class Engine:
             return rule.for_ms
         multiplier = _FOR_UNIT_MULTIPLIERS.get(rule.for_entity_unit, 1_000)
         return max(0, int(value * multiplier))
+
+    def _hold_until_released(self, parsed: _ParsedRule, now: int) -> bool:
+        if parsed.hold_until_ast is None:
+            return True
+        rule_id = parsed.rule.id
+        if not self._eval_when(parsed.hold_until_ast):
+            self._hold_until_true_since.pop(rule_id, None)
+            return False
+        since = self._hold_until_true_since.get(rule_id)
+        if since is None:
+            self._hold_until_true_since[rule_id] = now
+            since = now
+        return now - since >= parsed.rule.hold_until_for_ms
 
     def _spawn_intent_from_rule(self, rule: Rule, now: int) -> Intent:
         # Scene rules: target is empty, intent carries scene reference.
@@ -670,17 +711,25 @@ class Engine:
             reverse=True,
         )
         firing, condition_firing, blocked_by, for_remaining = self._firing_rule_diagnostics()
+        statuses = self.list_rule_statuses()
 
         rules_for_target = []
         for rule_id, parsed in self._rules.items():
             if parsed.rule.target != target:
                 continue
+            status = statuses.get(rule_id, {})
             rules_for_target.append({
                 "rule_id": rule_id,
                 "firing": rule_id in firing,
                 "condition_firing": rule_id in condition_firing,
                 "blocked_by": sorted(blocked_by.get(rule_id, [])),
                 "for_remaining_ms": for_remaining.get(rule_id),
+                "phase": status.get("phase", "idle"),
+                "active_for_ms": status.get("active_for_ms"),
+                "condition_active_for_ms": status.get("condition_active_for_ms"),
+                "held_for_ms": status.get("held_for_ms"),
+                "group": status.get("group", ""),
+                "profile": status.get("profile", ""),
             })
 
         return {
@@ -729,10 +778,18 @@ class Engine:
         """Return authored-rule status for HA entities and agent UIs."""
         firing, condition_firing, blocked_by, for_remaining = self._firing_rule_diagnostics()
         active_counts: dict[str, int] = {}
+        active_since: dict[str, int] = {}
+        has_lingering_intent: set[str] = set()
         now = self.now_ms()
         for intent in self._active_intents:
             if intent.rule_id and not intent.is_expired(into_the_future_ms=now):
                 active_counts[intent.rule_id] = active_counts.get(intent.rule_id, 0) + 1
+                active_since[intent.rule_id] = min(
+                    active_since.get(intent.rule_id, intent.created_at_ms),
+                    intent.created_at_ms,
+                )
+                if intent.ignore_when:
+                    has_lingering_intent.add(intent.rule_id)
 
         statuses: dict[str, dict[str, Any]] = {}
         for rule_id, parsed in self._rules.items():
@@ -744,6 +801,8 @@ class Engine:
                 blocked_by,
                 for_remaining,
                 active_counts,
+                active_since,
+                has_lingering_intent,
             )
         return statuses
 
@@ -757,10 +816,19 @@ class Engine:
                 grouped[authored_id] = {**status, "rule_id": authored_id}
                 continue
             current["active"] = current["active"] or status["active"]
+            current["phase"] = dominant_phase(str(current.get("phase", "idle")), str(status.get("phase", "idle")))
             current["condition_firing"] = current["condition_firing"] or status["condition_firing"]
             current["active_intent_count"] += status["active_intent_count"]
+            current["active_for_ms"] = min_optional(current.get("active_for_ms"), status.get("active_for_ms"))
+            current["condition_active_for_ms"] = min_optional(
+                current.get("condition_active_for_ms"),
+                status.get("condition_active_for_ms"),
+            )
+            current["held_for_ms"] = min_optional(current.get("held_for_ms"), status.get("held_for_ms"))
             current["targets"] = sorted(set(current["targets"]) | set(status["targets"]))
             current["blocked_by"] = sorted(set(current["blocked_by"]) | set(status["blocked_by"]))
+            current["group"] = current.get("group") or status.get("group", "")
+            current["profile"] = current.get("profile") or status.get("profile", "")
             remaining = [
                 value for value in (current.get("for_remaining_ms"), status.get("for_remaining_ms"))
                 if value is not None
@@ -777,6 +845,8 @@ class Engine:
         blocked_by: dict[str, set[str]],
         for_remaining: dict[str, int],
         active_counts: dict[str, int],
+        active_since: dict[str, int],
+        has_lingering_intent: set[str],
     ) -> dict[str, Any]:
         targets = []
         if rule.target:
@@ -809,18 +879,42 @@ class Engine:
                 for effect in rule.effects
             ]
 
+        now = self.now_ms()
+        phase = rule_phase(
+            rule_id,
+            firing=firing,
+            for_remaining=for_remaining,
+            active_counts=active_counts,
+            lingering_rules=has_lingering_intent,
+        )
+        active_for_ms = None
+        if rule_id in active_since:
+            active_for_ms = max(0, now - active_since[rule_id])
+        condition_active_for_ms = None
+        if rule_id in condition_firing and rule_id in self._condition_true_since:
+            condition_active_for_ms = max(0, now - self._condition_true_since[rule_id])
+        held_for_ms = None
+        if phase == "held" and rule_id in self._rule_held_since:
+            held_for_ms = max(0, now - self._rule_held_since[rule_id])
+
         return {
             "rule_id": rule_id,
             "enabled": rule.enabled,
             "active": rule_id in firing or active_counts.get(rule_id, 0) > 0,
+            "phase": phase,
             "condition_firing": rule_id in condition_firing,
             "active_intent_count": active_counts.get(rule_id, 0),
+            "active_for_ms": active_for_ms,
+            "condition_active_for_ms": condition_active_for_ms,
+            "held_for_ms": held_for_ms,
             "targets": targets,
             "desired": desired,
             "authority": rule.authority.value,
             "confidence": rule.confidence,
             "reason": rule.reason,
             "labels": list(rule.labels),
+            "group": rule.group,
+            "profile": rule.profile,
             "notes": rule.notes,
             "blocked_by": sorted(blocked_by.get(rule_id, [])),
             "for_remaining_ms": for_remaining.get(rule_id),

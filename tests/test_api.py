@@ -104,6 +104,14 @@ def test_reload_view_accepts_post() -> None:
     assert hasattr(IntentionalReloadView, "post")
 
 
+def test_simulate_view_accepts_post() -> None:
+    from custom_components.intentional.api import IntentionalSimulateView
+
+    assert IntentionalSimulateView.url == "/api/intentional/simulate"
+    assert IntentionalSimulateView.requires_auth is True
+    assert hasattr(IntentionalSimulateView, "post")
+
+
 def test_state_view_exposes_state() -> None:
     from custom_components.intentional.api import IntentionalStateView
 

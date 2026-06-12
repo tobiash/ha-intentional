@@ -86,6 +86,8 @@ Invalid new config is rejected and the previous active config remains running.
 | `id` | yes | none | Unique authored rule ID. |
 | `enabled` | no | `true` | Rule switches persist this field. |
 | `labels` | no | `[]` | Metadata for humans and agents. |
+| `group` | no | `""` | Related rule/mode group, such as `living-room-lighting`. |
+| `profile` | no | `""` | Behavior profile, such as `pass-through`, `settled`, or `occupied-session`. |
 | `notes` | no | `""` | Authoring notes. |
 | `authority` | no | `automation` | `sensor`, `automation`, or `user`. |
 | `confidence` | no | `1.0` | Tiebreaker within an authority tier. |
@@ -216,6 +218,95 @@ This means:
 
 `hold.after` and `hold.after_when_stops` are equivalent. Target-level `linger` is
 the lower-level spelling for `hold.after`.
+
+Use `hold.until` when release should wait for a stable off/absence condition:
+
+```yaml
+- id: living-room-dark-minimum
+  group: living-room-lighting
+  profile: stable-presence
+  while:
+    binary_sensor.living_room_presence: on
+    sensor.living_room_light:
+      lt: 100
+  hold:
+    until:
+      binary_sensor.living_room_presence: off
+      for: 15m
+  intent:
+    light.living_room:
+      state: on
+      brightness_pct: 40
+```
+
+This means: once active, keep the intent until living-room presence has been
+continuously `off` for `15m`. Short false-off dropouts do not start withdrawal.
+
+`hold.until.for` currently accepts static durations. Entity-backed durations are
+reserved for a later release.
+
+### Common Presence Profiles
+
+Profiles are metadata, not behavior by themselves. They make rule lists,
+diagnostics, and agent workflows easier to understand.
+
+Pass-through: quick dim light, quick release after absence is stable.
+
+```yaml
+- id: hallway-pass-through
+  group: hallway-lighting
+  profile: pass-through
+  while:
+    binary_sensor.hallway_motion: on
+  hold:
+    until:
+      binary_sensor.hallway_motion: off
+      for: 30s
+  intent:
+    light.hallway:
+      state: on
+      brightness_pct: 20
+```
+
+Settled: wait for occupancy maturity, then use brighter light and a longer
+absence confirmation.
+
+```yaml
+- id: living-room-settled
+  group: living-room-lighting
+  profile: settled
+  while:
+    binary_sensor.living_room_presence: on
+  after: 5m
+  hold:
+    until:
+      binary_sensor.living_room_presence: off
+      for: 15m
+  intent:
+    light.living_room:
+      state: on
+      brightness_pct: 65
+```
+
+Occupied session: start in a time/mode window, then retain while occupancy
+continues or until absence is stable.
+
+```yaml
+- id: living-room-evening-occupied
+  group: living-room-lighting
+  profile: occupied-session
+  while:
+    binary_sensor.living_room_presence: on
+    schedule.living_room_evening: on
+  hold:
+    until:
+      binary_sensor.living_room_presence: off
+      for: 15m
+  intent:
+    light.living_room:
+      state: on
+      brightness_pct: 70
+```
 
 ### Edges And Events
 

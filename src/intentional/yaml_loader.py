@@ -198,6 +198,8 @@ class Rule:
     ttl_ms: int | None = None
     linger_ms: int | None = None
     hold_when: str | None = None
+    hold_until_when: str | None = None
+    hold_until_for_ms: int = 0
     authority: Authority = Authority.AUTOMATION
     confidence: float = 1.0
     reason: str = ""
@@ -211,6 +213,8 @@ class Rule:
     edge_created: bool = False
     enabled: bool = True
     labels: tuple[str, ...] = field(default_factory=tuple)
+    group: str = ""
+    profile: str = ""
     notes: str = ""
     source_file: Path | None = None
     source_line: int | None = None
@@ -221,7 +225,7 @@ class Rule:
 
 # Recognized top-level fields in a rule
 _RULE_TOP_LEVEL = {
-    "id", "extends", "when", "observe", "while", "for", "after", "hold", "emit", "intent", "effect", "authority", "confidence", "reason", "blocks", "enabled", "labels", "notes", "edge_created",
+    "id", "extends", "when", "observe", "while", "for", "after", "hold", "emit", "intent", "effect", "authority", "confidence", "reason", "blocks", "enabled", "labels", "group", "profile", "notes", "edge_created",
 }
 # Recognized fields in the emit block
 _EMIT_FIELDS = {
@@ -298,6 +302,18 @@ def _validate_rule(
     notes = raw.get("notes", "")
     if not isinstance(notes, str):
         raise RuleLoadError(f"Rule {rule_id!r}: `notes` must be a string", file=file, line=line)
+
+    group = raw.get("group", "")
+    if group is None:
+        group = ""
+    if not isinstance(group, str):
+        raise RuleLoadError(f"Rule {rule_id!r}: `group` must be a string", file=file, line=line)
+
+    profile = raw.get("profile", "")
+    if profile is None:
+        profile = ""
+    if not isinstance(profile, str):
+        raise RuleLoadError(f"Rule {rule_id!r}: `profile` must be a string", file=file, line=line)
 
     # for
     for_ms, for_entity, for_entity_unit = _parse_for(
@@ -403,6 +419,7 @@ def _validate_rule(
         default=None,
     )
     hold_when = _parse_hold_when(raw.get("hold"), rule_id, file, line)
+    hold_until_when, hold_until_for_ms = _parse_hold_until(raw.get("hold"), rule_id, file, line)
     linger_ms = _parse_optional_duration(
         emit.get("linger"),
         f"Rule {rule_id!r}: linger",
@@ -447,6 +464,8 @@ def _validate_rule(
         ttl_ms=ttl_ms,
         linger_ms=linger_ms,
         hold_when=hold_when,
+        hold_until_when=hold_until_when,
+        hold_until_for_ms=hold_until_for_ms,
         authority=authority,
         confidence=float(confidence),
         reason=str(raw.get("reason", "")),
@@ -460,6 +479,8 @@ def _validate_rule(
         edge_created=bool(raw.get("edge_created", False)),
         enabled=enabled,
         labels=tuple(labels_raw),
+        group=group,
+        profile=profile,
         notes=notes,
         source_file=file,
         source_line=line,
@@ -544,7 +565,7 @@ def _normalize_hold_linger(
         return
     if not isinstance(hold, dict):
         raise RuleLoadError("`hold` must be a mapping", file=file, line=line)
-    unknown = set(hold) - {"while", "after", "after_when_stops"}
+    unknown = set(hold) - {"while", "until", "after", "after_when_stops"}
     if unknown:
         raise RuleLoadError(
             f"`hold` does not support fields {sorted(unknown)} yet",
@@ -574,6 +595,48 @@ def _parse_hold_when(
     if hold_while is None:
         return None
     return _observe_to_when(hold_while, file=file, line=line)
+
+
+def _parse_hold_until(
+    hold: Any,
+    rule_id: str,
+    file: Path | None,
+    line: int | None,
+) -> tuple[str | None, int]:
+    if hold is None:
+        return None, 0
+    if not isinstance(hold, dict):
+        raise RuleLoadError(f"Rule {rule_id!r}: `hold` must be a mapping", file=file, line=line)
+    hold_until = hold.get("until")
+    if hold_until is None:
+        return None, 0
+    if not isinstance(hold_until, dict):
+        raise RuleLoadError(f"Rule {rule_id!r}: `hold.until` must be a mapping", file=file, line=line)
+    release_observe = {
+        key: value
+        for key, value in hold_until.items()
+        if key != "for"
+    }
+    if not release_observe:
+        raise RuleLoadError(
+            f"Rule {rule_id!r}: `hold.until` must contain at least one release condition",
+            file=file,
+            line=line,
+        )
+    release_when = _observe_to_when(release_observe, file=file, line=line)
+    release_for_ms, release_for_entity, _release_for_entity_unit = _parse_for(
+        hold_until.get("for"),
+        f"Rule {rule_id!r}: hold.until.for",
+        file,
+        line,
+    )
+    if release_for_entity is not None:
+        raise RuleLoadError(
+            f"Rule {rule_id!r}: `hold.until.for` does not support entity-backed durations yet",
+            file=file,
+            line=line,
+        )
+    return release_when, release_for_ms
 
 
 def _normalize_vnext_suppression(

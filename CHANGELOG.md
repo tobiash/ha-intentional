@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.9] - 2026-06-12
+
+### Added
+- **Stable hold release conditions** with `hold.until` and `hold.until.for`, allowing rules to remain active until an off/absence condition has been continuously true for a configured duration.
+- **Lifecycle diagnostics** in rule status, world model, explain responses, and rule switch attributes: `phase`, `active_for_ms`, `condition_active_for_ms`, and `held_for_ms`.
+- **Rule grouping metadata** via top-level `group` and `profile` fields for mode/profile-oriented authoring.
+- **Simulation API** at `/api/intentional/simulate` for evaluating proposed YAML over a timeline of state changes without applying Home Assistant services.
+
 ## [0.7.8] - 2026-06-12
 
 ### Added

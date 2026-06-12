@@ -48,6 +48,10 @@ Endpoints
     winning rule, competing intents, modifiers, authority chain.
     Useful for debugging conflicts.
 
+- ``POST   /api/intentional/simulate``
+    Evaluate proposed YAML over a timeline of state changes without applying
+    anything to Home Assistant.
+
 Error format
 ------------
 
@@ -72,10 +76,12 @@ from homeassistant.core import HomeAssistant
 
 from ._engine import __version__  # noqa: TID252
 from ._engine.engine import Engine  # noqa: TID252
+from ._engine.projection import simulation_step  # noqa: TID252
 from ._engine.reconciliation import (  # noqa: TID252
     actual_conditions_for_desired_record,
     actual_snapshot,
 )
+from ._engine.schema import dsl_schema  # noqa: TID252
 from ._engine.yaml_loader import RuleLoadError, load_rules_from_string  # noqa: TID252
 from .const import CONF_RULE_DIR, DEFAULT_RULE_DIR, DOMAIN  # noqa: TID252
 from .diagnostics import list_diagnostics  # noqa: TID252
@@ -594,27 +600,7 @@ class IntentionalSchemaView(HomeAssistantView):
     requires_auth = True
 
     async def get(self, request: web.Request) -> web.Response:
-        return web.json_response({
-            "dsl_version": "vnext-draft",
-            "top_level_rule_fields": [
-                "id", "enabled", "labels", "notes", "while", "after", "hold", "observe", "intent",
-                "effect", "authority", "confidence", "reason",
-            ],
-            "observe_operators": [
-                "is", "is_not", "lt", "lte", "gt", "gte", "all", "any",
-                "not", "none", "changed", "happened", "for",
-            ],
-            "intent_field_operators": [
-                "value", "min", "max", "offset", "multiply", "animate", "generate",
-            ],
-            "generator_kinds": [
-                "sample", "walk", "weighted_sample", "gradient", "noise",
-            ],
-            "target_metadata": ["ttl", "linger", "transition", "easing"],
-            "lifecycle_fields": ["while", "after", "hold.while", "hold.after", "hold.after_when_stops"],
-            "effect_service_policy": "any_home_assistant_domain_service",
-            "selector_filters": ["domain", "area", "label", "exclude"],
-        })
+        return web.json_response(dsl_schema())
 
 
 class IntentionalValidateView(HomeAssistantView):
@@ -693,6 +679,54 @@ class IntentionalDryRunView(HomeAssistantView):
             "effects": effects,
             "errors": [],
         })
+
+
+class IntentionalSimulateView(HomeAssistantView):
+    """POST /api/intentional/simulate — evaluate YAML across a state timeline."""
+
+    url = "/api/intentional/simulate"
+    name = "api:intentional:simulate"
+    requires_auth = True
+
+    async def post(self, request: web.Request) -> web.Response:
+        try:
+            data = await request.json()
+        except (ValueError, json.JSONDecodeError) as err:
+            return _error(f"Invalid JSON: {err}", "bad_request", 400)
+        contents = data.get("contents")
+        if not isinstance(contents, str):
+            return _error("Request body must include string `contents`", "bad_request", 400)
+        timeline = data.get("timeline")
+        if not isinstance(timeline, list):
+            return _error("Request body must include list `timeline`", "bad_request", 400)
+        try:
+            rules = load_rules_from_string(contents)
+        except RuleLoadError as err:
+            return web.json_response({"valid": False, "errors": [str(err)]}, status=400)
+
+        engine = Engine(clock_fn=lambda: 0, selector_resolver=lambda _selector: [])
+        engine.load_rules(rules)
+        steps = []
+        for index, step in enumerate(timeline):
+            if not isinstance(step, dict):
+                return _error(f"timeline[{index}] must be a mapping", "bad_request", 400)
+            advance_ms = step.get("advance_ms", 0)
+            if not isinstance(advance_ms, int) or advance_ms < 0:
+                return _error(f"timeline[{index}].advance_ms must be a non-negative integer", "bad_request", 400)
+            if advance_ms:
+                engine.advance_clock(advance_ms)
+            states = step.get("states", {})
+            if not isinstance(states, dict):
+                return _error(f"timeline[{index}].states must be a mapping", "bad_request", 400)
+            for key, value in states.items():
+                if not isinstance(key, str) or "." not in key:
+                    continue
+                entity_id, _sep, field = key.rpartition(".")
+                engine.update_state(entity_id, value, field=field)
+            engine.evaluate_all()
+            steps.append(simulation_step(engine, index=index))
+
+        return web.json_response({"valid": True, "steps": steps, "errors": []})
 
 
 class IntentionalWorldView(HomeAssistantView):
@@ -863,6 +897,7 @@ def register_api(hass: HomeAssistant) -> None:
         IntentionalSchemaView,
         IntentionalValidateView,
         IntentionalDryRunView,
+        IntentionalSimulateView,
         IntentionalWorldView,
         IntentionalDiagnosticsView,
     ]

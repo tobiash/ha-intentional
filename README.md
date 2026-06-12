@@ -76,13 +76,14 @@ What happens:
 - **Reconciliation loop** that compares desired records with actual HA state and skips redundant calls.
 - **Authority tiers**: `sensor < automation < user`, with confidence and recency tiebreakers.
 - **Field-level operators**: direct values, `min`/`floor`, `max`/`cap`, `offset`, and `multiply`.
-- **Dwell and lifecycle**: top-level `after`, `hold.while`, `hold.after`, target `ttl`, and restart-safe lifecycle persistence.
+- **Dwell and lifecycle**: top-level `after`, `hold.while`, stable `hold.until`, `hold.after`, target `ttl`, and restart-safe lifecycle persistence.
 - **Transition policies**: `apply.transition.assert`, `change`, and `withdraw` for HA-native light transitions.
 - **Generated values**: sample durable fields, such as RGB colors, on fixed or random intervals.
 - **Manual override handling**: stable state drift on managed targets becomes a temporary user intent.
 - **HA UI controls**: sidebar rule editor, global automation switch, per-rule enable switches, reload, and clear-manual-override controls.
 - **Storage-backed YAML editor** for validation, dry-run preview, save, and rollback history.
 - **Agent-friendly HTTP API** for schema, validation, dry run, world model, stored rules, and explanations.
+- **Simulation API** for previewing lifecycle behavior over a timeline without applying HA services.
 - **Hot reload** after rule edits.
 - **HACS installable** with CI-covered bundle sync and Home Assistant integration tests.
 
