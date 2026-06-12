@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.16] - 2026-06-12
+
+### Fixed
+- **Ignored light activations** now retry instead of being promoted to short-lived manual off overrides when Home Assistant accepts `light.turn_on` but the light remains off without HA user context.
+
 ## [0.7.15] - 2026-06-12
 
 ### Fixed
