@@ -11,7 +11,7 @@ testing, development, or in other contexts.
 
 from __future__ import annotations
 
-__version__ = "0.7.17"
+__version__ = "0.7.18"
 
 __all__ = [
     "AnimationFrame",
