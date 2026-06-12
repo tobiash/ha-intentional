@@ -14,22 +14,47 @@ def test_frontend_panel_asset_is_bundled() -> None:
 
     assert 'customElements.define("intentional-panel"' in source
     assert '"rules/document"' in source
-    assert '`rules/id/${encodeURIComponent(selectedRuleId)}`' in source
     assert '"validate"' in source
     assert '"dry-run"' in source
+    assert '"simulate"' in source
     assert '"rules/history"' in source
     assert '"rules/rollback"' in source
 
 
-def test_frontend_panel_has_focused_rule_editor() -> None:
+def test_frontend_panel_has_visual_rule_editor() -> None:
     source = PANEL_PATH.read_text()
 
-    assert '_editorMode = "rule"' in source
-    assert 'Save Rule' in source
+    assert '_editorMode = "visual"' in source
+    assert 'Visual rule editor' in source
+    assert 'Rule editor' in source
+    assert 'while → intent' in source
+    assert 'Build a durable' in source
+    assert 'Add Condition' in source
+    assert 'Add Target' in source
+    assert 'Add Effect' in source
+
+
+def test_frontend_panel_keeps_yaml_escape_hatches() -> None:
+    source = PANEL_PATH.read_text()
+
+    assert 'Rule YAML' in source
     assert 'Document YAML' in source
     assert 'extractRuleBlock' in source
     assert 'replaceRuleBlock' in source
     assert '_uniqueRules()' in source
+
+
+def test_frontend_panel_has_no_install_validation_loop() -> None:
+    source = PANEL_PATH.read_text()
+
+    assert '_queueValidate()' in source
+    assert '_validateLocally()' in source
+    assert 'Fix the highlighted fields before saving.' in source
+    assert 'Dry-run evaluates desired targets without applying services.' in source
+    assert 'Use simulation for after/hold timing before installing on the live instance.' in source
+    assert 'this._api("POST", "validate"' in source
+    assert 'this._api("POST", "dry-run"' in source
+    assert 'this._api("POST", "simulate"' in source
 
 
 def test_integration_registers_frontend_panel_asset() -> None:

@@ -218,6 +218,27 @@ Useful agent endpoints:
 
 See [`docs/api.md`](docs/api.md) for the full endpoint reference.
 
+## UI Development Loop
+
+The sidebar panel can be exercised without installing a new build into a real
+Home Assistant instance:
+
+```bash
+python tools/serve_intentional_panel.py
+```
+
+Open `http://127.0.0.1:8765`. The harness serves the bundled panel, injects a
+mock `hass` object with sample entities, and backs `validate`, `dry-run`, and
+`simulate` with the pure Python engine. Use it with:
+
+```bash
+node --check custom_components/intentional/frontend/intentional-panel.js
+pytest tests/test_frontend_panel.py -q
+```
+
+This catches syntax, editor contract, rule validation, dry-run, and lifecycle
+simulation issues before installing on a live Home Assistant instance.
+
 ## Services
 
 - `intentional.fire`: emit a temporary user-authority intent for a target.
