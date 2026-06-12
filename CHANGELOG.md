@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.17] - 2026-06-12
+
+### Fixed
+- **Active intent retry** now rechecks actual Home Assistant state before suppressing duplicate service calls, so ignored activations retry after the transition/grace window even if HA emitted no state-change event.
+
 ## [0.7.16] - 2026-06-12
 
 ### Fixed
