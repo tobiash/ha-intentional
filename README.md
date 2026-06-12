@@ -2,7 +2,7 @@
 
 **Declarative, composable, intent-based automation for Home Assistant.**
 
-`ha-intentional` is a HACS-installable custom component that turns Home Assistant automation into reconciliation: rules **observe** facts about the home, produce durable **intents** for how entities should be, and the engine reconciles actual state toward the resolved desired state.
+`ha-intentional` is a HACS-installable custom component that turns Home Assistant automation into reconciliation: rules describe **while** situations in the home, produce durable **intents** for how entities should be, and the engine reconciles actual state toward the resolved desired state.
 
 Core vocabulary:
 
@@ -28,7 +28,7 @@ Intentional changes the abstraction. You write claims with priority metadata; th
 
 ```yaml
 - id: living-room-dark
-  observe:
+  while:
     sensor.outdoor_light.illuminance:
       lt: 50
   intent:
@@ -40,7 +40,7 @@ Intentional changes the abstraction. You write claims with priority metadata; th
   reason: Dark outside
 
 - id: living-room-tv-cap
-  observe:
+  while:
     media_player.tv: on
   intent:
     light.living_room:
@@ -72,11 +72,11 @@ What happens:
 
 ## Features
 
-- **Structured rules** using `observe:`, `intent:`, and optional `effect:`.
+- **Structured rules** using `while:`, `intent:`, optional `hold:`, and optional `effect:`.
 - **Reconciliation loop** that compares desired records with actual HA state and skips redundant calls.
 - **Authority tiers**: `sensor < automation < user`, with confidence and recency tiebreakers.
 - **Field-level operators**: direct values, `min`/`floor`, `max`/`cap`, `offset`, and `multiply`.
-- **Dwell and lifecycle**: `observe.for`, target `ttl`, target `linger`, and restart-safe lifecycle persistence.
+- **Dwell and lifecycle**: top-level `after`, `hold.while`, `hold.after`, target `ttl`, and restart-safe lifecycle persistence.
 - **Transition policies**: `apply.transition.assert`, `change`, and `withdraw` for HA-native light transitions.
 - **Generated values**: sample durable fields, such as RGB colors, on fixed or random intervals.
 - **Manual override handling**: stable state drift on managed targets becomes a temporary user intent.
@@ -141,7 +141,7 @@ scenes:
 
 rules:
   - id: movie-mode
-    observe:
+    while:
       input_boolean.movie_mode: on
     intent:
       include: scene.movie
@@ -155,7 +155,7 @@ Use field-local `generate` when an active intent should vary durable desired sta
 
 ```yaml
 - id: monitor-backlight-random
-  observe:
+  while:
     binary_sensor.office_occupancy: on
   intent:
     light.monitor_backlight:

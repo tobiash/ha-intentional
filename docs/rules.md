@@ -8,10 +8,10 @@ stored rule document exists yet.
 Rule YAML describes reconciliation rules:
 
 ```text
-observe -> intent
+while -> intent
 ```
 
-`observe:` decides whether a rule is active. `intent:` describes durable desired state. `effect:` describes explicit side effects and is not treated as desired state.
+`while:` describes the situation where a durable desired state should exist. `intent:` describes that desired state. `hold:` can retain an already-active intent after the original situation changes. `effect:` describes explicit side effects and is not treated as desired state.
 
 ## YAML Document Shapes
 
@@ -19,7 +19,7 @@ The stored YAML document may be a plain list of rules:
 
 ```yaml
 - id: office-light
-  observe:
+  while:
     binary_sensor.office_occupancy: on
   intent:
     light.office:
@@ -40,7 +40,7 @@ scenes:
 
 rules:
   - id: focus-mode
-    observe:
+    while:
       input_boolean.focus_mode: on
     intent:
       include: scene.focus
@@ -58,17 +58,18 @@ Invalid new config is rejected and the previous active config remains running.
   authority: automation
   confidence: 0.6
   reason: Office occupied outside working hours
-  observe:
+  while:
     binary_sensor.office_occupancy: on
     schedule.office_working_hours:
       is: off
-    for: 2s
+  after: 2s
+  hold:
+    after: 190s
   intent:
     light.office:
       state: on
       brightness_pct: 40
       color_temp_k: 2700
-      linger: 190s
       apply:
         transition:
           assert: 3s
@@ -89,25 +90,28 @@ Invalid new config is rejected and the previous active config remains running.
 | `authority` | no | `automation` | `sensor`, `automation`, or `user`. |
 | `confidence` | no | `1.0` | Tiebreaker within an authority tier. |
 | `reason` | no | `""` | Human-readable explanation surfaced in status. |
-| `observe` | no | always active | Structured observation. |
+| `while` | no | always active | Structured situation that starts or keeps the rule active. |
+| `after` | no | `0s` | Dwell time before the rule first activates. |
+| `hold` | no | none | Retention policy after `while` stops matching. |
+| `observe` | no | always active | Lower-level spelling for `while`; kept for existing rules. |
 | `intent` | no | none | Durable desired target state. |
 | `effect` | no | none | Side-effect service call. |
 
 Authority order is `sensor < automation < user`. Within the same authority tier, higher confidence wins, then newer intents win.
 
-## Observations
+## Situations
 
 Scalar values imply `is`:
 
 ```yaml
-observe:
+while:
   binary_sensor.office_occupancy: on
 ```
 
 Multiple mapping entries imply `all`:
 
 ```yaml
-observe:
+while:
   binary_sensor.office_occupancy: on
   sensor.office_illuminance:
     lt: 50
@@ -129,28 +133,41 @@ Supported comparison operators:
 Explicit boolean composition:
 
 ```yaml
-observe:
+while:
   any:
     - binary_sensor.office_motion: on
     - binary_sensor.office_presence: on
 ```
 
 ```yaml
-observe:
+while:
   not:
     input_boolean.guest_mode: on
 ```
 
 ```yaml
-observe:
+while:
   none:
     - input_boolean.sleep_mode: on
     - input_boolean.vacation_mode: on
 ```
 
-### Dwell
+### Dwell And Maturity
 
-Use `for` when a level observation must remain true before the rule activates:
+Use top-level `after` when a situation must remain true before the rule activates:
+
+```yaml
+- id: settled-office
+  while:
+    binary_sensor.office_occupancy: on
+  after: 5m
+  intent:
+    light.office:
+      state: on
+      brightness_pct: 70
+```
+
+The lower-level `observe.for` spelling is also accepted:
 
 ```yaml
 observe:
@@ -170,6 +187,35 @@ observe:
 ```
 
 Supported units are `ms`, `s`, `m`, and `h`.
+
+### Hold
+
+Use `hold` when an already-active rule should not immediately withdraw after
+its original situation changes.
+
+```yaml
+- id: living-room-evening-occupied
+  while:
+    binary_sensor.living_room_presence: on
+    schedule.living_room_evening: on
+  hold:
+    while:
+      binary_sensor.living_room_presence: on
+    after: 5m
+  intent:
+    light.living_room:
+      state: on
+      brightness_pct: 70
+```
+
+This means:
+
+- Start while presence and the evening schedule are both true.
+- If the schedule turns off while presence remains true, keep the intent active.
+- Once presence turns off too, keep it for another `5m`, then withdraw.
+
+`hold.after` and `hold.after_when_stops` are equivalent. Target-level `linger` is
+the lower-level spelling for `hold.after`.
 
 ### Edges And Events
 

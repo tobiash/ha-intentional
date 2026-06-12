@@ -197,6 +197,7 @@ class Rule:
     easing: str = "linear"
     ttl_ms: int | None = None
     linger_ms: int | None = None
+    hold_when: str | None = None
     authority: Authority = Authority.AUTOMATION
     confidence: float = 1.0
     reason: str = ""
@@ -220,7 +221,7 @@ class Rule:
 
 # Recognized top-level fields in a rule
 _RULE_TOP_LEVEL = {
-    "id", "extends", "when", "observe", "for", "emit", "intent", "effect", "authority", "confidence", "reason", "blocks", "enabled", "labels", "notes", "edge_created",
+    "id", "extends", "when", "observe", "while", "for", "after", "hold", "emit", "intent", "effect", "authority", "confidence", "reason", "blocks", "enabled", "labels", "notes", "edge_created",
 }
 # Recognized fields in the emit block
 _EMIT_FIELDS = {
@@ -401,6 +402,7 @@ def _validate_rule(
         line,
         default=None,
     )
+    hold_when = _parse_hold_when(raw.get("hold"), rule_id, file, line)
     linger_ms = _parse_optional_duration(
         emit.get("linger"),
         f"Rule {rule_id!r}: linger",
@@ -444,6 +446,7 @@ def _validate_rule(
         easing=easing,
         ttl_ms=ttl_ms,
         linger_ms=linger_ms,
+        hold_when=hold_when,
         authority=authority,
         confidence=float(confidence),
         reason=str(raw.get("reason", "")),
@@ -484,10 +487,14 @@ def _normalize_vnext_rule(
     line: int | None,
 ) -> dict[str, Any]:
     """Normalize the first VNext observe/intent shape to the existing Rule schema."""
-    if "observe" not in raw and "intent" not in raw:
+    if "while" not in raw and "observe" not in raw and "intent" not in raw:
         return raw
 
     normalized = dict(raw)
+    if "observe" in normalized and "while" in normalized:
+        raise RuleLoadError("Use either `while` or `observe`, not both", file=file, line=line)
+    if "observe" not in normalized and "while" in normalized:
+        normalized["observe"] = normalized["while"]
     if normalized.get("enabled") is False:
         normalized["when"] = "false"
     if "when" not in normalized and "observe" in normalized:
@@ -498,6 +505,8 @@ def _normalize_vnext_rule(
         observe_for = normalized["observe"].get("for")
         if observe_for is not None:
             normalized["for"] = observe_for
+    if "for" not in normalized and "after" in normalized:
+        normalized["for"] = normalized["after"]
     if "emit" not in normalized and "intent" in normalized:
         _normalize_vnext_suppression(normalized, file=file, line=line)
         intent = normalized["intent"]
@@ -509,6 +518,7 @@ def _normalize_vnext_rule(
             normalized["emit"] = {"target": "__intentional_effect_only__"}
         else:
             normalized["emit"] = _intent_to_emit(intent, file=file, line=line)
+    _normalize_hold_linger(normalized, file=file, line=line)
     if "intent" in normalized and _observe_contains_edge(normalized.get("observe")):
         normalized["edge_created"] = True
         emit = normalized.get("emit")
@@ -518,6 +528,46 @@ def _normalize_vnext_rule(
     if isinstance(emit, dict) and "ttl" in emit and "linger" in emit:
         raise RuleLoadError("VNext target lifecycle cannot use both `ttl` and `linger`", file=file, line=line)
     return normalized
+
+
+def _normalize_hold_linger(
+    raw: dict[str, Any],
+    *,
+    file: Path | None,
+    line: int | None,
+) -> None:
+    hold = raw.get("hold")
+    if hold is None:
+        return
+    if not isinstance(hold, dict):
+        raise RuleLoadError("`hold` must be a mapping", file=file, line=line)
+    unknown = set(hold) - {"while", "after", "after_when_stops"}
+    if unknown:
+        raise RuleLoadError(
+            f"`hold` does not support fields {sorted(unknown)} yet",
+            file=file,
+            line=line,
+        )
+    hold_after = hold.get("after_when_stops", hold.get("after"))
+    emit = raw.get("emit")
+    if hold_after is not None and isinstance(emit, dict) and "linger" not in emit:
+        emit["linger"] = hold_after
+
+
+def _parse_hold_when(
+    hold: Any,
+    rule_id: str,
+    file: Path | None,
+    line: int | None,
+) -> str | None:
+    if hold is None:
+        return None
+    if not isinstance(hold, dict):
+        raise RuleLoadError(f"Rule {rule_id!r}: `hold` must be a mapping", file=file, line=line)
+    hold_while = hold.get("while")
+    if hold_while is None:
+        return None
+    return _observe_to_when(hold_while, file=file, line=line)
 
 
 def _normalize_vnext_suppression(

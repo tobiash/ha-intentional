@@ -473,6 +473,45 @@ class TestRuleEvaluation:
         engine.evaluate_all()
         assert engine.resolve("light.living_room") is None
 
+    def test_hold_while_retains_intent_before_linger_starts(self) -> None:
+        from intentional.yaml_loader import load_rules_from_string
+
+        engine = Engine(clock_fn=lambda: 1000)
+        engine.load_rules(load_rules_from_string('''
+- id: evening-occupied
+  while:
+    binary_sensor.living_room_presence: on
+    input_boolean.evening_mode: on
+  hold:
+    while:
+      binary_sensor.living_room_presence: on
+    after: 1m
+  intent:
+    light.living_room:
+      brightness_pct: 70
+'''))
+
+        engine.update_state("binary_sensor.living_room_presence", "on")
+        engine.update_state("input_boolean.evening_mode", "on")
+        engine.evaluate_all()
+        assert engine.resolve("light.living_room").value == {"brightness_pct": 70}
+
+        engine.update_state("input_boolean.evening_mode", "off")
+        engine.evaluate_all()
+        assert engine.resolve("light.living_room").value == {"brightness_pct": 70}
+
+        engine.advance_clock(5 * 60_000)
+        engine.evaluate_all()
+        assert engine.resolve("light.living_room").value == {"brightness_pct": 70}
+
+        engine.update_state("binary_sensor.living_room_presence", "off")
+        engine.evaluate_all()
+        assert engine.resolve("light.living_room").value == {"brightness_pct": 70}
+
+        engine.advance_clock(60_000)
+        engine.evaluate_all()
+        assert engine.resolve("light.living_room") is None
+
     def test_lifecycle_records_restore_edge_ttl_intent(self) -> None:
         from intentional.yaml_loader import load_rules_from_string
 

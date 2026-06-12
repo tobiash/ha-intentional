@@ -597,7 +597,7 @@ class IntentionalSchemaView(HomeAssistantView):
         return web.json_response({
             "dsl_version": "vnext-draft",
             "top_level_rule_fields": [
-                "id", "enabled", "labels", "notes", "observe", "intent",
+                "id", "enabled", "labels", "notes", "while", "after", "hold", "observe", "intent",
                 "effect", "authority", "confidence", "reason",
             ],
             "observe_operators": [
@@ -611,6 +611,7 @@ class IntentionalSchemaView(HomeAssistantView):
                 "sample", "walk", "weighted_sample", "gradient", "noise",
             ],
             "target_metadata": ["ttl", "linger", "transition", "easing"],
+            "lifecycle_fields": ["while", "after", "hold.while", "hold.after", "hold.after_when_stops"],
             "effect_service_policy": "any_home_assistant_domain_service",
             "selector_filters": ["domain", "area", "label", "exclude"],
         })

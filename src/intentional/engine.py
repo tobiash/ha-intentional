@@ -68,6 +68,7 @@ class _ParsedRule:
 
     rule: Rule
     when_ast: WhenAST
+    hold_when_ast: WhenAST | None = None
 
 
 class Engine:
@@ -182,10 +183,11 @@ class Engine:
         for rule in rules:
             try:
                 when_ast = parse_when(rule.when)
+                hold_when_ast = parse_when(rule.hold_when) if rule.hold_when else None
             except Exception as e:
                 self._log.append(f"Failed to parse when for {rule.id!r}: {e}")
                 continue
-            self._rules[rule.id] = _ParsedRule(rule=rule, when_ast=when_ast)
+            self._rules[rule.id] = _ParsedRule(rule=rule, when_ast=when_ast, hold_when_ast=hold_when_ast)
         # Drop level-rule intents on reload so active observations recreate
         # intents from the current rule definition (target/value/lifecycle).
         self._active_intents = [
@@ -308,7 +310,11 @@ class Engine:
                 new_active.append(intent)
                 continue
             if intent.rule_id in self._rules:
-                rule = self._rules[intent.rule_id].rule
+                parsed = self._rules[intent.rule_id]
+                rule = parsed.rule
+                if parsed.hold_when_ast is not None and self._eval_when(parsed.hold_when_ast):
+                    new_active.append(intent)
+                    continue
                 if rule.linger_ms and not intent.ignore_when:
                     new_active.append(_linger_intent(intent, rule.linger_ms, now))
                     continue

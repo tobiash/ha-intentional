@@ -133,6 +133,31 @@ class TestRuleSchemaValidation:
         assert rules[0].when == 'binary_sensor.front_door == "on"'
         assert rules[0].for_ms == 30_000
 
+    def test_lifecycle_while_after_hold_normalizes_to_rule(self) -> None:
+        rules = load_rules_from_string("""
+- id: living-room-settled
+  while:
+    binary_sensor.living_room_presence: on
+    sensor.living_room_light:
+      lt: 100
+  after: 5m
+  hold:
+    while:
+      binary_sensor.living_room_presence: on
+    after: 10m
+  intent:
+    light.living_room:
+      state: on
+      brightness_pct: 60
+""")
+
+        assert rules[0].when == 'binary_sensor.living_room_presence == "on" and sensor.living_room_light < 100'
+        assert rules[0].for_ms == 300_000
+        assert rules[0].hold_when == 'binary_sensor.living_room_presence == "on"'
+        assert rules[0].linger_ms == 600_000
+        assert rules[0].target == "light.living_room"
+        assert rules[0].set == {"state": "on", "brightness_pct": 60}
+
     def test_vnext_observe_any_normalizes_to_or_expression(self) -> None:
         rules = load_rules_from_string("""
 - id: office-occupied
