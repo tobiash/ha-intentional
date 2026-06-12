@@ -31,7 +31,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
 
-from ._engine import Engine, RuleLoadError
+from ._engine import Engine, RuleLoadError, __version__
 from ._engine.ha_adapter import (
     ServicePlanSignature,
     clear_pending_state_drift,
@@ -428,7 +428,7 @@ async def _register_frontend_panel(hass: HomeAssistant) -> None:
         webcomponent_name="intentional-panel",
         sidebar_title="Intentional",
         sidebar_icon="mdi:target",
-        module_url=f"{FRONTEND_URL_PATH}/intentional-panel.js",
+        module_url=f"{FRONTEND_URL_PATH}/intentional-panel.js?v={__version__}",
         config={"domain": DOMAIN},
         require_admin=True,
         config_panel_domain=DOMAIN,

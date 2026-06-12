@@ -66,4 +66,4 @@ def test_integration_registers_frontend_panel_asset() -> None:
     assert "async_register_static_paths" in source
     assert "panel_custom.async_register_panel" in source
     assert 'webcomponent_name="intentional-panel"' in source
-    assert 'module_url=f"{FRONTEND_URL_PATH}/intentional-panel.js"' in source
+    assert 'module_url=f"{FRONTEND_URL_PATH}/intentional-panel.js?v={__version__}"' in source
