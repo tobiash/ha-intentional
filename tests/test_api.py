@@ -164,6 +164,12 @@ async def test_explain_view_reports_rule_firing_status() -> None:
             "condition_firing": True,
             "blocked_by": [],
             "for_remaining_ms": None,
+            "phase": "active",
+            "active_for_ms": 0,
+            "condition_active_for_ms": 0,
+            "held_for_ms": None,
+            "group": "",
+            "profile": "",
         },
     ]
 
