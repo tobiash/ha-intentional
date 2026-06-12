@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.15] - 2026-06-12
+
+### Fixed
+- **Withdraw/reactivation reconciliation** now reasserts an active intent when a target is still matching only because a previously issued withdraw is pending/in-flight.
+
 ## [0.7.14] - 2026-06-12
 
 ### Fixed
