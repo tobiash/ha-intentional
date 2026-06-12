@@ -238,7 +238,7 @@ def test_validation_warns_for_presence_light_without_stability() -> None:
     assert warnings == [
         {
             "code": "presence_light_without_stability",
-            "rule_id": "flaky-presence:light.sofa",
+            "rule_id": "flaky-presence",
             "message": "Presence-driven light rule has no dwell (`for`) and no target `linger`; short sensor flaps can toggle lights.",
         }
     ]
