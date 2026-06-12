@@ -1064,7 +1064,7 @@ class TestStructuredDiagnostics:
         assert explanation["winning_intent"]["rule_id"] == "high-priority"
 
     def test_explain_target_reports_blocked_firing_rules(self) -> None:
-        engine = Engine()
+        engine = Engine(clock_fn=lambda: 0)
         engine.load_rules([
             _rule(
                 "movie-mode",
