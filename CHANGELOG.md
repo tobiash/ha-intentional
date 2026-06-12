@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.11] - 2026-06-12
+
+### Added
+- **Visual sidebar rule editor** with form-based rule details, conditions, lifecycle hold settings, target intents, effects, live validation, dry-run preview, simulation, and YAML escape hatches.
+- **Local panel development harness** at `tools/serve_intentional_panel.py` for testing the bundled editor with mocked Home Assistant state and pure-engine validation before installing on a live instance.
+
 ## [0.7.10] - 2026-06-12
 
 ### Fixed
