@@ -7,7 +7,7 @@
 Core vocabulary:
 
 ```text
-observe -> intent
+while -> intent
 ```
 
 Effects are explicit side-effect escape hatches for one-shot service calls. They are separate from durable target-state intents.
@@ -225,7 +225,7 @@ See [`docs/api.md`](docs/api.md) for the full endpoint reference.
 
 ## Status
 
-Current releases focus on the `observe -> intent` rule format, reconciliation status, generated durable values, and Home Assistant UI controls. The DSL is still marked `vnext-draft` in the machine-readable schema while the project converges on final compatibility guarantees.
+Current releases focus on the `while -> intent` rule format, lifecycle hold semantics, reconciliation status, generated durable values, and Home Assistant UI controls. The DSL is still marked `vnext-draft` in the machine-readable schema while the project converges on final compatibility guarantees.
 
 ## License
 

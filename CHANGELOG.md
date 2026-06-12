@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.8] - 2026-06-12
+
+### Added
+- **Lifecycle rule vocabulary** with `while`, `after`, and `hold` as the primary way to describe stateful situations. `hold.while` retains an already-active intent while a secondary situation remains true, and `hold.after`/`hold.after_when_stops` controls withdrawal delay after the hold condition stops.
+
+### Changed
+- **Rule documentation and schema** now present `while -> intent` as the preferred mental model, while still accepting existing `observe` rules.
+
 ## [0.7.7] - 2026-06-12
 
 ### Fixed

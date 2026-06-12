@@ -501,6 +501,9 @@ def _normalize_vnext_rule(
         normalized["when"] = _observe_to_when(normalized["observe"], file=file, line=line)
     elif "when" not in normalized and "intent" in normalized:
         normalized["when"] = "true"
+    observe_has_for = isinstance(normalized.get("observe"), dict) and "for" in normalized["observe"]
+    if "after" in normalized and observe_has_for:
+        raise RuleLoadError("Use either top-level `after` or `observe.for`, not both", file=file, line=line)
     if "for" not in normalized and isinstance(normalized.get("observe"), dict):
         observe_for = normalized["observe"].get("for")
         if observe_for is not None:
@@ -550,8 +553,11 @@ def _normalize_hold_linger(
         )
     hold_after = hold.get("after_when_stops", hold.get("after"))
     emit = raw.get("emit")
-    if hold_after is not None and isinstance(emit, dict) and "linger" not in emit:
-        emit["linger"] = hold_after
+    if hold_after is None or not isinstance(emit, dict):
+        return
+    if "linger" in emit:
+        raise RuleLoadError("Use either `hold.after` or target `linger`, not both", file=file, line=line)
+    emit["linger"] = hold_after
 
 
 def _parse_hold_when(

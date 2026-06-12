@@ -158,6 +158,65 @@ class TestRuleSchemaValidation:
         assert rules[0].target == "light.living_room"
         assert rules[0].set == {"state": "on", "brightness_pct": 60}
 
+    def test_lifecycle_rejects_ambiguous_after_and_observe_for(self) -> None:
+        with pytest.raises(RuleLoadError, match="Use either top-level `after` or `observe.for`"):
+            load_rules_from_string("""
+- id: ambiguous-dwell
+  while:
+    binary_sensor.living_room_presence: on
+    for: 1m
+  after: 5m
+  intent:
+    light.living_room:
+      state: on
+""")
+
+    def test_lifecycle_rejects_ambiguous_hold_after_and_linger(self) -> None:
+        with pytest.raises(RuleLoadError, match="Use either `hold.after` or target `linger`"):
+            load_rules_from_string("""
+- id: ambiguous-hold
+  while:
+    binary_sensor.living_room_presence: on
+  hold:
+    after: 5m
+  intent:
+    light.living_room:
+      state: on
+      linger: 1m
+""")
+
+    def test_lifecycle_hold_survives_multi_target_expansion(self) -> None:
+        rules = load_rules_from_string("""
+- id: living-room-evening
+  while:
+    binary_sensor.living_room_presence: on
+    schedule.living_room_evening: on
+  hold:
+    while:
+      binary_sensor.living_room_presence: on
+    after: 5m
+  intent:
+    light.sofa:
+      state: on
+      brightness_pct: 60
+    light.table:
+      state: on
+      brightness_pct: 40
+""")
+
+        assert [rule.id for rule in rules] == [
+            "living-room-evening:light.sofa",
+            "living-room-evening:light.table",
+        ]
+        assert {rule.target: rule.hold_when for rule in rules} == {
+            "light.sofa": 'binary_sensor.living_room_presence == "on"',
+            "light.table": 'binary_sensor.living_room_presence == "on"',
+        }
+        assert {rule.target: rule.linger_ms for rule in rules} == {
+            "light.sofa": 300_000,
+            "light.table": 300_000,
+        }
+
     def test_vnext_observe_any_normalizes_to_or_expression(self) -> None:
         rules = load_rules_from_string("""
 - id: office-occupied

@@ -67,7 +67,7 @@ GET /api/intentional/rules/document
 
 ```json
 {
-  "contents": "- id: office-light\n  observe:\n    binary_sensor.office_occupancy: on\n  intent:\n    light.office:\n      state: on\n",
+  "contents": "- id: office-light\n  while:\n    binary_sensor.office_occupancy: on\n  intent:\n    light.office:\n      state: on\n",
   "size": 118,
   "generation": "...",
   "rule_count": 1,
@@ -84,7 +84,7 @@ PUT /api/intentional/rules/document
 ```json
 {
   "expected_generation": "current-generation",
-  "contents": "- id: office-light\n  observe:\n    binary_sensor.office_occupancy: on\n  intent:\n    light.office:\n      state: on\n"
+  "contents": "- id: office-light\n  while:\n    binary_sensor.office_occupancy: on\n  intent:\n    light.office:\n      state: on\n"
 }
 ```
 
@@ -120,7 +120,7 @@ PATCH /api/intentional/rules/id/office-light
 ```json
 {
   "expected_generation": "sha256:...",
-  "contents": "- id: office-light\n  enabled: false\n  observe:\n    binary_sensor.office_occupancy: on\n  intent:\n    light.office:\n      state: on\n"
+  "contents": "- id: office-light\n  enabled: false\n  while:\n    binary_sensor.office_occupancy: on\n  intent:\n    light.office:\n      state: on\n"
 }
 ```
 
@@ -200,7 +200,7 @@ for that target instead of stacking duplicate user intents.
 GET /api/intentional/schema
 ```
 
-Returns machine-readable capabilities, including supported top-level fields, observation operators, field operators, target metadata, and selector filters. The schema currently reports `dsl_version: vnext-draft`.
+Returns machine-readable capabilities, including supported top-level fields, lifecycle fields, observation operators, field operators, target metadata, and selector filters. The schema currently reports `dsl_version: vnext-draft`.
 
 ## Validate
 
@@ -210,7 +210,7 @@ POST /api/intentional/validate
 
 ```json
 {
-  "contents": "- id: office-light\n  observe:\n    binary_sensor.office_occupancy: on\n  intent:\n    light.office:\n      state: on\n"
+  "contents": "- id: office-light\n  while:\n    binary_sensor.office_occupancy: on\n  intent:\n    light.office:\n      state: on\n"
 }
 ```
 
@@ -227,7 +227,7 @@ Successful response:
 
 Validation warnings are non-blocking. Current warnings include:
 
-- `presence_light_without_stability`: a presence/occupancy/motion driven light rule lacks both dwell (`for`) and target `linger`, so short sensor flaps may toggle lights.
+- `presence_light_without_stability`: a presence/occupancy/motion driven light rule lacks both dwell (`after`/`for`) and retention (`hold.after`/target `linger`), so short sensor flaps may toggle lights.
 - `unsupported_light_color_temp`: a live light target does not advertise color temperature support for `color_temp_k`.
 - `unsupported_light_color`: a live light target does not advertise color support for configured color fields.
 
@@ -241,7 +241,7 @@ POST /api/intentional/dry-run
 
 ```json
 {
-  "contents": "- id: office-light\n  observe:\n    binary_sensor.office_occupancy: on\n  intent:\n    light.office:\n      state: on\n      brightness_pct: 70\n",
+  "contents": "- id: office-light\n  while:\n    binary_sensor.office_occupancy: on\n  intent:\n    light.office:\n      state: on\n      brightness_pct: 70\n",
   "state_overrides": {
     "binary_sensor.office_occupancy.state": "on"
   }

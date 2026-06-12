@@ -5,7 +5,7 @@ Declarative, composable, intent-based automation for Home Assistant.
 Intentional turns automation into reconciliation:
 
 ```text
-observe -> intent
+while -> intent
 ```
 
 Rules observe home facts, produce durable desired state, and the engine reconciles Home Assistant entities toward that state. Effects remain explicit side effects for notifications, scripts, and other one-shot service calls.
@@ -22,7 +22,7 @@ Rules observe home facts, produce durable desired state, and the engine reconcil
 
 ```yaml
 - id: office-light
-  observe:
+  while:
     binary_sensor.office_occupancy: on
   intent:
     light.office:
@@ -33,7 +33,7 @@ Rules observe home facts, produce durable desired state, and the engine reconcil
   reason: Office occupied
 
 - id: door-open-message
-  observe:
+  while:
     changed:
       binary_sensor.front_door:
         to: on
@@ -45,7 +45,7 @@ Rules observe home facts, produce durable desired state, and the engine reconcil
 
 ## Features
 
-- Structured `observe:` and `intent:` rules.
+- Structured `while:` and `intent:` rules.
 - Conflict resolution by authority, confidence, and recency.
 - Field operators: direct values, caps, floors, offsets, and multipliers.
 - Manual override detection with TTL.

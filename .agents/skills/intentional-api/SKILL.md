@@ -43,7 +43,7 @@ Save payload:
 ```json
 {
   "expected_generation": "current-generation",
-  "contents": "- id: example\n  observe:\n    input_boolean.example: true\n  intent:\n    light.example:\n      state: true\n"
+  "contents": "- id: example\n  while:\n    input_boolean.example: true\n  intent:\n    light.example:\n      state: true\n"
 }
 ```
 
@@ -89,7 +89,7 @@ Rollback records the pre-rollback document in history, so it can be undone.
 
 ## Rule Authoring Notes
 
-- Prefer `observe -> intent` rules.
+- Prefer `while -> intent` rules. Use `after` for dwell and `hold` for retention after the original situation changes.
 - Use durable target-state intents for ongoing desired state.
 - Use `effect:` only for side-effect service calls.
 - Use `apply.transition.assert/change/withdraw` for HA-native transitions.
