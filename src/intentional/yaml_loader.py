@@ -42,7 +42,6 @@ Duration shorthand (used for transition, ttl, animation timing):
 
 from __future__ import annotations
 
-import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -52,173 +51,11 @@ import yaml
 
 from intentional.animation import AnimationSpec
 from intentional.capabilities import vnext_intent_policy_error
+from intentional.durations import parse_duration
 from intentional.generation import ValueGeneratorSpec, parse_generator_spec
 from intentional.intent import Authority
 from intentional.records import Effect, IntentSelector, ObserveSelector
-
-RuleDirFingerprint = tuple[tuple[str, int, int], ...]
-
-# ── Errors ───────────────────────────────────────────────────────────
-
-
-class RuleLoadError(Exception):
-    """Raised when a rule file or rule definition cannot be loaded.
-
-    Includes the source file and line number when available.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        file: Path | None = None,
-        line: int | None = None,
-    ) -> None:
-        parts = []
-        if file is not None:
-            parts.append(f"{file}")
-        if line is not None:
-            parts.append(f"line {line}")
-        prefix = ": ".join(parts) if parts else "rule"
-        super().__init__(f"{prefix}: {message}")
-        self.file = file
-        self.line = line
-
-
-# ── Duration parsing ─────────────────────────────────────────────────
-
-
-_DURATION_RE = re.compile(
-    r"^\s*"
-    r"(?:(?P<hours>\d+(?:\.\d+)?)h)?"
-    r"(?:(?P<minutes>\d+(?:\.\d+)?)m(?!s))?"      # minutes, not milliseconds
-    r"(?:(?P<seconds>\d+(?:\.\d+)?)s)?"
-    r"(?:(?P<millis>\d+)ms)?"
-    r"\s*$"
-)
-
-
-def parse_duration(s: str) -> int:
-    """Parse a duration string like '1h30m' or '500ms' into milliseconds.
-
-    Supported units: ms, s, m (minutes), h (hours). Can be combined: '1h30m15s'.
-    Returns the total duration in milliseconds.
-    """
-    if not isinstance(s, str):
-        raise ValueError(f"Duration must be a string, got {type(s).__name__}")
-    m = _DURATION_RE.match(s)
-    if not m or not any(m.groupdict().values()):
-        raise ValueError(
-            f"Invalid duration {s!r}. Use forms like '500ms', '2s', '5m', '1h', '1h30m15s'."
-        )
-    hours = float(m.group("hours") or 0)
-    minutes = float(m.group("minutes") or 0)
-    seconds = float(m.group("seconds") or 0)
-    millis = int(m.group("millis") or 0)
-    total = int(hours * 3_600_000 + minutes * 60_000 + seconds * 1000 + millis)
-    if total < 0:
-        raise ValueError(f"Duration must be non-negative, got {s!r}")
-    return total
-
-
-# ── Rule dataclass ───────────────────────────────────────────────────
-
-
-@dataclass(frozen=True)
-class Rule:
-    """A loaded rule, ready to be evaluated by the engine.
-
-    Attributes
-    ----------
-    rule_id
-        Unique identifier. Used for `blocks:` references and event attribution.
-    when
-        The trigger expression as a string. Engine evaluates this against
-        the current state of referenced entities.
-    for_ms
-        Optional dwell time: the `when` expression must stay true for this
-        long before the rule fires. Used directly for static dwell timing and
-        as the fallback for dynamic entity-backed dwell timing.
-    for_entity
-        Optional entity_id whose numeric state controls the dwell time.
-    for_entity_unit
-        Unit for the numeric `for_entity` state: ms, s, m, or h.
-    target
-        The entity_id this rule's intents apply to. Empty string when the
-        rule references a scene instead.
-    scene
-        Optional HA scene entity_id (e.g. "scene.movie"). When set, the
-        rule activates this scene instead of operating through the compositor.
-        Mutually exclusive with `target`.
-    set, cap, floor, offset, multiply
-        Per-field modifiers, all dicts.
-    merge
-        Hint flag; currently informational only (compositor uses per-field
-        merge regardless).
-    transition_ms
-        Smooth transition duration, 0 for instant.
-    easing
-        Easing function name.
-    ttl_ms
-        Time-to-live in milliseconds, or None for "until rule withdraws."
-    authority
-        Priority tier.
-    confidence
-        0.0 .. 1.0 priority within the authority tier.
-    reason
-        Human-readable explanation, surfaced in the UI.
-    blocks
-        List of rule IDs to suppress when this rule is active.
-    animation
-        Optional time-varying value spec.
-    source_file
-        Path to the YAML file this rule was loaded from. For error reporting.
-    source_line
-        Line number in the source file. For error reporting.
-    """
-
-    id: str
-    when: str
-    for_ms: int = 0
-    for_entity: str | None = None
-    for_entity_unit: str = "s"
-    target: str = ""
-    scene: str | None = None
-    set: dict[str, Any] = field(default_factory=dict)
-    cap: dict[str, Any] = field(default_factory=dict)
-    floor: dict[str, Any] = field(default_factory=dict)
-    offset: dict[str, Any] = field(default_factory=dict)
-    multiply: dict[str, Any] = field(default_factory=dict)
-    merge: bool = False
-    transition_ms: int = 0
-    transition_assert_ms: int | None = None
-    transition_change_ms: int | None = None
-    transition_withdraw_ms: int | None = None
-    easing: str = "linear"
-    ttl_ms: int | None = None
-    linger_ms: int | None = None
-    hold_when: str | None = None
-    hold_until_when: str | None = None
-    hold_until_for_ms: int = 0
-    authority: Authority = Authority.AUTOMATION
-    confidence: float = 1.0
-    reason: str = ""
-    blocks: tuple[str, ...] = field(default_factory=tuple)
-    animation: AnimationSpec | None = None
-    generators: dict[str, ValueGeneratorSpec] = field(default_factory=dict)
-    effects: tuple[Effect, ...] = field(default_factory=tuple)
-    intent_selectors: tuple[IntentSelector, ...] = field(default_factory=tuple)
-    observe_selectors: tuple[ObserveSelector, ...] = field(default_factory=tuple)
-    observe_selector_mode: str = "any"
-    edge_created: bool = False
-    enabled: bool = True
-    labels: tuple[str, ...] = field(default_factory=tuple)
-    group: str = ""
-    profile: str = ""
-    notes: str = ""
-    source_file: Path | None = None
-    source_line: int | None = None
-
+from intentional.rule_model import Rule, RuleDirFingerprint, RuleLoadError
 
 # ── Schema validation ────────────────────────────────────────────────
 
