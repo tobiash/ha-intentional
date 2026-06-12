@@ -3321,6 +3321,19 @@ class _FakeServices:
         self.calls.append((domain, service, dict(service_data), blocking))
 
 
+class _FailingServices(_FakeServices):
+    async def async_call(
+        self,
+        domain: str,
+        service: str,
+        service_data: dict[str, Any],
+        *,
+        blocking: bool = False,
+    ) -> None:
+        self.calls.append((domain, service, dict(service_data), blocking))
+        raise ValueError("bad service payload")
+
+
 @pytest.mark.asyncio
 async def test_apply_resolved_targets_suppresses_duplicate_calls() -> None:
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
@@ -3356,6 +3369,48 @@ async def test_apply_resolved_targets_suppresses_duplicate_calls() -> None:
             False,
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_apply_resolved_targets_backs_off_failed_service_signature() -> None:
+    pytest.importorskip("homeassistant", reason="homeassistant not installed")
+
+    from custom_components.intentional import _apply_resolved_targets
+    from custom_components.intentional._engine import Engine
+    from custom_components.intentional._engine.yaml_loader import Rule
+
+    engine = Engine(clock_fn=lambda: 1000)
+    engine.load_rules([
+        Rule(
+            id="desk-on",
+            when="input_boolean.work == 'on'",
+            target="light.desk",
+            set={"state": "on", "brightness_pct": 60},
+        )
+    ])
+    engine.update_state("input_boolean.work", "on")
+    engine.evaluate_all()
+
+    services = _FailingServices()
+    hass = SimpleNamespace(services=services, data={})
+    last_applied = {}
+    backoff = {}
+
+    await _apply_resolved_targets(
+        hass,
+        engine,
+        last_applied,
+        service_failure_backoff=backoff,
+    )
+    await _apply_resolved_targets(
+        hass,
+        engine,
+        last_applied,
+        service_failure_backoff=backoff,
+    )
+
+    assert len(services.calls) == 1
+    assert backoff
 
 
 @pytest.mark.asyncio

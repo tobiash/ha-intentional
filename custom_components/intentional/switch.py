@@ -207,7 +207,10 @@ class IntentionalRuleSwitch(SwitchEntity):
     def _rule_status_attributes(self) -> dict[str, Any]:
         if self._engine is None:
             return {}
-        status = self._engine.list_rule_statuses().get(self._rule_id, {})
+        if hasattr(self._engine, "list_authored_rule_statuses"):
+            status = self._engine.list_authored_rule_statuses().get(self._rule_id, {})
+        else:
+            status = self._engine.list_rule_statuses().get(self._rule_id, {})
         return {
             key: value
             for key, value in status.items()

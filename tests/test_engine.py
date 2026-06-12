@@ -63,6 +63,51 @@ class TestStateManagement:
 
 
 class TestRuleEvaluation:
+    def test_authored_rule_statuses_group_expanded_multi_target_rules(self) -> None:
+        from intentional.yaml_loader import load_rules_from_string
+
+        engine = Engine(clock_fn=lambda: 1000)
+        engine.load_rules(load_rules_from_string('''
+- id: living-room-presence
+  observe:
+    binary_sensor.living_room_presence: on
+  intent:
+    light.sofa:
+      state: on
+    light.table:
+      state: on
+'''))
+        engine.update_state("binary_sensor.living_room_presence", "on")
+        engine.evaluate_all()
+
+        statuses = engine.list_authored_rule_statuses()
+
+        assert set(statuses) == {"living-room-presence"}
+        assert statuses["living-room-presence"]["active"] is True
+        assert statuses["living-room-presence"]["active_intent_count"] == 2
+        assert statuses["living-room-presence"]["targets"] == [
+            "light.sofa",
+            "light.table",
+        ]
+
+    def test_world_model_separates_authored_and_active_rules(self) -> None:
+        from intentional.yaml_loader import load_rules_from_string
+
+        engine = Engine(clock_fn=lambda: 1000)
+        engine.load_rules(load_rules_from_string('''
+- id: living-room-presence
+  observe:
+    binary_sensor.living_room_presence: on
+  intent:
+    light.sofa:
+      state: on
+'''))
+
+        world = engine.world_model()
+
+        assert world["authored_rules"][0]["rule_id"] == "living-room-presence"
+        assert world["active_rules"] == []
+
     def test_global_disable_withdraws_active_rule_intents(self) -> None:
         from intentional.yaml_loader import load_rules_from_string
 

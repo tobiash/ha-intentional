@@ -61,6 +61,7 @@ from .const import (
     STORAGE_KEY,
     STORAGE_VERSION,
 )
+from .diagnostics import record_diagnostic
 from .rule_store import StorageRuleStore, rule_store_key
 from .sensor import IntentionalSummarySensor, IntentionalTargetSensor
 
@@ -71,6 +72,7 @@ MANUAL_OVERRIDE_TTL_SECONDS = 7200
 WITHDRAW_TO_OFF_DOMAINS = frozenset({"light", "switch", "input_boolean", "fan", "siren"})
 DRIFT_TRANSITION_GRACE_MS = 2_000
 DRIFT_CONFIRMATION_MS = 1_500
+SERVICE_FAILURE_BACKOFF_MS = 30_000
 
 
 @dataclass(frozen=True)
@@ -284,6 +286,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _last_resolved_targets: dict[str, _ResolvedTargetState] = {}
     _drift_suppressed_until: dict[str, int] = {}
     _drift_candidates: dict[str, Any] = {}
+    _service_failure_backoff: dict[tuple[str, ServicePlanSignature], int] = {}
+    _active_rule_ids: set[str] = set()
     # Track state-change pulses that should stay true through one apply cycle.
     _state_change_pulses: set[str] = set()
     # Event used to signal the tick loop to stop. We use an event rather
@@ -295,7 +299,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     stop_event = asyncio.Event()
 
     async def _tick_loop() -> None:
-        nonlocal _active_scenes
+        nonlocal _active_scenes, _active_rule_ids
         while not stop_event.is_set():
             # Sleep with a timeout so we can react to stop_event promptly.
             try:
@@ -308,6 +312,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             sync_time_context_into_engine(engine)
             _sync_state_into_engine(hass, engine)
             engine.evaluate_all()
+            _active_rule_ids = _record_rule_activity_changes(
+                hass,
+                engine,
+                _active_rule_ids,
+            )
             _confirm_pending_state_drift(
                 hass,
                 engine,
@@ -329,6 +338,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _last_resolved_targets,
                 _drift_suppressed_until,
                 _drift_candidates,
+                _service_failure_backoff,
             )
             if _state_change_pulses:
                 clear_state_change_pulses(engine, _state_change_pulses)
@@ -550,7 +560,7 @@ def _on_ha_state_change_factory(
         ):
             state_change_pulses.add(new_state.entity_id)
         if last_applied is not None:
-            emit_manual_override_for_state_drift(
+            promoted = emit_manual_override_for_state_drift(
                 engine,
                 last_applied,
                 new_state,
@@ -560,6 +570,13 @@ def _on_ha_state_change_factory(
                 drift_candidates=drift_candidates,
                 confirmation_ms=DRIFT_CONFIRMATION_MS,
             )
+            if promoted:
+                record_diagnostic(
+                    hass,
+                    "drift_promoted",
+                    target=new_state.entity_id,
+                    reason="Manual HA state change",
+                )
         # Re-evaluate immediately for snappy response
         sync_time_context_into_engine(engine)
         engine.evaluate_all()
@@ -584,7 +601,7 @@ def _confirm_pending_state_drift(
         if state is None:
             clear_pending_state_drift(drift_candidates, target)
             continue
-        emit_manual_override_for_state_drift(
+        promoted = emit_manual_override_for_state_drift(
             engine,
             last_applied,
             state,
@@ -594,6 +611,37 @@ def _confirm_pending_state_drift(
             drift_candidates=drift_candidates,
             confirmation_ms=DRIFT_CONFIRMATION_MS,
         )
+        if promoted:
+            record_diagnostic(
+                hass,
+                "drift_promoted",
+                target=target,
+                reason="Manual HA state change",
+            )
+
+
+def _record_rule_activity_changes(
+    hass: HomeAssistant,
+    engine: Engine,
+    previous_active: set[str],
+) -> set[str]:
+    """Record authored rule fire/withdraw transitions."""
+    statuses = engine.list_authored_rule_statuses()
+    active = {
+        rule_id
+        for rule_id, status in statuses.items()
+        if status.get("active") or status.get("active_intent_count")
+    }
+    for rule_id in sorted(active - previous_active):
+        record_diagnostic(
+            hass,
+            "rule_fired",
+            rule_id=rule_id,
+            targets=statuses.get(rule_id, {}).get("targets", []),
+        )
+    for rule_id in sorted(previous_active - active):
+        record_diagnostic(hass, "rule_withdrawn", rule_id=rule_id)
+    return active
 
 
 async def _activate_scene_rules(
@@ -654,7 +702,24 @@ async def _apply_pending_effects(hass: HomeAssistant, engine: Engine) -> None:
                 service_data,
                 blocking=False,
             )
+            record_diagnostic(
+                hass,
+                "effect_applied",
+                rule_id=rule_id,
+                domain=effect.domain,
+                service=effect.service,
+                service_data=service_data,
+            )
         except Exception as err:  # noqa: BLE001
+            record_diagnostic(
+                hass,
+                "effect_failed",
+                rule_id=rule_id,
+                domain=effect.domain,
+                service=effect.service,
+                service_data=service_data,
+                error=str(err),
+            )
             _LOGGER.warning(
                 "Failed to apply effect from rule %s via %s.%s: %s",
                 rule_id,
@@ -671,6 +736,7 @@ async def _apply_resolved_targets(
     last_resolved: dict[str, _ResolvedTargetState] | None = None,
     drift_suppressed_until: dict[str, int] | None = None,
     drift_candidates: dict[str, Any] | None = None,
+    service_failure_backoff: dict[tuple[str, ServicePlanSignature], int] | None = None,
 ) -> None:
     """Apply resolved target intents to HA entities via service calls."""
     if last_resolved is None:
@@ -695,6 +761,13 @@ async def _apply_resolved_targets(
             last_resolved[target] = _resolved_target_state(resolved)
             continue
         signature = service_plan_signature(calls)
+        backoff_key = (target, signature)
+        if service_failure_backoff is not None:
+            retry_after = service_failure_backoff.get(backoff_key)
+            if retry_after is not None:
+                if _monotonic_ms() < retry_after:
+                    continue
+                service_failure_backoff.pop(backoff_key, None)
         if last_applied.get(target) == signature:
             last_resolved[target] = _resolved_target_state(resolved)
             continue
@@ -703,6 +776,7 @@ async def _apply_resolved_targets(
         if current_state is not None and service_plan_matches_state(signature, current_state):
             last_applied[target] = signature
             last_resolved[target] = _resolved_target_state(resolved)
+            record_diagnostic(hass, "service_skipped_matching_state", target=target)
             continue
         for domain, service, service_data in calls:
             try:
@@ -712,13 +786,35 @@ async def _apply_resolved_targets(
                     service_data,
                     blocking=False,
                 )
+                record_diagnostic(
+                    hass,
+                    "service_applied",
+                    target=target,
+                    domain=domain,
+                    service=service,
+                    service_data=service_data,
+                )
             except Exception as err:  # noqa: BLE001
+                if service_failure_backoff is not None:
+                    service_failure_backoff[backoff_key] = _monotonic_ms() + SERVICE_FAILURE_BACKOFF_MS
+                record_diagnostic(
+                    hass,
+                    "service_failed",
+                    target=target,
+                    domain=domain,
+                    service=service,
+                    service_data=service_data,
+                    error=str(err),
+                    retry_after_ms=SERVICE_FAILURE_BACKOFF_MS,
+                )
                 _LOGGER.warning(
                     "Failed to apply resolved intent to %s via %s.%s: %s",
                     target, domain, service, err,
                 )
                 break
         else:
+            if service_failure_backoff is not None:
+                service_failure_backoff.pop(backoff_key, None)
             last_applied[target] = signature
             if drift_candidates is not None:
                 clear_pending_state_drift(drift_candidates, target)
@@ -743,12 +839,20 @@ async def _apply_resolved_targets(
         if not calls:
             continue
         signature = service_plan_signature(calls)
+        backoff_key = (stale_target, signature)
+        if service_failure_backoff is not None:
+            retry_after = service_failure_backoff.get(backoff_key)
+            if retry_after is not None:
+                if _monotonic_ms() < retry_after:
+                    continue
+                service_failure_backoff.pop(backoff_key, None)
         if last_applied.get(stale_target) == signature:
             continue
         states = getattr(hass, "states", None)
         current_state = states.get(stale_target) if states is not None else None
         if current_state is not None and service_plan_matches_state(signature, current_state):
             last_applied[stale_target] = signature
+            record_diagnostic(hass, "service_skipped_matching_state", target=stale_target)
             continue
         for domain, service, service_data in calls:
             try:
@@ -758,13 +862,37 @@ async def _apply_resolved_targets(
                     service_data,
                     blocking=False,
                 )
+                record_diagnostic(
+                    hass,
+                    "service_applied",
+                    target=stale_target,
+                    domain=domain,
+                    service=service,
+                    service_data=service_data,
+                    withdraw=True,
+                )
             except Exception as err:  # noqa: BLE001
+                if service_failure_backoff is not None:
+                    service_failure_backoff[backoff_key] = _monotonic_ms() + SERVICE_FAILURE_BACKOFF_MS
+                record_diagnostic(
+                    hass,
+                    "service_failed",
+                    target=stale_target,
+                    domain=domain,
+                    service=service,
+                    service_data=service_data,
+                    error=str(err),
+                    retry_after_ms=SERVICE_FAILURE_BACKOFF_MS,
+                    withdraw=True,
+                )
                 _LOGGER.warning(
                     "Failed to withdraw resolved intent for %s via %s.%s: %s",
                     stale_target, domain, service, err,
                 )
                 break
         else:
+            if service_failure_backoff is not None:
+                service_failure_backoff.pop(backoff_key, None)
             last_applied[stale_target] = signature
             if drift_candidates is not None:
                 clear_pending_state_drift(drift_candidates, stale_target)

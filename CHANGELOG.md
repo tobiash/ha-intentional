@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.6] - 2026-06-12
+
+### Added
+- **Runtime diagnostics ring and API** at `/api/intentional/diagnostics`, recording recent rule fire/withdraw events, service applications/failures/skips, effect applications/failures, and drift promotions.
+- **Validation warnings** for presence-driven light rules without dwell/linger and live light target capability mismatches such as unsupported color temperature or color fields.
+- **Clearer world model fields**: `/api/intentional/world` now includes `authored_rules` and `active_rules` separately from resolved `desired_records`.
+
+### Changed
+- **Authored rule switch runtime attributes** now aggregate expanded multi-target runtime rules back onto the authored rule ID, so rule switches keep `state` as enabled/disabled while exposing accurate `active`, `condition_firing`, `targets`, and related debug attributes.
+- **Failed service-call backoff** now suppresses repeated retries of the same failing target/signature for 30 seconds and records the failure in diagnostics.
+
 ## [0.7.5] - 2026-06-12
 
 ### Fixed

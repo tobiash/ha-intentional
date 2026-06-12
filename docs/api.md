@@ -32,6 +32,7 @@ Long-lived tokens are created in Home Assistant under Profile -> Long-Lived Acce
 | `POST` | `/api/intentional/validate` | Validate proposed YAML. |
 | `POST` | `/api/intentional/dry-run` | Evaluate proposed YAML with optional state overrides. |
 | `GET` | `/api/intentional/world` | Agent-friendly desired/actual world model. |
+| `GET` | `/api/intentional/diagnostics` | Recent runtime events for rule firing, service calls, failures, and drift promotions. |
 
 ## Health
 
@@ -224,6 +225,12 @@ Successful response:
 }
 ```
 
+Validation warnings are non-blocking. Current warnings include:
+
+- `presence_light_without_stability`: a presence/occupancy/motion driven light rule lacks both dwell (`for`) and target `linger`, so short sensor flaps may toggle lights.
+- `unsupported_light_color_temp`: a live light target does not advertise color temperature support for `color_temp_k`.
+- `unsupported_light_color`: a live light target does not advertise color support for configured color fields.
+
 Invalid YAML returns `400` with `valid: false` and an `errors` array.
 
 ## Dry Run
@@ -266,12 +273,33 @@ GET /api/intentional/world
 Returns an agent-friendly snapshot containing:
 
 - `desired_records`: resolved desired targets, reasons, conditions, and actual snapshots where available.
+- `authored_rules`: authored rule statuses grouped by authored rule ID, including enabled state, active state, targets, desired payload, blocked-by status, and metadata.
+- `active_rules`: subset of authored rules currently firing or holding active intents.
 - `lifecycle`: persisted lifecycle state such as generated values and global enabled state.
 - `selector_diagnostics`: selector resolution details.
 - `health`: rule and intent counts.
 - `entities`: actual HA state snapshots for desired targets.
 
 `desired_records[].conditions` includes `DesiredResolved` and, when an actual HA state is available, `ActualMatchesDesired`.
+
+## Diagnostics
+
+```http
+GET /api/intentional/diagnostics?limit=50
+```
+
+Returns a bounded in-memory ring of recent runtime events. This endpoint is for
+answering questions like "why did this lamp toggle?" without reconstructing
+everything from Home Assistant logbook entries.
+
+Event types include:
+
+- `rule_fired` and `rule_withdrawn`
+- `service_applied`, `service_failed`, and `service_skipped_matching_state`
+- `effect_applied` and `effect_failed`
+- `drift_promoted`
+
+The ring is intentionally volatile; it resets when Home Assistant restarts.
 
 ## Error Format
 

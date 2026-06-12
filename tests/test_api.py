@@ -163,6 +163,7 @@ async def test_explain_view_reports_rule_firing_status() -> None:
 def test_all_views_require_auth() -> None:
     """All API views must require authentication."""
     from custom_components.intentional.api import (
+        IntentionalDiagnosticsView,
         IntentionalExplainView,
         IntentionalHealthView,
         IntentionalReloadView,
@@ -186,6 +187,7 @@ def test_all_views_require_auth() -> None:
         IntentionalReloadView,
         IntentionalStateView,
         IntentionalExplainView,
+        IntentionalDiagnosticsView,
     ]:
         assert view_cls.requires_auth is True, (
             f"{view_cls.__name__} must require auth"
@@ -207,6 +209,63 @@ def test_rule_document_response_has_no_file_semantics() -> None:
         "generation": "abc123",
         "rule_count": 1,
         "source": "storage",
+    }
+
+
+def test_diagnostics_view_has_correct_url() -> None:
+    from custom_components.intentional.api import IntentionalDiagnosticsView
+
+    assert IntentionalDiagnosticsView.url == "/api/intentional/diagnostics"
+    assert IntentionalDiagnosticsView.requires_auth is True
+
+
+def test_validation_warns_for_presence_light_without_stability() -> None:
+    from custom_components.intentional._engine.yaml_loader import load_rules_from_string
+    from custom_components.intentional.api import _validation_warnings
+
+    hass = SimpleNamespace(states=SimpleNamespace(get=lambda _target: None))
+    rules = load_rules_from_string('''
+- id: flaky-presence
+  observe:
+    binary_sensor.living_room_presence: on
+  intent:
+    light.sofa:
+      state: on
+''')
+
+    warnings = _validation_warnings(hass, rules)
+
+    assert warnings == [
+        {
+            "code": "presence_light_without_stability",
+            "rule_id": "flaky-presence:light.sofa",
+            "message": "Presence-driven light rule has no dwell (`for`) and no target `linger`; short sensor flaps can toggle lights.",
+        }
+    ]
+
+
+def test_validation_warns_for_unsupported_light_capabilities() -> None:
+    from custom_components.intentional._engine.yaml_loader import load_rules_from_string
+    from custom_components.intentional.api import _validation_warnings
+
+    state = SimpleNamespace(attributes={"supported_color_modes": ["brightness"]})
+    hass = SimpleNamespace(states=SimpleNamespace(get=lambda target: state if target == "light.sofa" else None))
+    rules = load_rules_from_string('''
+- id: sofa-color
+  observe:
+    input_boolean.test: on
+  intent:
+    light.sofa:
+      state: on
+      color_temp_k: 2700
+      rgb_color: [255, 120, 80]
+''')
+
+    warnings = _validation_warnings(hass, rules)
+
+    assert {warning["code"] for warning in warnings} == {
+        "unsupported_light_color_temp",
+        "unsupported_light_color",
     }
 
 

@@ -704,6 +704,11 @@ class Engine:
             "dsl_version": "vnext-draft",
             "rule_count": self.rule_count(),
             "active_intent_count": self.active_intent_count(),
+            "authored_rules": list(self.list_authored_rule_statuses().values()),
+            "active_rules": [
+                status for status in self.list_authored_rule_statuses().values()
+                if status["active"] or status["active_intent_count"]
+            ],
             "desired_records": desired_records,
             "selector_diagnostics": selector_diagnostics(
                 {rule_id: parsed.rule for rule_id, parsed in self._rules.items()},
@@ -725,55 +730,95 @@ class Engine:
 
         statuses: dict[str, dict[str, Any]] = {}
         for rule_id, parsed in self._rules.items():
-            rule = parsed.rule
-            targets = []
-            if rule.target:
-                targets.append(rule.target)
-            if rule.scene:
-                targets.append(rule.scene)
-            targets.extend(
-                _selector_summary(selector)
-                for selector in rule.intent_selectors
+            statuses[rule_id] = self._rule_status(
+                rule_id,
+                parsed.rule,
+                firing,
+                condition_firing,
+                blocked_by,
+                for_remaining,
+                active_counts,
             )
-            desired: dict[str, Any] = {}
-            if rule.set:
-                desired["set"] = dict(rule.set)
-            if rule.cap:
-                desired["cap"] = dict(rule.cap)
-            if rule.floor:
-                desired["floor"] = dict(rule.floor)
-            if rule.offset:
-                desired["offset"] = dict(rule.offset)
-            if rule.multiply:
-                desired["multiply"] = dict(rule.multiply)
-            if rule.effects:
-                desired["effects"] = [
-                    {
-                        "domain": effect.domain,
-                        "service": effect.service,
-                        "target": dict(effect.target),
-                        "data": dict(effect.data),
-                    }
-                    for effect in rule.effects
-                ]
-
-            statuses[rule_id] = {
-                "rule_id": rule_id,
-                "enabled": rule.enabled,
-                "active": rule_id in firing,
-                "condition_firing": rule_id in condition_firing,
-                "active_intent_count": active_counts.get(rule_id, 0),
-                "targets": targets,
-                "desired": desired,
-                "authority": rule.authority.value,
-                "confidence": rule.confidence,
-                "reason": rule.reason,
-                "labels": list(rule.labels),
-                "notes": rule.notes,
-                "blocked_by": sorted(blocked_by.get(rule_id, [])),
-                "for_remaining_ms": for_remaining.get(rule_id),
-            }
         return statuses
+
+    def list_authored_rule_statuses(self) -> dict[str, dict[str, Any]]:
+        """Return statuses grouped by authored rule id before target expansion."""
+        grouped: dict[str, dict[str, Any]] = {}
+        for rule_id, status in self.list_rule_statuses().items():
+            authored_id = rule_id.split(":", 1)[0]
+            current = grouped.get(authored_id)
+            if current is None:
+                grouped[authored_id] = {**status, "rule_id": authored_id}
+                continue
+            current["active"] = current["active"] or status["active"]
+            current["condition_firing"] = current["condition_firing"] or status["condition_firing"]
+            current["active_intent_count"] += status["active_intent_count"]
+            current["targets"] = sorted(set(current["targets"]) | set(status["targets"]))
+            current["blocked_by"] = sorted(set(current["blocked_by"]) | set(status["blocked_by"]))
+            remaining = [
+                value for value in (current.get("for_remaining_ms"), status.get("for_remaining_ms"))
+                if value is not None
+            ]
+            current["for_remaining_ms"] = min(remaining) if remaining else None
+        return grouped
+
+    def _rule_status(
+        self,
+        rule_id: str,
+        rule: Rule,
+        firing: set[str],
+        condition_firing: set[str],
+        blocked_by: dict[str, set[str]],
+        for_remaining: dict[str, int],
+        active_counts: dict[str, int],
+    ) -> dict[str, Any]:
+        targets = []
+        if rule.target:
+            targets.append(rule.target)
+        if rule.scene:
+            targets.append(rule.scene)
+        targets.extend(
+            _selector_summary(selector)
+            for selector in rule.intent_selectors
+        )
+        desired: dict[str, Any] = {}
+        if rule.set:
+            desired["set"] = dict(rule.set)
+        if rule.cap:
+            desired["cap"] = dict(rule.cap)
+        if rule.floor:
+            desired["floor"] = dict(rule.floor)
+        if rule.offset:
+            desired["offset"] = dict(rule.offset)
+        if rule.multiply:
+            desired["multiply"] = dict(rule.multiply)
+        if rule.effects:
+            desired["effects"] = [
+                {
+                    "domain": effect.domain,
+                    "service": effect.service,
+                    "target": dict(effect.target),
+                    "data": dict(effect.data),
+                }
+                for effect in rule.effects
+            ]
+
+        return {
+            "rule_id": rule_id,
+            "enabled": rule.enabled,
+            "active": rule_id in firing,
+            "condition_firing": rule_id in condition_firing,
+            "active_intent_count": active_counts.get(rule_id, 0),
+            "targets": targets,
+            "desired": desired,
+            "authority": rule.authority.value,
+            "confidence": rule.confidence,
+            "reason": rule.reason,
+            "labels": list(rule.labels),
+            "notes": rule.notes,
+            "blocked_by": sorted(blocked_by.get(rule_id, [])),
+            "for_remaining_ms": for_remaining.get(rule_id),
+        }
 
     def explain(self, target: str) -> str:
         """Return a human-readable explanation of a target's resolved value."""
