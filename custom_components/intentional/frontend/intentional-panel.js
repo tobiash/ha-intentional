@@ -117,7 +117,7 @@ class IntentionalPanel extends HTMLElement {
     try {
       const validation = await this._api("POST", "validate", { contents: this._candidateContents() });
       this._validation = validation;
-      this._rules = validation.normalized || [];
+      this._rules = parseDocumentRuleSummaries(this._candidateContents(), validation.normalized || []);
       this._error = quiet ? this._error : "";
       return true;
     } catch (err) {
@@ -441,7 +441,6 @@ class IntentionalPanel extends HTMLElement {
             ${intentInputField("Change transition", "transitionChange", intent.transitionChange, "5s", "Used for value changes")}
             ${intentInputField("Withdraw transition", "transitionWithdraw", intent.transitionWithdraw, "7s", "Used when turning off")}
             ${intentInputField("TTL", "ttl", intent.ttl, "30s")}
-            ${intentInputField("Linger", "linger", intent.linger, "5m")}
             ${intentInputField("Easing", "easing", intent.easing, "linear")}
           </div>
         </details>
@@ -648,6 +647,23 @@ function parseRuleForm(block, apiRule) {
   return form;
 }
 
+function parseDocumentRuleSummaries(contents, normalizedRules = []) {
+  const normalizedById = new Map((normalizedRules || []).map((rule) => [rule.id, rule]));
+  return extractRuleBlocks(contents).map(({ id, block }) => {
+    const normalized = normalizedById.get(id) || {};
+    const intents = parseIntentSection(sectionLines(block, "intent"), null);
+    const enabled = extractScalar(block, "enabled");
+    return {
+      ...normalized,
+      id,
+      enabled: enabled === "" ? normalized.enabled !== false : !["false", "False", "off", "0"].includes(enabled),
+      reason: extractScalar(block, "reason") || normalized.reason || "",
+      target: intents.length === 1 ? intents[0].target : extractNestedScalar(block, "emit", "target") || normalized.target || "",
+      count: Math.max(1, intents.length || (normalized.target ? 1 : 0)),
+    };
+  });
+}
+
 function stringifyRule(form) {
   const lines = [`- id: ${yamlScalar(form.id.trim())}`];
   if (form.enabled === false) lines.push("  enabled: false");
@@ -714,7 +730,6 @@ function writeIntents(lines, intents) {
       else lines.push(`      ${field.name.trim()}:`, `        ${op}: ${yamlScalar(field.value)}`);
     }
     if (intent.ttl.trim()) lines.push(`      ttl: ${yamlScalar(intent.ttl.trim())}`);
-    if (intent.linger.trim()) lines.push(`      linger: ${yamlScalar(intent.linger.trim())}`);
     if (intent.easing.trim() && intent.easing.trim() !== "linear") lines.push(`      easing: ${yamlScalar(intent.easing.trim())}`);
     if (intent.transitionAssert.trim() || intent.transitionChange.trim() || intent.transitionWithdraw.trim()) {
       lines.push("      apply:", "        transition:");
@@ -760,7 +775,7 @@ function parseIntentSection(lines, apiRule) {
     if (!current) continue;
     const scalar = lines[index].match(/^\s{6}([\w_]+):\s*(.+?)\s*$/);
     if (scalar && !["ttl", "linger", "easing"].includes(scalar[1])) current.fields.push({ name: scalar[1], operator: "value", value: stripQuotes(scalar[2]) });
-    if (scalar && ["ttl", "linger", "easing"].includes(scalar[1])) current[scalar[1]] = stripQuotes(scalar[2]);
+    if (scalar && ["ttl", "easing"].includes(scalar[1])) current[scalar[1]] = stripQuotes(scalar[2]);
     const object = lines[index].match(/^\s{6}([\w_]+):\s*$/);
     const op = lines[index + 1]?.match(/^\s{8}(value|min|max|offset|multiply):\s*(.+?)\s*$/);
     if (object && op) { current.fields.push({ name: object[1], operator: op[1], value: stripQuotes(op[2]) }); index += 1; }
@@ -817,6 +832,22 @@ function appendRuleBlock(contents, replacement) {
   return `${trimmed}${trimmed ? "\n" : ""}${String(replacement).trimEnd()}\n`;
 }
 
+function extractRuleBlocks(contents) {
+  const lines = String(contents || "").split("\n");
+  const blocks = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index].match(/^\s*-\s+id:\s*['"]?([^'"#\s]+)['"]?\s*(?:#.*)?$/);
+    if (!match) continue;
+    let end = lines.length;
+    for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+      if (/^---\s*$/.test(lines[cursor]) || /^\s*-\s+id:\s*/.test(lines[cursor])) { end = cursor; break; }
+    }
+    blocks.push({ id: match[1], block: lines.slice(index, end).join("\n").trimEnd() + "\n" });
+    index = end - 1;
+  }
+  return blocks;
+}
+
 function findRuleBlock(contents, ruleId) {
   const lines = String(contents || "").split("\n");
   const idPattern = new RegExp(`^\\s*-\\s+id:\\s*['\"]?${escapeRegExp(ruleId)}['\"]?\\s*(?:#.*)?$`);
@@ -836,6 +867,10 @@ function extractScalar(contents, key) {
 function extractIndentedScalar(lines, key) {
   const match = lines.join("\n").match(new RegExp(`^\\s{4,6}${key}:\\s*(.+?)\\s*$`, "m"));
   return match ? stripQuotes(match[1]) : "";
+}
+
+function extractNestedScalar(contents, section, key) {
+  return extractIndentedScalar(sectionLines(contents, section), key);
 }
 
 function extractInlineList(contents, key) {

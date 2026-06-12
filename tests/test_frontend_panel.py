@@ -32,6 +32,8 @@ def test_frontend_panel_has_visual_rule_editor() -> None:
     assert 'Add Condition' in source
     assert 'Add Target' in source
     assert 'Add Effect' in source
+    assert 'intentInputField("Linger"' not in source
+    assert 'current[scalar[1]] = stripQuotes(scalar[2])' in source
 
 
 def test_frontend_panel_keeps_yaml_escape_hatches() -> None:
@@ -42,6 +44,14 @@ def test_frontend_panel_keeps_yaml_escape_hatches() -> None:
     assert 'extractRuleBlock' in source
     assert 'replaceRuleBlock' in source
     assert '_uniqueRules()' in source
+
+
+def test_frontend_panel_lists_authored_document_rules() -> None:
+    source = PANEL_PATH.read_text()
+
+    assert 'parseDocumentRuleSummaries(this._candidateContents(), validation.normalized || [])' in source
+    assert 'function extractRuleBlocks(contents)' in source
+    assert 'normalized || []' in source
 
 
 def test_frontend_panel_has_no_install_validation_loop() -> None:
