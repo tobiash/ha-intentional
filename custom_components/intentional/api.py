@@ -810,7 +810,7 @@ def _validation_warnings(hass: HomeAssistant, rules: list[Any]) -> list[dict[str
             warnings.append({
                 "code": "presence_light_without_stability",
                 "rule_id": rule.id,
-                "message": "Presence-driven light rule has no dwell (`for`) and no target `linger`; short sensor flaps can toggle lights.",
+                "message": "Presence-driven light rule has no dwell (`after`/`for`) and no retention (`hold.until.for` or target `linger`); short sensor flaps can toggle lights.",
             })
         for field_warning in _live_capability_warnings(hass, rule):
             warnings.append(field_warning)
@@ -821,7 +821,11 @@ def _looks_like_presence_light_rule_without_stability(rule: Any) -> bool:
     target = getattr(rule, "target", "")
     if not isinstance(target, str) or not target.startswith("light."):
         return False
-    if getattr(rule, "for_ms", 0) or getattr(rule, "linger_ms", None) is not None:
+    if (
+        getattr(rule, "for_ms", 0)
+        or getattr(rule, "hold_until_for_ms", 0)
+        or getattr(rule, "linger_ms", None) is not None
+    ):
         return False
     set_payload = getattr(rule, "set", {}) or {}
     if set_payload.get("state") not in {True, "on", "true", "True"}:

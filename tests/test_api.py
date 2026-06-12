@@ -253,9 +253,30 @@ def test_validation_warns_for_presence_light_without_stability() -> None:
         {
             "code": "presence_light_without_stability",
             "rule_id": "flaky-presence",
-            "message": "Presence-driven light rule has no dwell (`for`) and no target `linger`; short sensor flaps can toggle lights.",
+            "message": "Presence-driven light rule has no dwell (`after`/`for`) and no retention (`hold.until.for` or target `linger`); short sensor flaps can toggle lights.",
         }
     ]
+
+
+def test_validation_accepts_hold_until_as_presence_stability() -> None:
+    from custom_components.intentional._engine.yaml_loader import load_rules_from_string
+    from custom_components.intentional.api import _validation_warnings
+
+    hass = SimpleNamespace(states=SimpleNamespace(get=lambda _target: None))
+    rules = load_rules_from_string('''
+- id: stable-presence
+  while:
+    binary_sensor.living_room_presence: on
+  hold:
+    until:
+      binary_sensor.living_room_presence: off
+      for: 15m
+  intent:
+    light.sofa:
+      state: on
+''')
+
+    assert _validation_warnings(hass, rules) == []
 
 
 def test_validation_warns_for_unsupported_light_capabilities() -> None:
