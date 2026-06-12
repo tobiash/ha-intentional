@@ -69,6 +69,7 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH, Platform.BUTTON]
 MANUAL_OVERRIDE_TTL_SECONDS = 7200
+DRIFT_OVERRIDE_TTL_SECONDS = 300
 WITHDRAW_TO_OFF_DOMAINS = frozenset({"light", "switch", "input_boolean", "fan", "siren"})
 DRIFT_TRANSITION_GRACE_MS = 2_000
 DRIFT_CONFIRMATION_MS = 1_500
@@ -564,7 +565,7 @@ def _on_ha_state_change_factory(
                 engine,
                 last_applied,
                 new_state,
-                ttl_ms=MANUAL_OVERRIDE_TTL_SECONDS * 1000,
+                ttl_ms=DRIFT_OVERRIDE_TTL_SECONDS * 1000,
                 now_ms=_monotonic_ms(),
                 drift_suppressed_until=drift_suppressed_until,
                 drift_candidates=drift_candidates,
@@ -605,7 +606,7 @@ def _confirm_pending_state_drift(
             engine,
             last_applied,
             state,
-            ttl_ms=MANUAL_OVERRIDE_TTL_SECONDS * 1000,
+            ttl_ms=DRIFT_OVERRIDE_TTL_SECONDS * 1000,
             now_ms=now_ms,
             drift_suppressed_until=drift_suppressed_until,
             drift_candidates=drift_candidates,
@@ -749,8 +750,6 @@ async def _apply_resolved_targets(
             continue
         resolved_value = dict(resolved.value)
         previous = last_resolved.get(target)
-        if previous is not None and previous.value == resolved_value and target in last_applied:
-            continue
         transition_ms = _transition_ms_for_resolved_change(previous, resolved)
         calls = service_calls_for_resolved_target(
             target,
@@ -826,9 +825,10 @@ async def _apply_resolved_targets(
             last_resolved[target] = _resolved_target_state(resolved)
 
     for stale_target in set(last_resolved) - active_targets:
-        previous = last_resolved.pop(stale_target)
+        previous = last_resolved[stale_target]
         withdraw_value = _default_withdraw_value(stale_target, previous)
         if withdraw_value is None:
+            last_resolved.pop(stale_target, None)
             continue
         transition_ms = previous.transition_withdraw_ms if previous.transition_withdraw_ms is not None else previous.transition_ms
         calls = service_calls_for_resolved_target(
@@ -846,14 +846,30 @@ async def _apply_resolved_targets(
                 if _monotonic_ms() < retry_after:
                     continue
                 service_failure_backoff.pop(backoff_key, None)
-        if last_applied.get(stale_target) == signature:
-            continue
         states = getattr(hass, "states", None)
         current_state = states.get(stale_target) if states is not None else None
         if current_state is not None and service_plan_matches_state(signature, current_state):
+            last_resolved.pop(stale_target, None)
             last_applied[stale_target] = signature
             record_diagnostic(hass, "service_skipped_matching_state", target=stale_target)
             continue
+        if last_applied.get(stale_target) == signature:
+            if current_state is not None and _state_has_user_context(current_state):
+                last_resolved.pop(stale_target, None)
+                last_applied.pop(stale_target, None)
+                if drift_candidates is not None:
+                    clear_pending_state_drift(drift_candidates, stale_target)
+                record_diagnostic(hass, "withdraw_cancelled_user_change", target=stale_target)
+                continue
+            suppress_until = (
+                drift_suppressed_until.get(stale_target)
+                if drift_suppressed_until is not None
+                else None
+            )
+            if suppress_until is not None and _monotonic_ms() < suppress_until:
+                continue
+            if states is None:
+                continue
         for domain, service, service_data in calls:
             try:
                 await hass.services.async_call(
@@ -934,14 +950,19 @@ def _default_withdraw_value(target: str, previous: _ResolvedTargetState) -> dict
     return {"state": "off"}
 
 
+def _state_has_user_context(state: State) -> bool:
+    context = getattr(state, "context", None)
+    return getattr(context, "user_id", None) is not None
+
+
 def _suppress_drift_during_transition(
     drift_suppressed_until: dict[str, int] | None,
     target: str,
     transition_ms: int,
 ) -> None:
-    if drift_suppressed_until is None or transition_ms <= 0:
+    if drift_suppressed_until is None:
         return
-    drift_suppressed_until[target] = _monotonic_ms() + transition_ms + DRIFT_TRANSITION_GRACE_MS
+    drift_suppressed_until[target] = _monotonic_ms() + max(0, transition_ms) + DRIFT_TRANSITION_GRACE_MS
 
 
 def _monotonic_ms() -> int:

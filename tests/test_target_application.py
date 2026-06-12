@@ -3334,6 +3334,17 @@ class _FailingServices(_FakeServices):
         raise ValueError("bad service payload")
 
 
+class _FakeStates:
+    def __init__(self, states: dict[str, Any]) -> None:
+        self._states = dict(states)
+
+    def get(self, entity_id: str) -> Any:
+        return self._states.get(entity_id)
+
+    def set(self, entity_id: str, state: Any) -> None:
+        self._states[entity_id] = state
+
+
 @pytest.mark.asyncio
 async def test_apply_resolved_targets_suppresses_duplicate_calls() -> None:
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
@@ -3496,6 +3507,277 @@ async def test_apply_resolved_targets_uses_assert_and_withdraw_transitions() -> 
             "light",
             "turn_off",
             {"entity_id": "light.desk", "transition": 6.0},
+            False,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_apply_resolved_targets_retries_withdraw_until_state_matches(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("homeassistant", reason="homeassistant not installed")
+
+    import custom_components.intentional as integration
+    from custom_components.intentional import _apply_resolved_targets
+    from custom_components.intentional._engine import Engine
+    from custom_components.intentional._engine.yaml_loader import load_rules_from_string
+
+    now_ms = 1_000
+    monkeypatch.setattr(integration, "_monotonic_ms", lambda: now_ms)
+    engine = Engine(clock_fn=lambda: 1000)
+    engine.load_rules(load_rules_from_string('''
+- id: desk-presence
+  observe:
+    binary_sensor.desk_presence: on
+  intent:
+    light.desk:
+      state: on
+      brightness_pct: 40
+      apply:
+        transition:
+          assert: 2s
+          withdraw: 6s
+'''))
+    services = _FakeServices()
+    states = _FakeStates({"light.desk": SimpleNamespace(entity_id="light.desk", state="off", attributes={})})
+    hass = SimpleNamespace(services=services, states=states)
+    last_applied = {}
+    last_resolved = {}
+    drift_suppressed_until = {}
+
+    engine.update_state("binary_sensor.desk_presence", "on")
+    engine.evaluate_all()
+    await _apply_resolved_targets(
+        hass,
+        engine,
+        last_applied,
+        last_resolved,
+        drift_suppressed_until,
+    )
+    states.set("light.desk", SimpleNamespace(entity_id="light.desk", state="on", attributes={"brightness": 102}))
+
+    engine.update_state("binary_sensor.desk_presence", "off")
+    engine.evaluate_all()
+    await _apply_resolved_targets(
+        hass,
+        engine,
+        last_applied,
+        last_resolved,
+        drift_suppressed_until,
+    )
+    await _apply_resolved_targets(
+        hass,
+        engine,
+        last_applied,
+        last_resolved,
+        drift_suppressed_until,
+    )
+
+    assert services.calls == [
+        (
+            "light",
+            "turn_on",
+            {"entity_id": "light.desk", "brightness_pct": 40, "transition": 2.0},
+            False,
+        ),
+        (
+            "light",
+            "turn_off",
+            {"entity_id": "light.desk", "transition": 6.0},
+            False,
+        ),
+    ]
+    assert "light.desk" in last_resolved
+
+    now_ms = 10_000
+    await _apply_resolved_targets(
+        hass,
+        engine,
+        last_applied,
+        last_resolved,
+        drift_suppressed_until,
+    )
+
+    assert services.calls[-1] == (
+        "light",
+        "turn_off",
+        {"entity_id": "light.desk", "transition": 6.0},
+        False,
+    )
+    assert len([call for call in services.calls if call[1] == "turn_off"]) == 2
+
+    states.set("light.desk", SimpleNamespace(entity_id="light.desk", state="off", attributes={}))
+    await _apply_resolved_targets(
+        hass,
+        engine,
+        last_applied,
+        last_resolved,
+        drift_suppressed_until,
+    )
+
+    assert "light.desk" not in last_resolved
+    assert len([call for call in services.calls if call[1] == "turn_off"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_apply_resolved_targets_does_not_fight_user_change_after_withdraw(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("homeassistant", reason="homeassistant not installed")
+
+    import custom_components.intentional as integration
+    from custom_components.intentional import _apply_resolved_targets
+    from custom_components.intentional._engine import Engine
+    from custom_components.intentional._engine.yaml_loader import load_rules_from_string
+
+    now_ms = 1_000
+    monkeypatch.setattr(integration, "_monotonic_ms", lambda: now_ms)
+    engine = Engine(clock_fn=lambda: 1000)
+    engine.load_rules(load_rules_from_string('''
+- id: desk-presence
+  observe:
+    binary_sensor.desk_presence: on
+  intent:
+    light.desk:
+      state: on
+      brightness_pct: 40
+      apply:
+        transition:
+          withdraw: 6s
+'''))
+    services = _FakeServices()
+    states = _FakeStates({"light.desk": SimpleNamespace(entity_id="light.desk", state="off", attributes={})})
+    hass = SimpleNamespace(services=services, states=states)
+    last_applied = {}
+    last_resolved = {}
+    drift_suppressed_until = {}
+    drift_candidates = {}
+
+    engine.update_state("binary_sensor.desk_presence", "on")
+    engine.evaluate_all()
+    await _apply_resolved_targets(
+        hass,
+        engine,
+        last_applied,
+        last_resolved,
+        drift_suppressed_until,
+        drift_candidates,
+    )
+    states.set("light.desk", SimpleNamespace(entity_id="light.desk", state="on", attributes={"brightness": 102}))
+
+    engine.update_state("binary_sensor.desk_presence", "off")
+    engine.evaluate_all()
+    await _apply_resolved_targets(
+        hass,
+        engine,
+        last_applied,
+        last_resolved,
+        drift_suppressed_until,
+        drift_candidates,
+    )
+
+    states.set(
+        "light.desk",
+        SimpleNamespace(
+            entity_id="light.desk",
+            state="on",
+            attributes={"brightness": 200},
+            context=SimpleNamespace(user_id="user-1"),
+        ),
+    )
+    now_ms = 10_000
+    await _apply_resolved_targets(
+        hass,
+        engine,
+        last_applied,
+        last_resolved,
+        drift_suppressed_until,
+        drift_candidates,
+    )
+
+    assert len([call for call in services.calls if call[1] == "turn_off"]) == 1
+    assert "light.desk" not in last_resolved
+    assert "light.desk" not in last_applied
+
+
+@pytest.mark.asyncio
+async def test_apply_resolved_targets_reasserts_when_rule_reactivates_during_pending_withdraw(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("homeassistant", reason="homeassistant not installed")
+
+    import custom_components.intentional as integration
+    from custom_components.intentional import _apply_resolved_targets
+    from custom_components.intentional._engine import Engine
+    from custom_components.intentional._engine.yaml_loader import load_rules_from_string
+
+    now_ms = 1_000
+    monkeypatch.setattr(integration, "_monotonic_ms", lambda: now_ms)
+    engine = Engine(clock_fn=lambda: 1000)
+    engine.load_rules(load_rules_from_string('''
+- id: desk-presence
+  observe:
+    binary_sensor.desk_presence: on
+  intent:
+    light.desk:
+      state: on
+      brightness_pct: 40
+      apply:
+        transition:
+          assert: 2s
+          change: 4s
+          withdraw: 6s
+'''))
+    services = _FakeServices()
+    states = _FakeStates({"light.desk": SimpleNamespace(entity_id="light.desk", state="off", attributes={})})
+    hass = SimpleNamespace(services=services, states=states)
+    last_applied = {}
+    last_resolved = {}
+    drift_suppressed_until = {}
+
+    engine.update_state("binary_sensor.desk_presence", "on")
+    engine.evaluate_all()
+    await _apply_resolved_targets(
+        hass,
+        engine,
+        last_applied,
+        last_resolved,
+        drift_suppressed_until,
+    )
+    states.set("light.desk", SimpleNamespace(entity_id="light.desk", state="on", attributes={"brightness": 102}))
+
+    engine.update_state("binary_sensor.desk_presence", "off")
+    engine.evaluate_all()
+    await _apply_resolved_targets(
+        hass,
+        engine,
+        last_applied,
+        last_resolved,
+        drift_suppressed_until,
+    )
+
+    engine.update_state("binary_sensor.desk_presence", "on")
+    engine.evaluate_all()
+    await _apply_resolved_targets(
+        hass,
+        engine,
+        last_applied,
+        last_resolved,
+        drift_suppressed_until,
+    )
+
+    assert services.calls == [
+        (
+            "light",
+            "turn_on",
+            {"entity_id": "light.desk", "brightness_pct": 40, "transition": 2.0},
+            False,
+        ),
+        (
+            "light",
+            "turn_off",
+            {"entity_id": "light.desk", "transition": 6.0},
+            False,
+        ),
+        (
+            "light",
+            "turn_on",
+            {"entity_id": "light.desk", "brightness_pct": 40, "transition": 4.0},
             False,
         ),
     ]
