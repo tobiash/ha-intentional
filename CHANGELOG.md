@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.20] - 2026-06-13
+
+### Fixed
+- **Manual light color overrides** now prevent lower-priority alternate color modes from being mixed into the composed target, avoiding color-temperature reassertions when users pick an RGB/XY color.
+
 ## [0.7.19] - 2026-06-13
 
 ### Fixed
