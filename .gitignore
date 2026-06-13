@@ -29,6 +29,9 @@ env/
 coverage.xml
 .tox/
 
+# Local Go build artifacts
+/intentionalctl
+
 # Local rule directories (for development)
 local_rules/
 *.local.yaml

@@ -9,43 +9,44 @@ Use this skill to inspect and safely edit Intentional rules through Home Assista
 
 ## Environment
 
-If available, load credentials from `~/.ha-env` without printing secrets:
+Use the local `intentionalctl` helper from this repository. It reads `HASS_URL` and `HASS_TOKEN` from the environment, with fallback to `HOMEASSISTANT_URL`, `HOMEASSISTANT_TOKEN`, and `~/.ha-env`. Never echo token values.
 
 ```bash
-set -a; source "$HOME/.ha-env"; set +a
+go run ./cmd/intentionalctl --help
 ```
 
-Use `HASS_URL` and `HASS_TOKEN`. Never echo the token.
+If you need a reusable binary during a session:
+
+```bash
+go build -buildvcs=false -o /tmp/opencode/intentionalctl ./cmd/intentionalctl
+```
 
 ## Read First
 
 Start every live edit session by reading health, world, and the storage document:
 
 ```bash
-curl -fsS -H "Authorization: Bearer $HASS_TOKEN" "$HASS_URL/api/intentional/health"
-curl -fsS -H "Authorization: Bearer $HASS_TOKEN" "$HASS_URL/api/intentional/world"
-curl -fsS -H "Authorization: Bearer $HASS_TOKEN" "$HASS_URL/api/intentional/rules/document"
+go run ./cmd/intentionalctl health
+go run ./cmd/intentionalctl world
+go run ./cmd/intentionalctl rules-get
 ```
 
 Preserve the returned `generation`; use it as `expected_generation` on saves and rollbacks.
 
 ## Safe Edit Workflow
 
-1. Fetch `GET /api/intentional/rules/document`.
+1. Fetch `go run ./cmd/intentionalctl rules-get`.
 2. Edit the returned `contents` locally.
-3. Validate with `POST /api/intentional/validate`.
-4. Dry-run with `POST /api/intentional/dry-run`.
-5. Simulate lifecycle behavior with `POST /api/intentional/simulate` when timing matters.
-6. Save with `PUT /api/intentional/rules/document` and the original `expected_generation`.
-7. Re-check `GET /api/intentional/world` and relevant `GET /api/intentional/explain/{target}`.
+3. Validate with `go run ./cmd/intentionalctl validate --file /path/to/rules.yaml`.
+4. Dry-run with `go run ./cmd/intentionalctl dry-run --file /path/to/rules.yaml --state binary_sensor.example.state=on`.
+5. Simulate lifecycle behavior with `go run ./cmd/intentionalctl simulate --file /path/to/rules.yaml --timeline /path/to/timeline.json` when timing matters.
+6. Save with `go run ./cmd/intentionalctl rules-save --file /path/to/rules.yaml --expected-generation current-generation`.
+7. Re-check `go run ./cmd/intentionalctl world` and relevant `go run ./cmd/intentionalctl explain light.example`.
 
-Save payload:
+Save command:
 
-```json
-{
-  "expected_generation": "current-generation",
-  "contents": "- id: example\n  while:\n    input_boolean.example: true\n  intent:\n    light.example:\n      state: true\n"
-}
+```bash
+go run ./cmd/intentionalctl rules-save --file /tmp/opencode/rules.yaml --expected-generation current-generation
 ```
 
 If save returns `generation_mismatch`, fetch the document again and merge. Do not overwrite blindly.
@@ -55,7 +56,7 @@ If save returns `generation_mismatch`, fetch the document again and merge. Do no
 Use `/world` for compact desired-vs-actual records and `/explain/{target}` for one entity:
 
 ```bash
-curl -fsS -H "Authorization: Bearer $HASS_TOKEN" "$HASS_URL/api/intentional/explain/light.office"
+go run ./cmd/intentionalctl explain light.office
 ```
 
 Look for:
@@ -69,15 +70,16 @@ Look for:
 
 ## Simulate Lifecycle
 
-Use `/simulate` to preview timing-sensitive rules without touching Home Assistant devices:
+Use `simulate` to preview timing-sensitive rules without touching Home Assistant devices:
 
-```http
-POST /api/intentional/simulate
+```bash
+go run ./cmd/intentionalctl simulate --file /tmp/opencode/rules.yaml --timeline /tmp/opencode/timeline.json
 ```
+
+Timeline file example:
 
 ```json
 {
-  "contents": "- id: example\n  while:\n    binary_sensor.room_presence: on\n  hold:\n    until:\n      binary_sensor.room_presence: off\n      for: 15m\n  intent:\n    light.room:\n      state: on\n",
   "timeline": [
     {"states": {"binary_sensor.room_presence.state": "on"}},
     {"advance_ms": 60000, "states": {"binary_sensor.room_presence.state": "off"}},
@@ -87,6 +89,8 @@ POST /api/intentional/simulate
 }
 ```
 
+The CLI accepts either a raw timeline array or an object with a `timeline` array.
+
 Each response step includes `now_ms`, `active_targets`, `resolved_targets`, and `active_rules` with lifecycle phase/timing fields.
 
 ## History And Rollback
@@ -94,20 +98,19 @@ Each response step includes `now_ms`, `active_targets`, `resolved_targets`, and 
 List history before risky edits:
 
 ```bash
-curl -fsS -H "Authorization: Bearer $HASS_TOKEN" "$HASS_URL/api/intentional/rules/history"
+go run ./cmd/intentionalctl history
 ```
 
-Rollback payload:
+Read a history snapshot:
 
-```http
-POST /api/intentional/rules/rollback
+```bash
+go run ./cmd/intentionalctl history-get generation-to-read
 ```
 
-```json
-{
-  "generation": "generation-to-restore",
-  "expected_generation": "current-generation"
-}
+Rollback command:
+
+```bash
+go run ./cmd/intentionalctl rollback --generation generation-to-restore --expected-generation current-generation
 ```
 
 Rollback records the pre-rollback document in history, so it can be undone.
