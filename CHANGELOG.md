@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.22] - 2026-06-14
+
+### Added
+- **Target defaults** can now be authored with document-level `targets:` defaults, producing low-priority baseline intents for managed idle states such as room lights defaulting to off.
+- **Intentional API CLI** at `cmd/intentionalctl` provides agent-friendly health, world, rules, validation, dry-run, simulation, history, rollback, and reload workflows.
+
+### Fixed
+- **Brightness-only light activations** now remember that their Home Assistant `light.turn_on` service plan activated the target, so final withdrawal can reconcile the light back to off even when the rule did not explicitly set `state: on`.
+- **Home Assistant translations** now contain only translation strings, avoiding translation validation failures from schema metadata in current Home Assistant versions.
+
 ## [0.7.21] - 2026-06-13
 
 ### Fixed
