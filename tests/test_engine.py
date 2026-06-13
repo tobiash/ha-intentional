@@ -108,6 +108,36 @@ class TestRuleEvaluation:
         assert world["authored_rules"][0]["rule_id"] == "living-room-presence"
         assert world["active_rules"] == []
 
+    def test_target_default_resolves_when_no_stronger_intent_is_active(self) -> None:
+        from intentional.yaml_loader import load_rules_from_string
+
+        engine = Engine(clock_fn=lambda: 1000)
+        engine.load_rules(load_rules_from_string('''
+targets:
+  light.living_room:
+    default:
+      state: off
+rules:
+  - id: living-room-presence
+    observe:
+      binary_sensor.living_room_presence: on
+    intent:
+      light.living_room:
+        state: on
+        brightness_pct: 80
+'''))
+        engine.evaluate_all()
+
+        assert engine.resolve("light.living_room").value == {"state": "off"}
+
+        engine.update_state("binary_sensor.living_room_presence", "on")
+        engine.evaluate_all()
+
+        assert engine.resolve("light.living_room").value == {
+            "state": "on",
+            "brightness_pct": 80,
+        }
+
     def test_rule_status_active_includes_lingering_intents(self) -> None:
         from intentional.yaml_loader import load_rules_from_string
 

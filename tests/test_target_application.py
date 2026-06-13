@@ -3916,6 +3916,55 @@ async def test_apply_resolved_targets_uses_assert_and_withdraw_transitions() -> 
 
 
 @pytest.mark.asyncio
+async def test_apply_resolved_targets_withdraws_brightness_only_light_activation() -> None:
+    pytest.importorskip("homeassistant", reason="homeassistant not installed")
+
+    from custom_components.intentional import _apply_resolved_targets
+    from custom_components.intentional._engine import Engine
+    from custom_components.intentional._engine.yaml_loader import load_rules_from_string
+
+    engine = Engine(clock_fn=lambda: 1000)
+    engine.load_rules(load_rules_from_string('''
+- id: evening-light
+  observe:
+    schedule.living_room: on
+  intent:
+    light.desk:
+      brightness_pct: 40
+      apply:
+        transition:
+          withdraw: 6s
+'''))
+    services = _FakeServices()
+    hass = SimpleNamespace(services=services)
+    last_applied = {}
+    last_resolved = {}
+
+    engine.update_state("schedule.living_room", "on")
+    engine.evaluate_all()
+    await _apply_resolved_targets(hass, engine, last_applied, last_resolved)
+
+    engine.update_state("schedule.living_room", "off")
+    engine.evaluate_all()
+    await _apply_resolved_targets(hass, engine, last_applied, last_resolved)
+
+    assert services.calls == [
+        (
+            "light",
+            "turn_on",
+            {"entity_id": "light.desk", "brightness_pct": 40},
+            False,
+        ),
+        (
+            "light",
+            "turn_off",
+            {"entity_id": "light.desk", "transition": 6.0},
+            False,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_apply_resolved_targets_retries_withdraw_until_state_matches(monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 

@@ -9,7 +9,7 @@ Use this skill to inspect and safely edit Intentional rules through Home Assista
 
 ## Environment
 
-Use the local `intentionalctl` helper from this repository. It reads `HASS_URL` and `HASS_TOKEN` from the environment, with fallback to `HOMEASSISTANT_URL`, `HOMEASSISTANT_TOKEN`, and `~/.ha-env`. Never echo token values.
+Use the local `intentionalctl` helper from this repository. It reads `HASS_URL` and `HASS_TOKEN` from the environment, with fallback to `HOMEASSISTANT_URL`, `HOMEASSISTANT_TOKEN`, and `~/.ha-env`. Never echo the token.
 
 ```bash
 go run ./cmd/intentionalctl --help
@@ -20,6 +20,8 @@ If you need a reusable binary during a session:
 ```bash
 go build -buildvcs=false -o /tmp/opencode/intentionalctl ./cmd/intentionalctl
 ```
+
+The CLI wraps the live API endpoints, including `/api/intentional/rules/document`, `/api/intentional/dry-run`, `/api/intentional/simulate`, and `/api/intentional/rules/rollback`.
 
 ## Read First
 

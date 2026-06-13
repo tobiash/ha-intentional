@@ -1246,11 +1246,11 @@ def _load_raw_rule_defs_from_string(
         if doc is None:
             continue  # empty document
         if isinstance(doc, dict):
-            unknown = set(doc) - {"rules", "scenes"}
+            unknown = set(doc) - {"rules", "scenes", "targets"}
             if unknown:
                 raise RuleLoadError(
                     f"Unknown top-level document fields: {sorted(unknown)}. "
-                    "Allowed: ['rules', 'scenes']",
+                    "Allowed: ['rules', 'scenes', 'targets']",
                     file=file,
                 )
             doc_scenes = doc.get("scenes", {})
@@ -1262,6 +1262,13 @@ def _load_raw_rule_defs_from_string(
                 if scene_id in all_scenes:
                     raise RuleLoadError(f"Duplicate scene id {scene_id!r}", file=file)
                 all_scenes[scene_id] = scene
+            raw_rules.extend(
+                _target_default_rule_defs_from_document(
+                    doc.get("targets", {}),
+                    file=file,
+                    scenes=all_scenes,
+                )
+            )
             doc_rules = doc.get("rules", [])
             if not isinstance(doc_rules, list):
                 raise RuleLoadError("Document `rules` must be a list", file=file)
@@ -1281,6 +1288,59 @@ def _load_raw_rule_defs_from_string(
             raw_rules.append(_RawRuleDef(raw=raw, file=file, line=line_num, scenes=all_scenes))
 
     return raw_rules
+
+
+def _target_default_rule_defs_from_document(
+    raw_targets: Any,
+    *,
+    file: Path | None,
+    scenes: dict[str, Any],
+) -> list[_RawRuleDef]:
+    if raw_targets is None:
+        return []
+    if not isinstance(raw_targets, dict):
+        raise RuleLoadError("Document `targets` must be a mapping", file=file)
+    defaults: list[_RawRuleDef] = []
+    for target, policy in raw_targets.items():
+        if not isinstance(target, str) or not target:
+            raise RuleLoadError("Document `targets` keys must be non-empty entity IDs", file=file)
+        if not isinstance(policy, dict):
+            raise RuleLoadError(f"Target policy for {target!r} must be a mapping", file=file)
+        unknown = set(policy) - {"default"}
+        if unknown:
+            raise RuleLoadError(
+                f"Target policy for {target!r} has unknown fields: {sorted(unknown)}. "
+                "Allowed: ['default']",
+                file=file,
+            )
+        default = policy.get("default")
+        if default is None:
+            continue
+        if isinstance(default, str):
+            default = {"state": default}
+        if isinstance(default, bool):
+            default = {"state": default}
+        if not isinstance(default, dict):
+            raise RuleLoadError(f"Target default for {target!r} must be a mapping or scalar state", file=file)
+        defaults.append(_RawRuleDef(
+            raw={
+                "id": f"__target_default__:{target}",
+                "when": "true",
+                "emit": {
+                    "target": target,
+                    "set": _normalize_emit_mapping(default),
+                },
+                "authority": Authority.SENSOR.value,
+                "confidence": 0.0,
+                "reason": f"Default state for {target}",
+                "group": "target-defaults",
+                "profile": "default",
+            },
+            file=file,
+            line=None,
+            scenes=scenes,
+        ))
+    return defaults
 
 
 def _resolve_rule_inheritance(raw_rules: list[_RawRuleDef]) -> list[_RawRuleDef]:

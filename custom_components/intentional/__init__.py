@@ -87,6 +87,7 @@ class _ResolvedTargetState:
     winner_key: tuple[str, int] | None
     transition_ms: int
     transition_withdraw_ms: int | None
+    withdraw_value: dict[str, Any] | None = None
 
 # Declaring http as a dependency tells HA to ensure API helpers are available.
 # The frontend panel is registered opportunistically when the frontend is loaded;
@@ -818,7 +819,7 @@ async def _apply_resolved_targets(
             transition_ms=transition_ms,
         )
         if not calls:
-            last_resolved[target] = _resolved_target_state(resolved)
+            last_resolved[target] = _resolved_target_state(resolved, calls)
             continue
         signature = service_plan_signature(calls)
         backoff_key = (target, signature)
@@ -833,10 +834,10 @@ async def _apply_resolved_targets(
         current_state = states.get(target) if states is not None else None
         if last_applied.get(target) == signature:
             if current_state is None or service_plan_matches_state(signature, current_state):
-                last_resolved[target] = _resolved_target_state(resolved)
+                last_resolved[target] = _resolved_target_state(resolved, calls)
                 continue
             if drift_candidates is not None and target in pending_drift_targets(drift_candidates):
-                last_resolved[target] = _resolved_target_state(resolved)
+                last_resolved[target] = _resolved_target_state(resolved, calls)
                 continue
             suppress_until = (
                 drift_suppressed_until.get(target)
@@ -844,7 +845,7 @@ async def _apply_resolved_targets(
                 else None
             )
             if suppress_until is not None and _monotonic_ms() < suppress_until:
-                last_resolved[target] = _resolved_target_state(resolved)
+                last_resolved[target] = _resolved_target_state(resolved, calls)
                 continue
         if (
             not has_pending_withdraw
@@ -852,7 +853,7 @@ async def _apply_resolved_targets(
             and service_plan_matches_state(signature, current_state)
         ):
             last_applied[target] = signature
-            last_resolved[target] = _resolved_target_state(resolved)
+            last_resolved[target] = _resolved_target_state(resolved, calls)
             record_diagnostic(hass, "service_skipped_matching_state", target=target)
             continue
         context = new_intentional_context(intentional_contexts)
@@ -902,7 +903,7 @@ async def _apply_resolved_targets(
                 target,
                 transition_ms,
             )
-            last_resolved[target] = _resolved_target_state(resolved)
+            last_resolved[target] = _resolved_target_state(resolved, calls)
 
     for stale_target in set(last_resolved) - active_targets:
         previous = last_resolved[stale_target]
@@ -1001,13 +1002,17 @@ async def _apply_resolved_targets(
             )
 
 
-def _resolved_target_state(resolved: Any) -> _ResolvedTargetState:
+def _resolved_target_state(
+    resolved: Any,
+    calls: tuple[tuple[str, str, dict[str, Any]], ...] | None = None,
+) -> _ResolvedTargetState:
     winner = resolved.winning_intent
     return _ResolvedTargetState(
         value=dict(resolved.value),
         winner_key=(winner.rule_id, winner.created_at_ms) if winner is not None else None,
         transition_ms=resolved.transition_ms,
         transition_withdraw_ms=winner.transition_withdraw_ms if winner is not None else None,
+        withdraw_value=_withdraw_value_for_service_plan(resolved.target, calls),
     )
 
 
@@ -1026,6 +1031,7 @@ def _export_pending_withdraws(
             "winner_key": list(state.winner_key) if state.winner_key is not None else None,
             "transition_ms": state.transition_ms,
             "transition_withdraw_ms": state.transition_withdraw_ms,
+            "withdraw_value": dict(state.withdraw_value) if state.withdraw_value is not None else None,
         })
     return records
 
@@ -1104,6 +1110,7 @@ def _resolved_target_state_from_record(
             winner_key=winner_key,
             transition_ms=int(raw.get("transition_ms") or 0),
             transition_withdraw_ms=_optional_int(raw.get("transition_withdraw_ms")),
+            withdraw_value=dict(raw["withdraw_value"]) if isinstance(raw.get("withdraw_value"), dict) else None,
         )
     except (TypeError, ValueError):
         return None
@@ -1128,12 +1135,29 @@ def _transition_ms_for_resolved_change(
 
 
 def _default_withdraw_value(target: str, previous: _ResolvedTargetState) -> dict[str, Any] | None:
+    if previous.withdraw_value is not None:
+        return dict(previous.withdraw_value)
     domain, sep, _object_id = target.partition(".")
     if not sep or domain not in WITHDRAW_TO_OFF_DOMAINS:
         return None
     if previous.value.get("state") != "on":
         return None
     return {"state": "off"}
+
+
+def _withdraw_value_for_service_plan(
+    target: str,
+    calls: tuple[tuple[str, str, dict[str, Any]], ...] | None,
+) -> dict[str, Any] | None:
+    domain, sep, _object_id = target.partition(".")
+    if not sep or domain not in WITHDRAW_TO_OFF_DOMAINS or calls is None:
+        return None
+    for call_domain, service, service_data in calls:
+        if call_domain != domain:
+            continue
+        if service == "turn_on" and service_data.get("entity_id") == target:
+            return {"state": "off"}
+    return None
 
 
 def _last_applied_is_withdraw_signature(

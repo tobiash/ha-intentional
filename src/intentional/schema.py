@@ -13,6 +13,8 @@ def dsl_schema() -> dict[str, Any]:
             "id", "enabled", "labels", "notes", "while", "after", "hold", "observe", "intent",
             "effect", "authority", "confidence", "reason", "group", "profile",
         ],
+        "top_level_document_fields": ["rules", "scenes", "targets"],
+        "target_policy_fields": ["default"],
         "observe_operators": [
             "is", "is_not", "lt", "lte", "gt", "gte", "all", "any",
             "not", "none", "changed", "happened", "for",

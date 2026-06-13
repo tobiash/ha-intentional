@@ -46,6 +46,25 @@ rules:
       include: scene.focus
 ```
 
+Documents may also define target defaults. Defaults are low-priority baseline
+intents used when no stronger rule or manual override is active for a target:
+
+```yaml
+targets:
+  light.living_room:
+    default:
+      state: off
+
+rules:
+  - id: living-room-presence
+    while:
+      binary_sensor.living_room_presence: on
+    intent:
+      light.living_room:
+        state: on
+        brightness_pct: 70
+```
+
 Invalid new config is rejected and the previous active config remains running.
 
 ## Rule Fields
@@ -403,6 +422,29 @@ Composition order:
 
 ## Target Lifecycle
 
+### Target Defaults
+
+Use document-level `targets` when Intentional should own a target's idle state:
+
+```yaml
+targets:
+  light.vitrine_lampe:
+    default: off
+  light.leuchte_sessel_light:
+    default:
+      state: off
+```
+
+Target defaults are implemented as always-active `sensor` authority intents with
+`confidence: 0.0`. Any normal automation or manual/user intent overrides them,
+but when those stronger intents withdraw, the default is revealed and reconciled.
+
+Use target defaults for managed targets such as room lights that should normally
+be off when no presence, schedule, or mode rule wants them on. For opportunistic
+targets that Intentional should only nudge temporarily, omit the default.
+
+### Transitions
+
 Target metadata belongs beside the target fields:
 
 ```yaml
@@ -430,7 +472,7 @@ Supported metadata:
 
 `ttl` and `linger` are mutually exclusive for the same target intent.
 
-When a final `state: on` intent withdraws from a safe on/off domain such as `light`, `switch`, `input_boolean`, `fan`, or `siren`, Intentional can reconcile to `state: off` using the withdraw transition. If another lower-priority intent remains, Intentional reconciles to that revealed state instead.
+When a final activation withdraws from a safe on/off domain such as `light`, `switch`, `input_boolean`, `fan`, or `siren`, Intentional can reconcile to `state: off` using the withdraw transition. For lights, activation is based on the emitted HA service plan, so brightness-only values that call `light.turn_on` are remembered as withdrawable even when the authored rule did not explicitly set `state: on`. If another lower-priority intent remains, Intentional reconciles to that revealed state instead.
 
 ## Generated Values
 

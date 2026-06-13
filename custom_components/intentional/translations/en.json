@@ -95,682 +95,455 @@
       "fields": {
         "target": {
           "name": "Target",
-          "description": "The entity_id to apply the intent to (e.g. light.living_room).",
-          "required": true,
-          "selector": { "entity": {} }
+          "description": "The entity_id to apply the intent to (e.g. light.living_room)."
         },
         "state": {
           "name": "State",
-          "description": "Optional target state such as on, off, toggle, open, closed, or stop.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional target state such as on, off, toggle, open, closed, or stop."
         },
         "brightness_pct": {
           "name": "Brightness (%)",
-          "description": "Optional brightness percentage to set.",
-          "required": false,
-          "selector": { "number": { "min": 0, "max": 100, "unit_of_measurement": "%" } }
+          "description": "Optional brightness percentage to set."
         },
         "brightness": {
           "name": "Brightness",
-          "description": "Optional brightness on Home Assistant's 0-255 scale.",
-          "required": false,
-          "selector": { "number": { "min": 0, "max": 255 } }
+          "description": "Optional brightness on Home Assistant's 0-255 scale."
         },
         "color_temp_k": {
           "name": "Color temperature (K)",
-          "description": "Optional light color temperature in Kelvin.",
-          "required": false,
-          "selector": { "number": { "min": 1000, "max": 10000, "unit_of_measurement": "K" } }
+          "description": "Optional light color temperature in Kelvin."
         },
         "color_temp_mired": {
           "name": "Color temperature (mired)",
-          "description": "Optional light color temperature in mireds.",
-          "required": false,
-          "selector": { "number": { "min": 50, "max": 500 } }
+          "description": "Optional light color temperature in mireds."
         },
         "rgb_color": {
           "name": "RGB color",
-          "description": "Optional light RGB color as [red, green, blue].",
-          "required": false,
-          "selector": { "object": {} }
+          "description": "Optional light RGB color as [red, green, blue]."
         },
         "rgbw_color": {
           "name": "RGBW color",
-          "description": "Optional light RGBW color as [red, green, blue, white].",
-          "required": false,
-          "selector": { "object": {} }
+          "description": "Optional light RGBW color as [red, green, blue, white]."
         },
         "rgbww_color": {
           "name": "RGBWW color",
-          "description": "Optional light RGBWW color as [red, green, blue, cold white, warm white].",
-          "required": false,
-          "selector": { "object": {} }
+          "description": "Optional light RGBWW color as [red, green, blue, cold white, warm white]."
         },
         "hs_color": {
           "name": "HS color",
-          "description": "Optional light hue/saturation color as [hue, saturation].",
-          "required": false,
-          "selector": { "object": {} }
+          "description": "Optional light hue/saturation color as [hue, saturation]."
         },
         "xy_color": {
           "name": "XY color",
-          "description": "Optional light XY color as [x, y].",
-          "required": false,
-          "selector": { "object": {} }
+          "description": "Optional light XY color as [x, y]."
         },
         "effect": {
           "name": "Light effect",
-          "description": "Optional light effect name.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional light effect name."
         },
         "flash": {
           "name": "Flash",
-          "description": "Optional light flash mode such as short or long.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional light flash mode such as short or long."
         },
         "volume_level": {
           "name": "Volume level",
-          "description": "Optional media player or siren volume from 0.0 to 1.0.",
-          "required": false,
-          "selector": { "number": { "min": 0, "max": 1, "step": 0.01 } }
+          "description": "Optional media player or siren volume from 0.0 to 1.0."
         },
         "is_volume_muted": {
           "name": "Muted",
-          "description": "Optional media player mute state.",
-          "required": false,
-          "selector": { "boolean": {} }
+          "description": "Optional media player mute state."
         },
         "tone": {
           "name": "Siren tone",
-          "description": "Optional siren tone name or ID for siren.turn_on targets.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional siren tone name or ID for siren.turn_on targets."
         },
         "source": {
           "name": "Source",
-          "description": "Optional media player source.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional media player source."
         },
         "sound_mode": {
           "name": "Sound mode",
-          "description": "Optional media player sound mode.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional media player sound mode."
         },
         "media_action": {
           "name": "Media action",
-          "description": "Optional media player action such as pause, next, play_media, mute, seek, or join.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional media player action such as pause, next, play_media, mute, seek, or join."
         },
         "media_content_id": {
           "name": "Media content ID",
-          "description": "Optional media content ID for media_player.play_media.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional media content ID for media_player.play_media."
         },
         "media_content_type": {
           "name": "Media content type",
-          "description": "Optional media content type for media_player.play_media.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional media content type for media_player.play_media."
         },
         "enqueue": {
           "name": "Enqueue",
-          "description": "Optional enqueue mode for media_player.play_media.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional enqueue mode for media_player.play_media."
         },
         "announce": {
           "name": "Announce",
-          "description": "Optional media_player.play_media announce flag.",
-          "required": false,
-          "selector": { "boolean": {} }
+          "description": "Optional media_player.play_media announce flag."
         },
         "extra": {
           "name": "Media extra data",
-          "description": "Optional extra payload for media_player.play_media.",
-          "required": false,
-          "selector": { "object": {} }
+          "description": "Optional extra payload for media_player.play_media."
         },
         "shuffle": {
           "name": "Shuffle",
-          "description": "Optional media player shuffle setting.",
-          "required": false,
-          "selector": { "boolean": {} }
+          "description": "Optional media player shuffle setting."
         },
         "repeat": {
           "name": "Repeat mode",
-          "description": "Optional media player repeat mode.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional media player repeat mode."
         },
         "seek_position": {
           "name": "Seek position",
-          "description": "Optional media player seek position in seconds.",
-          "required": false,
-          "selector": { "number": { "min": 0, "step": 0.1 } }
+          "description": "Optional media player seek position in seconds."
         },
         "group_members": {
           "name": "Group members",
-          "description": "Optional media player entity IDs to join to this player.",
-          "required": false,
-          "selector": { "object": {} }
+          "description": "Optional media player entity IDs to join to this player."
         },
         "position": {
           "name": "Position",
-          "description": "Optional cover or valve position from 0 to 100.",
-          "required": false,
-          "selector": { "number": { "min": 0, "max": 100 } }
+          "description": "Optional cover or valve position from 0 to 100."
         },
         "tilt_position": {
           "name": "Tilt position",
-          "description": "Optional cover tilt position from 0 to 100.",
-          "required": false,
-          "selector": { "number": { "min": 0, "max": 100 } }
+          "description": "Optional cover tilt position from 0 to 100."
         },
         "percentage": {
           "name": "Fan percentage",
-          "description": "Optional fan speed percentage from 0 to 100.",
-          "required": false,
-          "selector": { "number": { "min": 0, "max": 100, "unit_of_measurement": "%" } }
+          "description": "Optional fan speed percentage from 0 to 100."
         },
         "hvac_mode": {
           "name": "HVAC mode",
-          "description": "Optional climate HVAC mode such as heat, cool, auto, or off.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional climate HVAC mode such as heat, cool, auto, or off."
         },
         "temperature": {
           "name": "Temperature",
-          "description": "Optional climate temperature setpoint.",
-          "required": false,
-          "selector": { "number": { "step": 0.1 } }
+          "description": "Optional climate temperature setpoint."
         },
         "target_temp_low": {
           "name": "Low temperature",
-          "description": "Optional lower climate setpoint for heat/cool ranges.",
-          "required": false,
-          "selector": { "number": { "step": 0.1 } }
+          "description": "Optional lower climate setpoint for heat/cool ranges."
         },
         "target_temp_high": {
           "name": "High temperature",
-          "description": "Optional upper climate setpoint for heat/cool ranges.",
-          "required": false,
-          "selector": { "number": { "step": 0.1 } }
+          "description": "Optional upper climate setpoint for heat/cool ranges."
         },
         "preset_mode": {
           "name": "Preset mode",
-          "description": "Optional climate preset mode such as eco, away, comfort, or none.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional climate preset mode such as eco, away, comfort, or none."
         },
         "fan_mode": {
           "name": "Fan mode",
-          "description": "Optional climate fan mode such as auto, low, medium, or high.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional climate fan mode such as auto, low, medium, or high."
         },
         "direction": {
           "name": "Fan direction",
-          "description": "Optional fan direction such as forward or reverse.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional fan direction such as forward or reverse."
         },
         "oscillating": {
           "name": "Oscillating",
-          "description": "Optional fan oscillation state.",
-          "required": false,
-          "selector": { "boolean": {} }
+          "description": "Optional fan oscillation state."
         },
         "humidity": {
           "name": "Humidity",
-          "description": "Optional humidifier or climate target humidity percentage.",
-          "required": false,
-          "selector": { "number": { "min": 0, "max": 100, "unit_of_measurement": "%" } }
+          "description": "Optional humidifier or climate target humidity percentage."
         },
         "swing_mode": {
           "name": "Swing mode",
-          "description": "Optional climate swing mode.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional climate swing mode."
         },
         "swing_horizontal_mode": {
           "name": "Horizontal swing mode",
-          "description": "Optional climate horizontal swing mode.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional climate horizontal swing mode."
         },
         "aux_heat": {
           "name": "Auxiliary heat",
-          "description": "Optional climate auxiliary heat state.",
-          "required": false,
-          "selector": { "boolean": {} }
+          "description": "Optional climate auxiliary heat state."
         },
         "mode": {
           "name": "Mode",
-          "description": "Optional humidifier mode such as normal, eco, away, boost, or sleep.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional humidifier mode such as normal, eco, away, boost, or sleep."
         },
         "operation_mode": {
           "name": "Operation mode",
-          "description": "Optional water heater operation mode such as eco or performance.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional water heater operation mode such as eco or performance."
         },
         "away_mode": {
           "name": "Away mode",
-          "description": "Optional water heater away mode flag.",
-          "required": false,
-          "selector": { "boolean": {} }
+          "description": "Optional water heater away mode flag."
         },
         "fan_speed": {
           "name": "Vacuum fan speed",
-          "description": "Optional vacuum fan speed such as balanced, turbo, or max.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional vacuum fan speed such as balanced, turbo, or max."
         },
         "camera_action": {
           "name": "Camera action",
-          "description": "Optional camera action such as snapshot, record, play_stream, enable_motion_detection, or disable_motion_detection.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional camera action such as snapshot, record, play_stream, enable_motion_detection, or disable_motion_detection."
         },
         "filename": {
           "name": "Filename",
-          "description": "Optional file path for camera.snapshot or camera.record.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional file path for camera.snapshot or camera.record."
         },
         "media_player": {
           "name": "Media player",
-          "description": "Optional media player entity for camera.play_stream.",
-          "required": false,
-          "selector": { "entity": { "domain": "media_player" } }
+          "description": "Optional media player entity for camera.play_stream."
         },
         "format": {
           "name": "Stream format",
-          "description": "Optional camera stream format for camera.play_stream.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional camera stream format for camera.play_stream."
         },
         "lookback": {
           "name": "Camera record lookback",
-          "description": "Optional lookback seconds for camera.record.",
-          "required": false,
-          "selector": { "number": { "min": 0 } }
+          "description": "Optional lookback seconds for camera.record."
         },
         "command": {
           "name": "Command",
-          "description": "Optional platform-specific vacuum or remote command.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional platform-specific vacuum or remote command."
         },
         "params": {
           "name": "Vacuum command parameters",
-          "description": "Optional parameters for vacuum.send_command.",
-          "required": false,
-          "selector": { "object": {} }
+          "description": "Optional parameters for vacuum.send_command."
         },
         "cleaning_area_id": {
           "name": "Cleaning area IDs",
-          "description": "Optional Home Assistant area IDs for vacuum.clean_area.",
-          "required": false,
-          "selector": { "object": {} }
+          "description": "Optional Home Assistant area IDs for vacuum.clean_area."
         },
         "activity": {
           "name": "Remote activity",
-          "description": "Optional remote activity for remote.turn_on or remote.toggle.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional remote activity for remote.turn_on or remote.toggle."
         },
         "device": {
           "name": "Remote device",
-          "description": "Optional remote device name for remote.send_command.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional remote device name for remote.send_command."
         },
         "num_repeats": {
           "name": "Remote repeat count",
-          "description": "Optional number of times to repeat a remote command.",
-          "required": false,
-          "selector": { "number": { "min": 1 } }
+          "description": "Optional number of times to repeat a remote command."
         },
         "delay_secs": {
           "name": "Remote delay",
-          "description": "Optional delay in seconds between repeated remote commands.",
-          "required": false,
-          "selector": { "number": { "min": 0, "step": 0.1 } }
+          "description": "Optional delay in seconds between repeated remote commands."
         },
         "hold_secs": {
           "name": "Remote hold duration",
-          "description": "Optional hold duration in seconds for remote commands that support it.",
-          "required": false,
-          "selector": { "number": { "min": 0, "step": 0.1 } }
+          "description": "Optional hold duration in seconds for remote commands that support it."
         },
         "value": {
           "name": "Value",
-          "description": "Optional value for number/input_number/input_text/counter helpers.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional value for number/input_number/input_text/counter helpers."
         },
         "option": {
           "name": "Option",
-          "description": "Optional option for select/input_select helpers.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional option for select/input_select helpers."
         },
         "cycle": {
           "name": "Cycle",
-          "description": "Optional cycle flag for select/input_select next or previous actions.",
-          "required": false,
-          "selector": { "boolean": {} }
+          "description": "Optional cycle flag for select/input_select next or previous actions."
         },
         "code": {
           "name": "Code",
-          "description": "Optional alarm control panel code for arm/disarm services.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional alarm control panel code for arm/disarm services."
         },
         "message": {
           "name": "Message",
-          "description": "Optional notification message for notify targets.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional notification message for notify targets."
         },
         "title": {
           "name": "Title",
-          "description": "Optional notification title for notify targets.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional notification title for notify targets."
         },
         "name": {
           "name": "Name",
-          "description": "Shopping list item name or service-specific display name.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Shopping list item name or service-specific display name."
         },
         "data": {
           "name": "Data",
-          "description": "Optional notification data payload for notify targets.",
-          "required": false,
-          "selector": { "object": {} }
+          "description": "Optional notification data payload for notify targets."
         },
         "service": {
           "name": "Service",
-          "description": "Optional service override for service-style action targets.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional service override for service-style action targets."
         },
         "service_data": {
           "name": "Service data",
-          "description": "Additional service data for browser_mod, telegram_bot, tts, or other service-style action targets.",
-          "required": false,
-          "selector": { "object": {} }
+          "description": "Additional service data for browser_mod, telegram_bot, tts, or other service-style action targets."
         },
         "media_player_entity_id": {
           "name": "Media player entity ID",
-          "description": "Media player entity for tts.speak or tts.cloud_say.",
-          "required": false,
-          "selector": { "entity": {} }
+          "description": "Media player entity for tts.speak or tts.cloud_say."
         },
         "cache": {
           "name": "Cache",
-          "description": "Whether TTS output should be cached where supported.",
-          "required": false,
-          "selector": { "boolean": {} }
+          "description": "Whether TTS output should be cached where supported."
         },
         "language": {
           "name": "Language",
-          "description": "Optional TTS language code.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional TTS language code."
         },
         "options": {
           "name": "Options",
-          "description": "Optional TTS provider options.",
-          "required": false,
-          "selector": { "object": {} }
+          "description": "Optional TTS provider options."
         },
         "browser_id": {
           "name": "Browser ID",
-          "description": "Browser Mod target browser ID or IDs.",
-          "required": false,
-          "selector": { "object": {} }
+          "description": "Browser Mod target browser ID or IDs."
         },
         "user_id": {
           "name": "User ID",
-          "description": "Browser Mod target user ID or IDs.",
-          "required": false,
-          "selector": { "object": {} }
+          "description": "Browser Mod target user ID or IDs."
         },
         "path": {
           "name": "Path",
-          "description": "Browser Mod navigation path.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Browser Mod navigation path."
         },
         "action_text": {
           "name": "Action text",
-          "description": "Browser Mod notification action button text.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Browser Mod notification action button text."
         },
         "action": {
           "name": "Action",
-          "description": "Browser Mod notification action payload.",
-          "required": false,
-          "selector": { "object": {} }
+          "description": "Browser Mod notification action payload."
         },
         "parse_mode": {
           "name": "Parse mode",
-          "description": "Telegram parse mode such as html, markdown, markdownv2, or plain_text.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Telegram parse mode such as html, markdown, markdownv2, or plain_text."
         },
         "disable_notification": {
           "name": "Disable notification",
-          "description": "Whether Telegram should send the message silently.",
-          "required": false,
-          "selector": { "boolean": {} }
+          "description": "Whether Telegram should send the message silently."
         },
         "disable_web_page_preview": {
           "name": "Disable web page preview",
-          "description": "Whether Telegram should disable link previews.",
-          "required": false,
-          "selector": { "boolean": {} }
+          "description": "Whether Telegram should disable link previews."
         },
         "keyboard": {
           "name": "Keyboard",
-          "description": "Optional Telegram custom keyboard.",
-          "required": false,
-          "selector": { "object": {} }
+          "description": "Optional Telegram custom keyboard."
         },
         "inline_keyboard": {
           "name": "Inline keyboard",
-          "description": "Optional Telegram inline keyboard.",
-          "required": false,
-          "selector": { "object": {} }
+          "description": "Optional Telegram inline keyboard."
         },
         "message_tag": {
           "name": "Message tag",
-          "description": "Optional Telegram message tag for later edits.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional Telegram message tag for later edits."
         },
         "chat_id": {
           "name": "Chat ID",
-          "description": "Optional Telegram chat ID or IDs.",
-          "required": false,
-          "selector": { "object": {} }
+          "description": "Optional Telegram chat ID or IDs."
         },
         "todo_action": {
           "name": "To-do action",
-          "description": "Optional todo action such as add_item, update_item, remove_item, clear_completed, or get_items.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional todo action such as add_item, update_item, remove_item, clear_completed, or get_items."
         },
         "item": {
           "name": "To-do item",
-          "description": "To-do item summary for add, update, complete, or remove actions.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "To-do item summary for add, update, complete, or remove actions."
         },
         "rename": {
           "name": "Rename to-do item",
-          "description": "Replacement summary for todo.update_item.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Replacement summary for todo.update_item."
         },
         "status": {
           "name": "To-do status",
-          "description": "To-do status such as needs_action or completed.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "To-do status such as needs_action or completed."
         },
         "due_date": {
           "name": "To-do due date",
-          "description": "Optional due date for todo.add_item or todo.update_item.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional due date for todo.add_item or todo.update_item."
         },
         "due_datetime": {
           "name": "To-do due date and time",
-          "description": "Optional due date and time for todo.add_item or todo.update_item.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional due date and time for todo.add_item or todo.update_item."
         },
         "description": {
           "name": "To-do description",
-          "description": "Optional description for todo.add_item or todo.update_item.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional description for todo.add_item or todo.update_item."
         },
         "variables": {
           "name": "Variables",
-          "description": "Optional script variables for script targets.",
-          "required": false,
-          "selector": { "object": {} }
+          "description": "Optional script variables for script targets."
         },
         "skip_condition": {
           "name": "Skip condition",
-          "description": "Whether automation.trigger should skip automation conditions.",
-          "required": false,
-          "selector": { "boolean": {} }
+          "description": "Whether automation.trigger should skip automation conditions."
         },
         "datetime": {
           "name": "Date and time",
-          "description": "Optional input_datetime date and time value.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional input_datetime date and time value."
         },
         "date": {
           "name": "Date",
-          "description": "Optional input_datetime date value.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional input_datetime date value."
         },
         "time": {
           "name": "Time",
-          "description": "Optional input_datetime time value.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional input_datetime time value."
         },
         "timestamp": {
           "name": "Timestamp",
-          "description": "Optional input_datetime Unix timestamp.",
-          "required": false,
-          "selector": { "number": {} }
+          "description": "Optional input_datetime Unix timestamp."
         },
         "duration": {
           "name": "Duration",
-          "description": "Optional duration for timer.start or siren.turn_on targets.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional duration for timer.start or siren.turn_on targets."
         },
         "reverse": {
           "name": "Reverse",
-          "description": "Whether shopping_list.sort should sort in reverse order.",
-          "required": false,
-          "selector": { "boolean": {} }
+          "description": "Whether shopping_list.sort should sort in reverse order."
         },
         "update_action": {
           "name": "Update action",
-          "description": "Action for update entities: install, skip, or clear_skipped.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Action for update entities: install, skip, or clear_skipped."
         },
         "version": {
           "name": "Version",
-          "description": "Optional version for update.install targets.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional version for update.install targets."
         },
         "backup": {
           "name": "Backup",
-          "description": "Whether update.install should request a backup when supported.",
-          "required": false,
-          "selector": { "boolean": {} }
+          "description": "Whether update.install should request a backup when supported."
         },
         "mac": {
           "name": "MAC address",
-          "description": "MAC address for device_tracker.see.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "MAC address for device_tracker.see."
         },
         "dev_id": {
           "name": "Device tracker ID",
-          "description": "Device ID for device_tracker.see.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Device ID for device_tracker.see."
         },
         "host_name": {
           "name": "Host name",
-          "description": "Optional host name for device_tracker.see.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional host name for device_tracker.see."
         },
         "location_name": {
           "name": "Location name",
-          "description": "Optional location name for device_tracker.see, such as home or not_home.",
-          "required": false,
-          "selector": { "text": {} }
+          "description": "Optional location name for device_tracker.see, such as home or not_home."
         },
         "gps": {
           "name": "GPS coordinates",
-          "description": "Optional latitude and longitude pair for device_tracker.see.",
-          "required": false,
-          "selector": { "object": {} }
+          "description": "Optional latitude and longitude pair for device_tracker.see."
         },
         "gps_accuracy": {
           "name": "GPS accuracy",
-          "description": "Optional GPS accuracy in meters for device_tracker.see.",
-          "required": false,
-          "selector": { "number": { "min": 0, "mode": "box", "unit_of_measurement": "m" } }
+          "description": "Optional GPS accuracy in meters for device_tracker.see."
         },
         "battery": {
           "name": "Battery",
-          "description": "Optional battery percentage for device_tracker.see.",
-          "required": false,
-          "selector": { "number": { "min": 0, "max": 100, "unit_of_measurement": "%" } }
+          "description": "Optional battery percentage for device_tracker.see."
         },
         "update_entity": {
           "name": "Update entity",
-          "description": "Whether to call homeassistant.update_entity for the target after applying the intent.",
-          "required": false,
-          "selector": { "boolean": {} }
+          "description": "Whether to call homeassistant.update_entity for the target after applying the intent."
         },
         "ttl": {
           "name": "TTL (seconds)",
-          "description": "How long the manual intent should be active. Default: 7200 (2 hours).",
-          "required": false,
-          "default": 7200,
-          "selector": { "number": { "min": 0, "max": 86400, "unit_of_measurement": "s" } }
+          "description": "How long the manual intent should be active. Default: 7200 (2 hours)."
         }
       }
     },
@@ -780,16 +553,11 @@
       "fields": {
         "rule_id": {
           "name": "Rule ID",
-          "description": "The id of a scene rule to activate. Must be a rule that references a HA scene.",
-          "required": true,
-          "selector": { "text": {} }
+          "description": "The id of a scene rule to activate. Must be a rule that references a HA scene."
         },
         "ttl": {
           "name": "TTL (seconds)",
-          "description": "Override the rule's default TTL. 0 means use the rule's value.",
-          "required": false,
-          "default": 0,
-          "selector": { "number": { "min": 0, "max": 86400, "unit_of_measurement": "s" } }
+          "description": "Override the rule's default TTL. 0 means use the rule's value."
         }
       }
     },
@@ -799,9 +567,7 @@
       "fields": {
         "target": {
           "name": "Target",
-          "description": "Optional target entity_id whose manual intents should be cleared.",
-          "required": false,
-          "selector": { "entity": {} }
+          "description": "Optional target entity_id whose manual intents should be cleared."
         }
       }
     },

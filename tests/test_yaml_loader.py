@@ -90,6 +90,32 @@ class TestRuleSchemaValidation:
         assert rules[0].set == {"color_temp_k": 2700}
         assert rules[0].cap == {"brightness_pct": 40}
 
+    def test_document_targets_defaults_expand_to_baseline_rules(self) -> None:
+        rules = load_rules_from_string("""
+targets:
+  light.living_room:
+    default:
+      state: off
+rules:
+  - id: living-room-presence
+    observe:
+      binary_sensor.living_room_presence: on
+    intent:
+      light.living_room:
+        state: on
+        brightness_pct: 80
+""")
+
+        assert [rule.id for rule in rules] == [
+            "__target_default__:light.living_room",
+            "living-room-presence",
+        ]
+        assert rules[0].when == "true"
+        assert rules[0].target == "light.living_room"
+        assert rules[0].set == {"state": "off"}
+        assert rules[0].authority.value == "sensor"
+        assert rules[0].confidence == 0.0
+
     def test_vnext_observe_supports_named_comparison(self) -> None:
         rules = load_rules_from_string("""
 - id: brighten-when-dark
