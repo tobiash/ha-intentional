@@ -3526,6 +3526,60 @@ async def test_apply_resolved_targets_retries_ignored_activation_after_grace(mon
 
 
 @pytest.mark.asyncio
+async def test_apply_resolved_targets_waits_for_pending_manual_drift(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("homeassistant", reason="homeassistant not installed")
+
+    import custom_components.intentional as integration
+    from custom_components.intentional import _apply_resolved_targets
+    from custom_components.intentional._engine import Engine
+    from custom_components.intentional._engine.ha_adapter import (
+        service_calls_for_resolved_target,
+        service_plan_signature,
+    )
+    from custom_components.intentional._engine.yaml_loader import Rule
+
+    now_ms = 10_000
+    monkeypatch.setattr(integration, "_monotonic_ms", lambda: now_ms)
+    engine = Engine(clock_fn=lambda: 1000)
+    engine.load_rules([
+        Rule(
+            id="desk-on",
+            when="input_boolean.work == 'on'",
+            target="light.desk",
+            set={"state": "on", "brightness_pct": 60},
+        )
+    ])
+    engine.update_state("input_boolean.work", "on")
+    engine.evaluate_all()
+
+    services = _FakeServices()
+    states = _FakeStates({"light.desk": SimpleNamespace(entity_id="light.desk", state="off", attributes={})})
+    hass = SimpleNamespace(services=services, states=states)
+    last_applied = {
+        "light.desk": service_plan_signature(
+            service_calls_for_resolved_target(
+                "light.desk",
+                {"state": "on", "brightness_pct": 60},
+            )
+        )
+    }
+    last_resolved = {}
+    drift_suppressed_until = {}
+    drift_candidates = {"light.desk": (now_ms, (("state", "off"),))}
+
+    await _apply_resolved_targets(
+        hass,
+        engine,
+        last_applied,
+        last_resolved,
+        drift_suppressed_until,
+        drift_candidates,
+    )
+
+    assert services.calls == []
+
+
+@pytest.mark.asyncio
 async def test_expired_linger_restores_as_pending_withdraw_after_restart() -> None:
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 

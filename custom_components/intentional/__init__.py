@@ -786,6 +786,9 @@ async def _apply_resolved_targets(
             if current_state is None or service_plan_matches_state(signature, current_state):
                 last_resolved[target] = _resolved_target_state(resolved)
                 continue
+            if drift_candidates is not None and target in pending_drift_targets(drift_candidates):
+                last_resolved[target] = _resolved_target_state(resolved)
+                continue
             suppress_until = (
                 drift_suppressed_until.get(target)
                 if drift_suppressed_until is not None
