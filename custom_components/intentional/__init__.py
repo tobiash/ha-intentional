@@ -24,7 +24,7 @@ import voluptuous as vol
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, ServiceCall, State
+from homeassistant.core import Context, HomeAssistant, ServiceCall, State
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
@@ -74,6 +74,7 @@ WITHDRAW_TO_OFF_DOMAINS = frozenset({"light", "switch", "input_boolean", "fan", 
 DRIFT_TRANSITION_GRACE_MS = 2_000
 DRIFT_CONFIRMATION_MS = 1_500
 SERVICE_FAILURE_BACKOFF_MS = 30_000
+INTENTIONAL_CONTEXT_TTL_MS = 10 * 60 * 1000
 
 
 @dataclass(frozen=True)
@@ -292,6 +293,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _drift_suppressed_until: dict[str, int] = {}
     _drift_candidates: dict[str, Any] = {}
     _service_failure_backoff: dict[tuple[str, ServicePlanSignature], int] = {}
+    _intentional_contexts: dict[str, int] = {}
     _active_rule_ids: set[str] = set()
     # Track state-change pulses that should stay true through one apply cycle.
     _state_change_pulses: set[str] = set()
@@ -328,13 +330,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _last_applied_targets,
                 _drift_suppressed_until,
                 _drift_candidates,
+                _intentional_contexts,
             )
             engine.tick(tick_interval_ms)
             # Activate any newly-firing scene rules
             _active_scenes = await _activate_scene_rules(
-                hass, engine, _active_scenes
+                hass, engine, _active_scenes, _intentional_contexts
             )
-            await _apply_pending_effects(hass, engine)
+            await _apply_pending_effects(hass, engine, _intentional_contexts)
             # Apply resolved target intents to HA entities.
             await _apply_resolved_targets(
                 hass,
@@ -344,6 +347,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _drift_suppressed_until,
                 _drift_candidates,
                 _service_failure_backoff,
+                _intentional_contexts,
             )
             if _state_change_pulses:
                 clear_state_change_pulses(engine, _state_change_pulses)
@@ -400,6 +404,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _drift_suppressed_until,
                 _drift_candidates,
                 _state_change_pulses,
+                _intentional_contexts,
             ),
         )
     )
@@ -559,6 +564,7 @@ def _on_ha_state_change_factory(
     drift_suppressed_until: dict[str, int] | None = None,
     drift_candidates: dict[str, Any] | None = None,
     state_change_pulses: set[str] | None = None,
+    intentional_contexts: dict[str, int] | None = None,
 ):
     """Return a state_changed listener that pushes updates into the engine."""
 
@@ -573,6 +579,22 @@ def _on_ha_state_change_factory(
         ):
             state_change_pulses.add(new_state.entity_id)
         if last_applied is not None:
+            if intentional_contexts is not None and _state_has_intentional_context(
+                new_state,
+                intentional_contexts,
+            ):
+                if drift_candidates is not None:
+                    clear_pending_state_drift(drift_candidates, new_state.entity_id)
+                record_diagnostic(
+                    hass,
+                    "intentional_context_ignored_for_drift",
+                    target=new_state.entity_id,
+                    context_id=getattr(getattr(new_state, "context", None), "id", None),
+                    parent_id=getattr(getattr(new_state, "context", None), "parent_id", None),
+                )
+                sync_time_context_into_engine(engine)
+                engine.evaluate_all()
+                return
             promoted = emit_manual_override_for_state_drift(
                 engine,
                 last_applied,
@@ -603,6 +625,7 @@ def _confirm_pending_state_drift(
     last_applied: dict[str, ServicePlanSignature],
     drift_suppressed_until: dict[str, int],
     drift_candidates: dict[str, Any],
+    intentional_contexts: dict[str, int] | None = None,
 ) -> None:
     """Promote only stable observed drift to manual override."""
     states = getattr(hass, "states", None)
@@ -613,6 +636,19 @@ def _confirm_pending_state_drift(
         state = states.get(target)
         if state is None:
             clear_pending_state_drift(drift_candidates, target)
+            continue
+        if intentional_contexts is not None and _state_has_intentional_context(
+            state,
+            intentional_contexts,
+        ):
+            clear_pending_state_drift(drift_candidates, target)
+            record_diagnostic(
+                hass,
+                "intentional_context_ignored_for_drift",
+                target=target,
+                context_id=getattr(getattr(state, "context", None), "id", None),
+                parent_id=getattr(getattr(state, "context", None), "parent_id", None),
+            )
             continue
         promoted = emit_manual_override_for_state_drift(
             engine,
@@ -661,6 +697,7 @@ async def _activate_scene_rules(
     hass: HomeAssistant,
     engine: Engine,
     already_activated: set[str],
+    intentional_contexts: dict[str, int] | None = None,
 ) -> set[str]:
     """Fire scene.turn_on for any newly-active scene rules.
 
@@ -682,6 +719,7 @@ async def _activate_scene_rules(
 
     for domain, service, service_data in calls:
         scene_id = service_data["entity_id"]
+        context = _new_intentional_context(intentional_contexts)
         _LOGGER.info(
             "Activating scene %s (transition=%ss)",
             scene_id, service_data.get("transition"),
@@ -691,6 +729,7 @@ async def _activate_scene_rules(
                 domain, service,
                 service_data,
                 blocking=False,
+                context=context,
             )
         except Exception as err:  # noqa: BLE001 — log and continue
             _LOGGER.warning("Failed to activate scene %s: %s", scene_id, err)
@@ -704,16 +743,22 @@ async def _activate_scene_rules(
     return active
 
 
-async def _apply_pending_effects(hass: HomeAssistant, engine: Engine) -> None:
+async def _apply_pending_effects(
+    hass: HomeAssistant,
+    engine: Engine,
+    intentional_contexts: dict[str, int] | None = None,
+) -> None:
     """Apply effect service calls that became active this cycle."""
     for rule_id, effect in engine.drain_pending_effects():
         service_data = {**effect.target, **effect.data}
+        context = _new_intentional_context(intentional_contexts)
         try:
             await hass.services.async_call(
                 effect.domain,
                 effect.service,
                 service_data,
                 blocking=False,
+                context=context,
             )
             record_diagnostic(
                 hass,
@@ -750,6 +795,7 @@ async def _apply_resolved_targets(
     drift_suppressed_until: dict[str, int] | None = None,
     drift_candidates: dict[str, Any] | None = None,
     service_failure_backoff: dict[tuple[str, ServicePlanSignature], int] | None = None,
+    intentional_contexts: dict[str, int] | None = None,
 ) -> None:
     """Apply resolved target intents to HA entities via service calls."""
     if last_resolved is None:
@@ -807,12 +853,14 @@ async def _apply_resolved_targets(
             record_diagnostic(hass, "service_skipped_matching_state", target=target)
             continue
         for domain, service, service_data in calls:
+            context = _new_intentional_context(intentional_contexts)
             try:
                 await hass.services.async_call(
                     domain,
                     service,
                     service_data,
                     blocking=False,
+                    context=context,
                 )
                 record_diagnostic(
                     hass,
@@ -900,12 +948,14 @@ async def _apply_resolved_targets(
             if states is None:
                 continue
         for domain, service, service_data in calls:
+            context = _new_intentional_context(intentional_contexts)
             try:
                 await hass.services.async_call(
                     domain,
                     service,
                     service_data,
                     blocking=False,
+                    context=context,
                 )
                 record_diagnostic(
                     hass,
@@ -1107,6 +1157,50 @@ def _last_applied_is_withdraw_signature(
 def _state_has_user_context(state: State) -> bool:
     context = getattr(state, "context", None)
     return getattr(context, "user_id", None) is not None
+
+
+def _new_intentional_context(intentional_contexts: dict[str, int] | None) -> Context:
+    """Create and remember a HA context owned by this integration."""
+    context = Context()
+    if intentional_contexts is not None:
+        _remember_intentional_context(intentional_contexts, context)
+    return context
+
+
+def _remember_intentional_context(
+    intentional_contexts: dict[str, int],
+    context: Context,
+) -> None:
+    now_ms = _monotonic_ms()
+    _prune_intentional_contexts(intentional_contexts, now_ms)
+    context_id = getattr(context, "id", None)
+    if context_id:
+        intentional_contexts[context_id] = now_ms + INTENTIONAL_CONTEXT_TTL_MS
+
+
+def _state_has_intentional_context(
+    state: State,
+    intentional_contexts: dict[str, int],
+) -> bool:
+    now_ms = _monotonic_ms()
+    _prune_intentional_contexts(intentional_contexts, now_ms)
+    context = getattr(state, "context", None)
+    context_id = getattr(context, "id", None)
+    parent_id = getattr(context, "parent_id", None)
+    return any(
+        context_ref in intentional_contexts
+        for context_ref in (context_id, parent_id)
+        if context_ref
+    )
+
+
+def _prune_intentional_contexts(
+    intentional_contexts: dict[str, int],
+    now_ms: int,
+) -> None:
+    for context_id, expires_at_ms in list(intentional_contexts.items()):
+        if expires_at_ms <= now_ms:
+            intentional_contexts.pop(context_id, None)
 
 
 def _suppress_drift_during_transition(

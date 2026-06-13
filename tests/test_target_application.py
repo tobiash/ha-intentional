@@ -3383,6 +3383,7 @@ def test_fire_and_forget_targets_do_not_invalidate_when_state_settles() -> None:
 class _FakeServices:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, dict[str, Any], bool]] = []
+        self.contexts: list[Any] = []
 
     async def async_call(
         self,
@@ -3391,8 +3392,10 @@ class _FakeServices:
         service_data: dict[str, Any],
         *,
         blocking: bool = False,
+        context: Any | None = None,
     ) -> None:
         self.calls.append((domain, service, dict(service_data), blocking))
+        self.contexts.append(context)
 
 
 class _FailingServices(_FakeServices):
@@ -3403,8 +3406,10 @@ class _FailingServices(_FakeServices):
         service_data: dict[str, Any],
         *,
         blocking: bool = False,
+        context: Any | None = None,
     ) -> None:
         self.calls.append((domain, service, dict(service_data), blocking))
+        self.contexts.append(context)
         raise ValueError("bad service payload")
 
 
@@ -3454,6 +3459,83 @@ async def test_apply_resolved_targets_suppresses_duplicate_calls() -> None:
             False,
         )
     ]
+    assert len(services.contexts) == 1
+    assert getattr(services.contexts[0], "id", None)
+
+
+@pytest.mark.asyncio
+async def test_intentional_context_state_change_does_not_emit_manual_override() -> None:
+    pytest.importorskip("homeassistant", reason="homeassistant not installed")
+
+    from custom_components.intentional import (
+        _new_intentional_context,
+        _on_ha_state_change_factory,
+    )
+    from custom_components.intentional._engine import Engine
+    from custom_components.intentional._engine.ha_adapter import (
+        service_calls_for_resolved_target,
+        service_plan_signature,
+    )
+    from custom_components.intentional._engine.intent import Authority
+    from custom_components.intentional._engine.yaml_loader import Rule
+
+    engine = Engine(clock_fn=lambda: 1000)
+    engine.load_rules([
+        Rule(
+            id="desk-on",
+            when="input_boolean.work == 'on'",
+            target="light.desk",
+            set={"state": "on", "brightness_pct": 60},
+        )
+    ])
+    engine.update_state("input_boolean.work", "on")
+    engine.evaluate_all()
+    last_applied = {
+        "light.desk": service_plan_signature(
+            service_calls_for_resolved_target(
+                "light.desk",
+                {"state": "on", "brightness_pct": 60},
+            )
+        )
+    }
+    drift_candidates = {"light.desk": (10_000, (("state", "off"),))}
+    intentional_contexts: dict[str, int] = {}
+    context = _new_intentional_context(intentional_contexts)
+    hass = SimpleNamespace(data={})
+    listener = _on_ha_state_change_factory(
+        hass,
+        engine,
+        last_applied,
+        {},
+        drift_candidates,
+        set(),
+        intentional_contexts,
+    )
+
+    listener(SimpleNamespace(data={
+        "old_state": SimpleNamespace(
+            entity_id="light.desk",
+            state="on",
+            attributes={},
+        ),
+        "new_state": SimpleNamespace(
+            entity_id="light.desk",
+            state="off",
+            attributes={},
+            context=SimpleNamespace(id=context.id, parent_id=None, user_id=None),
+        ),
+    }))
+
+    assert "light.desk" in last_applied
+    assert drift_candidates == {}
+    assert all(
+        intent.authority is not Authority.USER
+        for intent in engine.list_active_intents("light.desk")
+    )
+    assert (
+        hass.data["intentional"]["diagnostics"][-1]["type"]
+        == "intentional_context_ignored_for_drift"
+    )
 
 
 @pytest.mark.asyncio
