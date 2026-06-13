@@ -54,6 +54,16 @@ DEVICE_BOUNDS: dict[str, tuple[float, float]] = {
     "color_temp_mired": (50, 500),
 }
 
+COLOR_FIELDS = frozenset({
+    "color_temp_k",
+    "color_temp_mired",
+    "rgb_color",
+    "rgbw_color",
+    "rgbww_color",
+    "hs_color",
+    "xy_color",
+})
+
 
 @dataclass(frozen=True)
 class ResolvedIntent:
@@ -139,15 +149,27 @@ def resolve_intents(
     if not set_providers:
         baseline: dict[str, Any] = {}
     else:
-        # Collect all fields anyone wants to set
+        # Collect all fields anyone wants to set. Light color modes are mutually
+        # exclusive at service-call time, so the top color provider owns the
+        # whole color group rather than mixing rgb/xy with lower color_temp.
         all_fields: set[str] = set()
         for intent in set_providers:
             all_fields.update(intent.set.keys())
+        color_providers = [
+            intent
+            for intent in set_providers
+            if any(field in COLOR_FIELDS for field in intent.set)
+        ]
+        color_winner = max(color_providers, key=lambda i: i.priority) if color_providers else None
 
         # For each field, find the highest-priority provider
         baseline = {}
         for field_name in all_fields:
             providers = [i for i in set_providers if field_name in i.set]
+            if field_name in COLOR_FIELDS and color_winner is not None:
+                if field_name not in color_winner.set:
+                    continue
+                providers = [color_winner]
             chosen = max(providers, key=lambda i: i.priority)
             baseline[field_name] = chosen.set[field_name]
 

@@ -135,6 +135,27 @@ class TestSetResolution:
         assert result.value["brightness_pct"] == 100  # higher wins
         assert result.value["color_temp_k"] == 2700  # lower fills in
 
+    def test_higher_priority_color_field_excludes_lower_color_modes(self) -> None:
+        auto = Intent(
+            target="light.x",
+            set={"state": "on", "brightness_pct": 40, "color_temp_k": 2700},
+            authority=Authority.AUTOMATION,
+        )
+        user = Intent(
+            target="light.x",
+            set={"state": "on", "rgb_color": [19, 18, 255]},
+            authority=Authority.USER,
+        )
+
+        result = resolve_intents("light.x", [auto, user])
+
+        assert result is not None
+        assert result.value == {
+            "state": "on",
+            "brightness_pct": 40,
+            "rgb_color": [19, 18, 255],
+        }
+
 
 # ── cap: smallest cap wins ───────────────────────────────────────────
 
