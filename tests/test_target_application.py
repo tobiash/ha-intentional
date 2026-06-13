@@ -3468,7 +3468,6 @@ async def test_intentional_context_state_change_does_not_emit_manual_override() 
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
     from custom_components.intentional import (
-        _new_intentional_context,
         _on_ha_state_change_factory,
     )
     from custom_components.intentional._engine import Engine
@@ -3478,6 +3477,8 @@ async def test_intentional_context_state_change_does_not_emit_manual_override() 
     )
     from custom_components.intentional._engine.intent import Authority
     from custom_components.intentional._engine.yaml_loader import Rule
+    from custom_components.intentional.diagnostics import DiagnosticRateLimiter
+    from custom_components.intentional.runtime_context import IntentionalContextTracker
 
     engine = Engine(clock_fn=lambda: 1000)
     engine.load_rules([
@@ -3499,8 +3500,9 @@ async def test_intentional_context_state_change_does_not_emit_manual_override() 
         )
     }
     drift_candidates = {"light.desk": (10_000, (("state", "off"),))}
-    intentional_contexts: dict[str, int] = {}
-    context = _new_intentional_context(intentional_contexts)
+    intentional_contexts = IntentionalContextTracker(clock_fn=lambda: 10_000)
+    diagnostic_rate_limiter = DiagnosticRateLimiter()
+    context = intentional_contexts.new_context()
     hass = SimpleNamespace(data={})
     listener = _on_ha_state_change_factory(
         hass,
@@ -3510,9 +3512,10 @@ async def test_intentional_context_state_change_does_not_emit_manual_override() 
         drift_candidates,
         set(),
         intentional_contexts,
+        diagnostic_rate_limiter,
     )
 
-    listener(SimpleNamespace(data={
+    event = SimpleNamespace(data={
         "old_state": SimpleNamespace(
             entity_id="light.desk",
             state="on",
@@ -3524,7 +3527,9 @@ async def test_intentional_context_state_change_does_not_emit_manual_override() 
             attributes={},
             context=SimpleNamespace(id=context.id, parent_id=None, user_id=None),
         ),
-    }))
+    })
+    listener(event)
+    listener(event)
 
     assert "light.desk" in last_applied
     assert drift_candidates == {}
@@ -3536,6 +3541,68 @@ async def test_intentional_context_state_change_does_not_emit_manual_override() 
         hass.data["intentional"]["diagnostics"][-1]["type"]
         == "intentional_context_ignored_for_drift"
     )
+    assert len(hass.data["intentional"]["diagnostics"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_apply_resolved_targets_reuses_context_for_service_plan() -> None:
+    pytest.importorskip("homeassistant", reason="homeassistant not installed")
+
+    from custom_components.intentional import _apply_resolved_targets
+    from custom_components.intentional._engine import Engine
+    from custom_components.intentional._engine.yaml_loader import Rule
+    from custom_components.intentional.runtime_context import IntentionalContextTracker
+
+    engine = Engine(clock_fn=lambda: 1000)
+    engine.load_rules([
+        Rule(
+            id="media-on",
+            when="input_boolean.media == 'on'",
+            target="media_player.kitchen",
+            set={"state": "on", "volume_level": 0.35},
+        )
+    ])
+    engine.update_state("input_boolean.media", "on")
+    engine.evaluate_all()
+
+    services = _FakeServices()
+    intentional_contexts = IntentionalContextTracker()
+    hass = SimpleNamespace(services=services)
+
+    await _apply_resolved_targets(
+        hass,
+        engine,
+        {},
+        intentional_contexts=intentional_contexts,
+    )
+
+    assert services.calls == [
+        ("media_player", "turn_on", {"entity_id": "media_player.kitchen"}, False),
+        (
+            "media_player",
+            "volume_set",
+            {"entity_id": "media_player.kitchen", "volume_level": 0.35},
+            False,
+        ),
+    ]
+    assert len(services.contexts) == 2
+    assert services.contexts[0].id == services.contexts[1].id
+    assert intentional_contexts.ids() == (services.contexts[0].id,)
+
+
+def test_intentional_context_cache_is_bounded() -> None:
+    pytest.importorskip("homeassistant", reason="homeassistant not installed")
+
+    from custom_components.intentional.runtime_context import (
+        DEFAULT_CONTEXT_MAX_ENTRIES,
+        IntentionalContextTracker,
+    )
+
+    intentional_contexts = IntentionalContextTracker()
+    for _ in range(DEFAULT_CONTEXT_MAX_ENTRIES + 8):
+        intentional_contexts.new_context()
+
+    assert len(intentional_contexts) == DEFAULT_CONTEXT_MAX_ENTRIES
 
 
 @pytest.mark.asyncio
