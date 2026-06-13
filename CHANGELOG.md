@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.21] - 2026-06-13
+
+### Fixed
+- **Owned Home Assistant context attribution** now tags Intentional service calls and ignores matching returned state updates for drift promotion, reducing false manual overrides from Intentional's own reconciliation actions.
+
+### Added
+- **Manual override stability plan** documenting the next integration-hardening steps for context lineage, pending drift gating, mutually exclusive light color modes, diagnostics, Repairs, and targeted state tracking.
+
 ## [0.7.20] - 2026-06-13
 
 ### Fixed
