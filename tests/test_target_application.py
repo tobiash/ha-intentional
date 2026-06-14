@@ -4368,7 +4368,70 @@ async def test_apply_resolved_targets_withdraw_reconciles_to_revealed_intent() -
         (
             "light",
             "turn_on",
-            {"entity_id": "light.desk", "brightness_pct": 10, "transition": 7.0},
+            {"entity_id": "light.desk", "brightness_pct": 10, "transition": 6.0},
+            False,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_apply_resolved_targets_uses_assert_when_stronger_intent_replaces_weaker() -> None:
+    pytest.importorskip("homeassistant", reason="homeassistant not installed")
+
+    from custom_components.intentional import _apply_resolved_targets
+    from custom_components.intentional._engine import Engine
+    from custom_components.intentional._engine.yaml_loader import load_rules_from_string
+
+    engine = Engine(clock_fn=lambda: 1000)
+    engine.load_rules(load_rules_from_string('''
+- id: ambient
+  observe:
+    input_boolean.ambient: on
+  confidence: 0.4
+  intent:
+    light.desk:
+      state: on
+      brightness_pct: 10
+      apply:
+        transition:
+          withdraw: 9s
+- id: presence
+  observe:
+    binary_sensor.desk_presence: on
+  confidence: 0.8
+  intent:
+    light.desk:
+      state: on
+      brightness_pct: 40
+      apply:
+        transition:
+          assert: 2s
+          withdraw: 6s
+'''))
+    services = _FakeServices()
+    hass = SimpleNamespace(services=services)
+    last_applied = {}
+    last_resolved = {}
+
+    engine.update_state("input_boolean.ambient", "on")
+    engine.evaluate_all()
+    await _apply_resolved_targets(hass, engine, last_applied, last_resolved)
+
+    engine.update_state("binary_sensor.desk_presence", "on")
+    engine.evaluate_all()
+    await _apply_resolved_targets(hass, engine, last_applied, last_resolved)
+
+    assert services.calls == [
+        (
+            "light",
+            "turn_on",
+            {"entity_id": "light.desk", "brightness_pct": 10},
+            False,
+        ),
+        (
+            "light",
+            "turn_on",
+            {"entity_id": "light.desk", "brightness_pct": 40, "transition": 2.0},
             False,
         ),
     ]

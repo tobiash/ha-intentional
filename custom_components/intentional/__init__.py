@@ -85,6 +85,7 @@ SERVICE_FAILURE_BACKOFF_MS = 30_000
 class _ResolvedTargetState:
     value: dict[str, Any]
     winner_key: tuple[str, int] | None
+    winner_confidence: float | None
     transition_ms: int
     transition_withdraw_ms: int | None
     withdraw_value: dict[str, Any] | None = None
@@ -1021,6 +1022,7 @@ def _resolved_target_state(
     return _ResolvedTargetState(
         value=dict(resolved.value),
         winner_key=(winner.rule_id, winner.created_at_ms) if winner is not None else None,
+        winner_confidence=winner.confidence if winner is not None else None,
         transition_ms=resolved.transition_ms,
         transition_withdraw_ms=winner.transition_withdraw_ms if winner is not None else None,
         withdraw_value=_withdraw_value_for_service_plan(resolved.target, calls),
@@ -1040,6 +1042,7 @@ def _export_pending_withdraws(
             "target": target,
             "value": dict(state.value),
             "winner_key": list(state.winner_key) if state.winner_key is not None else None,
+            "winner_confidence": state.winner_confidence,
             "transition_ms": state.transition_ms,
             "transition_withdraw_ms": state.transition_withdraw_ms,
             "withdraw_value": dict(state.withdraw_value) if state.withdraw_value is not None else None,
@@ -1119,6 +1122,9 @@ def _resolved_target_state_from_record(
         return target, _ResolvedTargetState(
             value=dict(value),
             winner_key=winner_key,
+            winner_confidence=_optional_float(
+                raw.get("winner_confidence") if "winner_confidence" in raw else raw.get("confidence")
+            ),
             transition_ms=int(raw.get("transition_ms") or 0),
             transition_withdraw_ms=_optional_int(raw.get("transition_withdraw_ms")),
             withdraw_value=dict(raw["withdraw_value"]) if isinstance(raw.get("withdraw_value"), dict) else None,
@@ -1133,6 +1139,12 @@ def _optional_int(value: Any) -> int | None:
     return int(value)
 
 
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    return float(value)
+
+
 def _transition_ms_for_resolved_change(
     previous: _ResolvedTargetState | None,
     resolved: Any,
@@ -1141,6 +1153,13 @@ def _transition_ms_for_resolved_change(
     if winner is None:
         return resolved.transition_ms
     if previous is None or previous.winner_key != (winner.rule_id, winner.created_at_ms):
+        if (
+            previous is not None
+            and previous.winner_confidence is not None
+            and winner.confidence < previous.winner_confidence
+            and previous.transition_withdraw_ms is not None
+        ):
+            return previous.transition_withdraw_ms
         return winner.transition_assert_ms if winner.transition_assert_ms is not None else resolved.transition_ms
     return winner.transition_change_ms if winner.transition_change_ms is not None else resolved.transition_ms
 
