@@ -832,6 +832,22 @@ async def _apply_resolved_targets(
         has_pending_withdraw = _last_applied_is_withdraw_signature(target, previous, last_applied)
         states = getattr(hass, "states", None)
         current_state = states.get(target) if states is not None else None
+        suppress_until = (
+            drift_suppressed_until.get(target)
+            if drift_suppressed_until is not None
+            else None
+        )
+        if (
+            previous is not None
+            and previous.value == resolved_value
+            and last_applied.get(target) is not None
+            and not has_pending_withdraw
+            and suppress_until is not None
+            and _monotonic_ms() < suppress_until
+        ):
+            last_resolved[target] = _resolved_target_state(resolved, calls)
+            record_diagnostic(hass, "service_skipped_pending_transition", target=target)
+            continue
         if last_applied.get(target) == signature:
             if current_state is None or service_plan_matches_state(signature, current_state):
                 last_resolved[target] = _resolved_target_state(resolved, calls)
@@ -839,11 +855,6 @@ async def _apply_resolved_targets(
             if drift_candidates is not None and target in pending_drift_targets(drift_candidates):
                 last_resolved[target] = _resolved_target_state(resolved, calls)
                 continue
-            suppress_until = (
-                drift_suppressed_until.get(target)
-                if drift_suppressed_until is not None
-                else None
-            )
             if suppress_until is not None and _monotonic_ms() < suppress_until:
                 last_resolved[target] = _resolved_target_state(resolved, calls)
                 continue

@@ -3916,6 +3916,81 @@ async def test_apply_resolved_targets_uses_assert_and_withdraw_transitions() -> 
 
 
 @pytest.mark.asyncio
+async def test_apply_resolved_targets_does_not_send_change_during_assert_transition(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("homeassistant", reason="homeassistant not installed")
+
+    import custom_components.intentional as integration
+    from custom_components.intentional import _apply_resolved_targets
+    from custom_components.intentional._engine import Engine
+    from custom_components.intentional._engine.yaml_loader import load_rules_from_string
+
+    now_ms = 1_000
+    monkeypatch.setattr(integration, "_monotonic_ms", lambda: now_ms)
+    engine = Engine(clock_fn=lambda: 1000)
+    engine.load_rules(load_rules_from_string('''
+- id: living-room-presence
+  observe:
+    binary_sensor.living_room_presence: on
+  intent:
+    light.leuchte_sessel_light:
+      state: on
+      brightness_pct: 100
+      apply:
+        transition:
+          assert: 5s
+          change: 8s
+'''))
+    services = _FakeServices()
+    states = _FakeStates({
+        "light.leuchte_sessel_light": SimpleNamespace(
+            entity_id="light.leuchte_sessel_light",
+            state="off",
+            attributes={},
+        ),
+    })
+    hass = SimpleNamespace(services=services, states=states)
+    last_applied = {}
+    last_resolved = {}
+    drift_suppressed_until = {}
+
+    engine.update_state("binary_sensor.living_room_presence", "on")
+    engine.evaluate_all()
+    await _apply_resolved_targets(
+        hass,
+        engine,
+        last_applied,
+        last_resolved,
+        drift_suppressed_until,
+    )
+
+    states.set(
+        "light.leuchte_sessel_light",
+        SimpleNamespace(
+            entity_id="light.leuchte_sessel_light",
+            state="on",
+            attributes={"brightness": 1},
+        ),
+    )
+    now_ms = 1_400
+    await _apply_resolved_targets(
+        hass,
+        engine,
+        last_applied,
+        last_resolved,
+        drift_suppressed_until,
+    )
+
+    assert services.calls == [
+        (
+            "light",
+            "turn_on",
+            {"entity_id": "light.leuchte_sessel_light", "brightness_pct": 100, "transition": 5.0},
+            False,
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_apply_resolved_targets_withdraws_brightness_only_light_activation() -> None:
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
