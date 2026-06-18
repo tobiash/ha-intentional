@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.24] - 2026-06-18
+
+### Fixed
+- **Revealed intent transitions** now use the outgoing higher-confidence intent's withdraw transition when a lower-confidence target intent is revealed, making media-dim restores fade back instead of briefly brightening abruptly.
+
 ## [0.7.23] - 2026-06-14
 
 ### Fixed
