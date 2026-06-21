@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.25] - 2026-06-21
+
+### Added
+- **Area-derived room controls** now expose per-room pause switches, clear-manual-overrides buttons, and status sensors for Lovelace, inferred from Home Assistant area assignments on rule targets.
+- **Intent preview and explain tooling** with `/api/intentional/preview`, `/api/intentional/card`, `/api/intentional/dashboard`, and `/api/intentional/replay`, plus matching `intentionalctl preview`, `card`, `dashboard`, and `replay` commands.
+- **Stable context guard alias** via `stable_for`, equivalent to the existing `after`/`for` dwell behavior for debouncing flappy context entities.
+
 ## [0.7.24] - 2026-06-18
 
 ### Fixed
