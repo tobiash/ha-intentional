@@ -1,7 +1,7 @@
 {
   "domain": "intentional",
   "name": "Intentional",
-  "version": "0.7.25",
+  "version": "0.7.26",
   "documentation": "https://github.com/tobiash/ha-intentional",
   "issue_tracker": "https://github.com/tobiash/ha-intentional/issues",
   "codeowners": ["@tobiash"],
