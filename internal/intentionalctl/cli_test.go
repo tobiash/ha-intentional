@@ -124,6 +124,87 @@ func TestSimulateAcceptsTimelineObjectFile(t *testing.T) {
 	}
 }
 
+func TestPreviewSendsOptionalContentsAndStates(t *testing.T) {
+	tmp := t.TempDir()
+	ruleFile := filepath.Join(tmp, "rule.yaml")
+	if err := os.WriteFile(ruleFile, []byte("- id: test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/intentional/preview" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var payload struct {
+			Contents       string            `json:"contents"`
+			StateOverrides map[string]string `json:"state_overrides"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Contents != "- id: test\n" || payload.StateOverrides["media_player.tv.state"] != "playing" {
+			t.Fatalf("unexpected payload %#v", payload)
+		}
+		_, _ = w.Write([]byte(`{"valid":true,"preview":[],"errors":[]}`))
+	}))
+	defer server.Close()
+
+	var stdout strings.Builder
+	var stderr strings.Builder
+	exit := Run(context.Background(), []string{"--url", server.URL, "--token", "token", "preview", "--file", ruleFile, "--state", "media_player.tv.state=playing"}, &stdout, &stderr, mapEnv(nil), "test")
+	if exit != 0 {
+		t.Fatalf("exit=%d stderr=%s", exit, stderr.String())
+	}
+}
+
+func TestCardUsesTargetQuery(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/intentional/card" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if r.URL.Query().Get("target") != "light.sofa" {
+			t.Fatalf("unexpected query %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"targets":[],"count":0}`))
+	}))
+	defer server.Close()
+
+	var stdout strings.Builder
+	var stderr strings.Builder
+	exit := Run(context.Background(), []string{"--url", server.URL, "--token", "token", "card", "--target", "light.sofa"}, &stdout, &stderr, mapEnv(nil), "test")
+	if exit != 0 {
+		t.Fatalf("exit=%d stderr=%s", exit, stderr.String())
+	}
+}
+
+func TestReplayPostsHistoryFile(t *testing.T) {
+	tmp := t.TempDir()
+	historyFile := filepath.Join(tmp, "history.json")
+	if err := os.WriteFile(historyFile, []byte(`[[{"entity_id":"binary_sensor.test","state":"on"}]]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/intentional/replay" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := payload["history"]; !ok {
+			t.Fatalf("missing history payload %#v", payload)
+		}
+		_, _ = w.Write([]byte(`{"valid":true,"steps":[],"errors":[]}`))
+	}))
+	defer server.Close()
+
+	var stdout strings.Builder
+	var stderr strings.Builder
+	exit := Run(context.Background(), []string{"--url", server.URL, "--token", "token", "replay", "--history", historyFile}, &stdout, &stderr, mapEnv(nil), "test")
+	if exit != 0 {
+		t.Fatalf("exit=%d stderr=%s", exit, stderr.String())
+	}
+}
+
 func mapEnv(values map[string]string) envGetter {
 	return func(key string) string {
 		return values[key]

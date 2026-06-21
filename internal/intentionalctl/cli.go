@@ -26,6 +26,10 @@ Commands:
   world                          Print desired/actual world model.
   state                          Print active intents grouped by target.
   explain TARGET                 Explain one target.
+  card [--target TARGET]          Print Lovelace-friendly explain data.
+  preview [--file FILE] [--state KEY=VALUE]
+                                  Preview desired-vs-actual target diffs.
+  dashboard                      Print suggested Lovelace room cards.
   diagnostics [--limit N]         Print recent runtime diagnostics.
   rules-list                     List rule files exposed by the API.
   rules-get [--contents]          Read storage-backed authored rule document.
@@ -38,6 +42,8 @@ Commands:
                                   Evaluate proposed YAML without applying.
   simulate --file FILE --timeline FILE
                                   Simulate proposed YAML over a timeline JSON file.
+  replay [--file FILE] [--history FILE | --from TIME --to TIME --entity ENTITY]
+                                  Replay rules over HA history-shaped data.
   history                        List rule document history.
   history-get GENERATION [--contents]
                                   Read one previous rule document generation.
@@ -109,6 +115,12 @@ func executeCommand(ctx context.Context, client *Client, config Config, command 
 			return fmt.Errorf("usage: intentionalctl explain TARGET")
 		}
 		return getJSON(ctx, client, config, stdout, "/api/intentional/explain/"+url.PathEscape(args[0]))
+	case "card":
+		return card(ctx, client, config, args, stdout, stderr)
+	case "preview":
+		return preview(ctx, client, config, args, stdout, stderr)
+	case "dashboard":
+		return getJSON(ctx, client, config, stdout, "/api/intentional/dashboard")
 	case "diagnostics":
 		flags := flag.NewFlagSet("diagnostics", flag.ContinueOnError)
 		flags.SetOutput(stderr)
@@ -151,6 +163,8 @@ func executeCommand(ctx context.Context, client *Client, config Config, command 
 		return dryRun(ctx, client, config, args, stdout, stderr)
 	case "simulate":
 		return simulate(ctx, client, config, args, stdout, stderr)
+	case "replay":
+		return replay(ctx, client, config, args, stdout, stderr)
 	case "history":
 		return getJSON(ctx, client, config, stdout, "/api/intentional/rules/history")
 	case "history-get":
@@ -190,6 +204,47 @@ func deleteDocument(ctx context.Context, client *Client, config Config, args []s
 
 func getJSON(ctx context.Context, client *Client, config Config, stdout io.Writer, path string) error {
 	response, err := client.Get(ctx, path)
+	if err != nil {
+		return err
+	}
+	return writeJSON(stdout, response, config.Compact)
+}
+
+func card(ctx context.Context, client *Client, config Config, args []string, stdout io.Writer, stderr io.Writer) error {
+	flags := flag.NewFlagSet("card", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	target := flags.String("target", "", "target entity to explain")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	path := "/api/intentional/card"
+	if *target != "" {
+		path += "?target=" + url.QueryEscape(*target)
+	}
+	return getJSON(ctx, client, config, stdout, path)
+}
+
+func preview(ctx context.Context, client *Client, config Config, args []string, stdout io.Writer, stderr io.Writer) error {
+	flags := flag.NewFlagSet("preview", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	file := flags.String("file", "", "rule YAML file; omitted previews current live intents")
+	states := multiFlag{}
+	flags.Var(&states, "state", "state override KEY=VALUE; repeatable")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	payload := map[string]any{}
+	if *file != "" {
+		contents, err := readRequiredFile(*file)
+		if err != nil {
+			return err
+		}
+		payload["contents"] = contents
+	}
+	if len(states) > 0 {
+		payload["state_overrides"] = parseKeyValues(states)
+	}
+	response, err := client.Post(ctx, "/api/intentional/preview", payload)
 	if err != nil {
 		return err
 	}
@@ -293,6 +348,59 @@ func simulate(ctx context.Context, client *Client, config Config, args []string,
 	return writeJSON(stdout, response, config.Compact)
 }
 
+func replay(ctx context.Context, client *Client, config Config, args []string, stdout io.Writer, stderr io.Writer) error {
+	flags := flag.NewFlagSet("replay", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	file := flags.String("file", "", "rule YAML file; omitted uses storage-backed rules")
+	historyFile := flags.String("history", "", "HA history JSON file")
+	from := flags.String("from", "", "history start time, e.g. 2026-06-14T20:00:00+00:00")
+	to := flags.String("to", "", "history end time")
+	entities := multiFlag{}
+	flags.Var(&entities, "entity", "entity to fetch from HA history; repeatable")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	payload := map[string]any{}
+	if *file != "" {
+		contents, err := readRequiredFile(*file)
+		if err != nil {
+			return err
+		}
+		payload["contents"] = contents
+	}
+	if *historyFile != "" {
+		history, err := readJSONFile(*historyFile)
+		if err != nil {
+			return err
+		}
+		payload["history"] = history
+	} else if *from != "" {
+		if len(entities) == 0 {
+			return fmt.Errorf("replay --from requires at least one --entity")
+		}
+		path := "/api/history/period/" + url.PathEscape(*from) + "?filter_entity_id=" + url.QueryEscape(strings.Join(entities, ","))
+		if *to != "" {
+			path += "&end_time=" + url.QueryEscape(*to)
+		}
+		history, err := client.Get(ctx, path)
+		if err != nil {
+			return err
+		}
+		var decoded any
+		if err := json.Unmarshal(history, &decoded); err != nil {
+			return err
+		}
+		payload["history"] = decoded
+	} else {
+		return fmt.Errorf("replay requires --history or --from")
+	}
+	response, err := client.Post(ctx, "/api/intentional/replay", payload)
+	if err != nil {
+		return err
+	}
+	return writeJSON(stdout, response, config.Compact)
+}
+
 func getHistory(ctx context.Context, client *Client, config Config, args []string, stdout io.Writer, stderr io.Writer) error {
 	flags := flag.NewFlagSet("history-get", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -388,6 +496,18 @@ func readRequiredFile(path string) (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+func readJSONFile(path string) (any, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return nil, fmt.Errorf("parse JSON file: %w", err)
+	}
+	return value, nil
 }
 
 func writeJSON(stdout io.Writer, raw json.RawMessage, compact bool) error {

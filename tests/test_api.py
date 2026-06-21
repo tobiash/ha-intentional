@@ -112,6 +112,28 @@ def test_simulate_view_accepts_post() -> None:
     assert hasattr(IntentionalSimulateView, "post")
 
 
+def test_high_leverage_views_have_correct_urls() -> None:
+    from custom_components.intentional.api import (
+        IntentionalCardView,
+        IntentionalDashboardView,
+        IntentionalPreviewView,
+        IntentionalReplayView,
+    )
+
+    assert IntentionalPreviewView.url == "/api/intentional/preview"
+    assert IntentionalPreviewView.requires_auth is True
+    assert hasattr(IntentionalPreviewView, "post")
+    assert IntentionalCardView.url == "/api/intentional/card"
+    assert IntentionalCardView.requires_auth is True
+    assert hasattr(IntentionalCardView, "get")
+    assert IntentionalDashboardView.url == "/api/intentional/dashboard"
+    assert IntentionalDashboardView.requires_auth is True
+    assert hasattr(IntentionalDashboardView, "get")
+    assert IntentionalReplayView.url == "/api/intentional/replay"
+    assert IntentionalReplayView.requires_auth is True
+    assert hasattr(IntentionalReplayView, "post")
+
+
 def test_state_view_exposes_state() -> None:
     from custom_components.intentional.api import IntentionalStateView
 

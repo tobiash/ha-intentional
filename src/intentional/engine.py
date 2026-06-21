@@ -105,6 +105,8 @@ class Engine:
         self._template_renderer = TemplateRenderer()
         self._generated_fields: dict[tuple[str, str], GeneratedFieldState] = {}
         self._enabled = True
+        self._paused_labels: set[str] = set()
+        self._paused_rule_ids: set[str] = set()
 
     # ── Lifecycle Persistence ───────────────────────────────────────
 
@@ -117,6 +119,8 @@ class Engine:
             now_ms=self.now_ms(),
         )
         records["enabled"] = self._enabled
+        records["paused_labels"] = sorted(self._paused_labels)
+        records["paused_rule_ids"] = sorted(self._paused_rule_ids)
         return records
 
     def import_lifecycle_records(self, records: dict[str, Any] | None) -> None:
@@ -131,6 +135,19 @@ class Engine:
         self._generated_fields.update(generated_fields)
         if isinstance(records, dict) and records.get("enabled") is False:
             self.set_enabled(False)
+        if isinstance(records, dict):
+            paused_labels = records.get("paused_labels")
+            if isinstance(paused_labels, list):
+                self._paused_labels = {
+                    label for label in paused_labels
+                    if isinstance(label, str) and label
+                }
+            paused_rule_ids = records.get("paused_rule_ids")
+            if isinstance(paused_rule_ids, list):
+                self._paused_rule_ids = {
+                    rule_id for rule_id in paused_rule_ids
+                    if isinstance(rule_id, str) and rule_id
+                }
 
     def is_enabled(self) -> bool:
         """Return whether automation rule evaluation is globally enabled."""
@@ -142,6 +159,63 @@ class Engine:
         if not enabled:
             self._active_intents = []
             self._active_effect_rule_ids.clear()
+
+    def set_label_paused(self, label: str, paused: bool) -> None:
+        """Pause or resume all rules carrying a locality label."""
+        if paused:
+            self._paused_labels.add(label)
+            self._active_intents = [
+                intent for intent in self._active_intents
+                if not self._intent_has_label(intent, label)
+            ]
+            self._active_effect_rule_ids = {
+                rule_id for rule_id in self._active_effect_rule_ids
+                if not self._rule_has_label(rule_id, label)
+            }
+            return
+        self._paused_labels.discard(label)
+
+    def set_rule_paused(self, rule_id: str, paused: bool) -> None:
+        """Pause or resume one authored or expanded rule id."""
+        rule_ids = {
+            current_id for current_id in self._rules
+            if current_id == rule_id or current_id.split(":", 1)[0] == rule_id
+        }
+        if not rule_ids:
+            rule_ids = {rule_id}
+        if paused:
+            self._paused_rule_ids.update(rule_ids)
+            self._active_intents = [
+                intent for intent in self._active_intents
+                if intent.rule_id not in rule_ids
+            ]
+            self._active_effect_rule_ids.difference_update(rule_ids)
+            return
+        self._paused_rule_ids.difference_update(rule_ids)
+
+    def set_rules_paused(self, rule_ids: set[str], paused: bool) -> None:
+        """Pause or resume multiple authored or expanded rule ids."""
+        for rule_id in rule_ids:
+            self.set_rule_paused(rule_id, paused)
+
+    def is_rule_paused(self, rule_id: str) -> bool:
+        """Return whether an authored or expanded rule id is paused."""
+        return any(
+            current_id == rule_id or current_id.split(":", 1)[0] == rule_id
+            for current_id in self._paused_rule_ids
+        )
+
+    def list_paused_rule_ids(self) -> tuple[str, ...]:
+        """Return paused rule ids."""
+        return tuple(sorted(self._paused_rule_ids))
+
+    def is_label_paused(self, label: str) -> bool:
+        """Return whether rules with the given label are paused."""
+        return label in self._paused_labels
+
+    def list_paused_labels(self) -> tuple[str, ...]:
+        """Return paused rule labels."""
+        return tuple(sorted(self._paused_labels))
 
     # ── Time ────────────────────────────────────────────────────────
 
@@ -316,6 +390,8 @@ class Engine:
         # - Keep user/manual intents (no rule_id) until their TTL expires
         new_active: list[Intent] = []
         for intent in self._active_intents:
+            if self._intent_is_paused(intent):
+                continue
             if intent.ignore_when:
                 if not intent.is_expired(into_the_future_ms=now):
                     new_active.append(intent)
@@ -383,6 +459,29 @@ class Engine:
     def _eval_when(self, ast: WhenAST) -> bool:
         return evaluate_when(ast, self.state, time_of_day=self._time_of_day)
 
+    def _rule_has_label(self, rule_id: str, label: str) -> bool:
+        parsed = self._rules.get(rule_id)
+        return parsed is not None and label in parsed.rule.labels
+
+    def _intent_has_label(self, intent: Intent, label: str) -> bool:
+        return bool(intent.rule_id and self._rule_has_label(intent.rule_id, label))
+
+    def _intent_is_paused(self, intent: Intent) -> bool:
+        if not intent.rule_id:
+            return False
+        return self._rule_is_paused(intent.rule_id)
+
+    def _rule_is_paused(self, rule_id: str) -> bool:
+        parsed = self._rules.get(rule_id)
+        if rule_id in self._paused_rule_ids:
+            return True
+        authored_id = rule_id.split(":", 1)[0]
+        if authored_id in self._paused_rule_ids:
+            return True
+        if parsed is None:
+            return False
+        return any(label in self._paused_labels for label in parsed.rule.labels)
+
     def _firing_rule_diagnostics(
         self,
         *,
@@ -393,6 +492,10 @@ class Engine:
         firing: dict[str, str] = {}
         for_remaining: dict[str, int] = {}
         for rule_id, parsed in self._rules.items():
+            if self._rule_is_paused(rule_id):
+                if update_timers:
+                    self._condition_true_since.pop(rule_id, None)
+                continue
             if self._eval_when(parsed.when_ast) and observe_selectors_fire(
                 parsed.rule,
                 self.state,
@@ -592,6 +695,17 @@ class Engine:
             if i.target == target and not i.is_expired(into_the_future_ms=now)
         ]
 
+    def list_active_user_intents(self, target: str | None = None) -> list[Intent]:
+        """Return active manual/user intents, optionally for one target."""
+        now = self.now_ms()
+        return [
+            intent for intent in self._active_intents
+            if intent.authority is Authority.USER
+            and not intent.rule_id
+            and (target is None or intent.target == target)
+            and not intent.is_expired(into_the_future_ms=now)
+        ]
+
     def list_active_targets(self) -> tuple[str, ...]:
         """Return sorted target entity IDs with at least one active intent."""
         now = self.now_ms()
@@ -771,6 +885,8 @@ class Engine:
                 self._selector_resolver,
             ),
             "lifecycle": self.export_lifecycle_records(),
+            "paused_labels": self.list_paused_labels(),
+            "paused_rule_ids": self.list_paused_rule_ids(),
             "errors": self.log,
         }
 
@@ -815,6 +931,7 @@ class Engine:
             if current is None:
                 grouped[authored_id] = {**status, "rule_id": authored_id}
                 continue
+            current["paused"] = current.get("paused", False) or status.get("paused", False)
             current["active"] = current["active"] or status["active"]
             current["phase"] = dominant_phase(str(current.get("phase", "idle")), str(status.get("phase", "idle")))
             current["condition_firing"] = current["condition_firing"] or status["condition_firing"]
@@ -900,6 +1017,7 @@ class Engine:
         return {
             "rule_id": rule_id,
             "enabled": rule.enabled,
+            "paused": self._rule_is_paused(rule_id),
             "active": rule_id in firing or active_counts.get(rule_id, 0) > 0,
             "phase": phase,
             "condition_firing": rule_id in condition_firing,

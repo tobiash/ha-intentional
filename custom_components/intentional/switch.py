@@ -13,6 +13,7 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import CONF_RULE_DIR, DEFAULT_NAME, DEFAULT_RULE_DIR, DOMAIN
+from .room_controls import area_for_target, room_controls_for_engine, slugify_area_id
 from .rule_files import _list_rules, _set_rule_enabled
 from .rule_store import StorageRuleStore, rule_store_key
 
@@ -44,6 +45,14 @@ async def async_setup_entry(
         for rule_info in rule_infos
     }
     entities.extend(rule_entities.values())
+    room_entities = {
+        area_id: IntentionalRoomPauseSwitch(hass, engine, entry, area_id)
+        for area_id in room_controls_for_engine(
+            engine,
+            lambda target: area_for_target(hass, target),
+        )
+    }
+    entities.extend(room_entities.values())
     async_add_entities(entities)
 
     async def _on_refresh(event) -> None:
@@ -80,6 +89,19 @@ async def async_setup_entry(
             )
             rule_entities[rule_id] = entity
             new_entities.append(entity)
+        current_room_ids = set(room_controls_for_engine(
+            engine,
+            lambda target: area_for_target(hass, target),
+        ))
+        for removed_id in set(room_entities) - current_room_ids:
+            entity = room_entities.pop(removed_id)
+            await entity.async_remove()
+        for area_id in current_room_ids - set(room_entities):
+            entity = IntentionalRoomPauseSwitch(hass, engine, entry, area_id)
+            room_entities[area_id] = entity
+            new_entities.append(entity)
+        for area_id in current_room_ids & set(room_entities):
+            room_entities[area_id].async_write_ha_state()
         if new_entities:
             async_add_entities(new_entities)
 
@@ -238,3 +260,75 @@ class IntentionalRuleSwitch(SwitchEntity):
         self._enabled = enabled
         await self.hass.services.async_call(DOMAIN, "reload", blocking=True)
         self.async_write_ha_state()
+
+
+class IntentionalRoomPauseSwitch(SwitchEntity):
+    """Switch that pauses all rules targeting one Home Assistant area."""
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:pause-circle"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        engine,
+        entry: ConfigEntry,
+        area_id: str,
+    ) -> None:
+        self.hass = hass
+        self._engine = engine
+        self._entry = entry
+        self._area_id = area_id
+        self._attr_unique_id = f"{entry.entry_id}_area_{slugify_area_id(area_id)}_paused"
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return _device_info(self._entry)
+
+    @property
+    def name(self) -> str | None:
+        control = self._room_control()
+        room_name = control.name if control is not None else self._area_id
+        return f"Pause {room_name} rules"
+
+    @property
+    def is_on(self) -> bool:
+        control = self._room_control()
+        return bool(control and control.paused)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        control = self._room_control()
+        if control is None:
+            return {"area_id": self._area_id, "rule_ids": []}
+        return {
+            "area_id": control.area_id,
+            "area_name": control.name,
+            "rule_ids": sorted(control.rule_ids),
+            "paused_rule_ids": sorted(control.paused_rule_ids),
+            "active_rule_ids": sorted(control.active_rule_ids),
+            "targets": sorted(control.targets),
+        }
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        control = self._room_control()
+        if control is None:
+            return
+        self._engine.set_rules_paused(control.rule_ids, True)
+        self.hass.bus.async_fire(f"{DOMAIN}_refresh", {"entry_id": self._entry.entry_id})
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        control = self._room_control()
+        if control is None:
+            return
+        self._engine.set_rules_paused(control.rule_ids, False)
+        self.hass.bus.async_fire(f"{DOMAIN}_refresh", {"entry_id": self._entry.entry_id})
+        self.async_write_ha_state()
+
+    def _room_control(self):
+        return room_controls_for_engine(
+            self._engine,
+            lambda target: area_for_target(self.hass, target),
+        ).get(self._area_id)

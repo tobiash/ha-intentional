@@ -116,6 +116,32 @@ rules:
         assert rules[0].authority.value == "sensor"
         assert rules[0].confidence == 0.0
 
+    def test_vnext_stable_for_aliases_after(self) -> None:
+        rules = load_rules_from_string("""
+- id: stable-tv
+  observe:
+    media_player.tv: playing
+  stable_for: 10s
+  intent:
+    light.sofa:
+      brightness_pct: 20
+""")
+
+        assert rules[0].for_ms == 10_000
+
+    def test_vnext_observe_stable_for_aliases_observe_for(self) -> None:
+        rules = load_rules_from_string("""
+- id: stable-tv
+  observe:
+    media_player.tv: playing
+    stable_for: 10s
+  intent:
+    light.sofa:
+      brightness_pct: 20
+""")
+
+        assert rules[0].for_ms == 10_000
+
     def test_vnext_observe_supports_named_comparison(self) -> None:
         rules = load_rules_from_string("""
 - id: brighten-when-dark

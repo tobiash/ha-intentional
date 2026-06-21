@@ -62,7 +62,7 @@ from .rule_model import Rule, RuleDirFingerprint, RuleLoadError
 
 # Recognized top-level fields in a rule
 _RULE_TOP_LEVEL = {
-    "id", "extends", "when", "observe", "while", "for", "after", "hold", "emit", "intent", "effect", "authority", "confidence", "reason", "blocks", "enabled", "labels", "group", "profile", "notes", "edge_created",
+    "id", "extends", "when", "observe", "while", "for", "after", "stable_for", "hold", "emit", "intent", "effect", "authority", "confidence", "reason", "blocks", "enabled", "labels", "group", "profile", "notes", "edge_created",
 }
 # Recognized fields in the emit block
 _EMIT_FIELDS = {
@@ -359,15 +359,26 @@ def _normalize_vnext_rule(
         normalized["when"] = _observe_to_when(normalized["observe"], file=file, line=line)
     elif "when" not in normalized and "intent" in normalized:
         normalized["when"] = "true"
-    observe_has_for = isinstance(normalized.get("observe"), dict) and "for" in normalized["observe"]
-    if "after" in normalized and observe_has_for:
-        raise RuleLoadError("Use either top-level `after` or `observe.for`, not both", file=file, line=line)
+    observe_has_for = isinstance(normalized.get("observe"), dict) and (
+        "for" in normalized["observe"] or "stable_for" in normalized["observe"]
+    )
+    stability_fields = [field for field in ("after", "stable_for") if field in normalized]
+    if stability_fields and observe_has_for:
+        if "after" in normalized and isinstance(normalized.get("observe"), dict) and "for" in normalized["observe"]:
+            raise RuleLoadError("Use either top-level `after` or `observe.for`, not both", file=file, line=line)
+        raise RuleLoadError("Use only one stability guard: top-level `after`, top-level `stable_for`, `observe.for`, or `observe.stable_for`", file=file, line=line)
+    if "after" in normalized and "stable_for" in normalized:
+        raise RuleLoadError("Use either top-level `after` or `stable_for`, not both", file=file, line=line)
     if "for" not in normalized and isinstance(normalized.get("observe"), dict):
-        observe_for = normalized["observe"].get("for")
+        if "for" in normalized["observe"] and "stable_for" in normalized["observe"]:
+            raise RuleLoadError("Use either `observe.for` or `observe.stable_for`, not both", file=file, line=line)
+        observe_for = normalized["observe"].get("for", normalized["observe"].get("stable_for"))
         if observe_for is not None:
             normalized["for"] = observe_for
     if "for" not in normalized and "after" in normalized:
         normalized["for"] = normalized["after"]
+    if "for" not in normalized and "stable_for" in normalized:
+        normalized["for"] = normalized["stable_for"]
     if "emit" not in normalized and "intent" in normalized:
         _normalize_vnext_suppression(normalized, file=file, line=line)
         intent = normalized["intent"]
@@ -529,7 +540,7 @@ def _observe_to_when(
         return _happened_observe_to_when(observe["happened"], file=file, line=line)
     if set(observe) == {"select"}:
         return "true"
-    fields = [key for key in observe if key not in {"for", "select"}]
+    fields = [key for key in observe if key not in {"for", "stable_for", "select"}]
     if not fields:
         raise RuleLoadError(
             "VNext `observe` must contain at least one observed field",

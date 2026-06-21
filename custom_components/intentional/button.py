@@ -13,6 +13,7 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DEFAULT_NAME, DOMAIN
+from .room_controls import area_for_target, room_controls_for_engine, slugify_area_id
 
 
 async def async_setup_entry(
@@ -27,7 +28,37 @@ async def async_setup_entry(
         IntentionalReloadButton(hass, entry),
         IntentionalClearManualOverridesButton(hass, engine, entry, None),
     ]
+    room_entities = {
+        area_id: IntentionalClearRoomOverridesButton(hass, engine, entry, area_id)
+        for area_id in room_controls_for_engine(
+            engine,
+            lambda target: area_for_target(hass, target),
+        )
+    }
+    entities.extend(room_entities.values())
     async_add_entities(entities)
+
+    async def _on_refresh(event) -> None:
+        if event.data.get("entry_id") != entry.entry_id:
+            return
+        current_room_ids = set(room_controls_for_engine(
+            engine,
+            lambda target: area_for_target(hass, target),
+        ))
+        for removed_id in set(room_entities) - current_room_ids:
+            entity = room_entities.pop(removed_id)
+            await entity.async_remove()
+        new_entities = []
+        for area_id in current_room_ids - set(room_entities):
+            entity = IntentionalClearRoomOverridesButton(hass, engine, entry, area_id)
+            room_entities[area_id] = entity
+            new_entities.append(entity)
+        if new_entities:
+            async_add_entities(new_entities)
+
+    entry.async_on_unload(
+        hass.bus.async_listen(f"{DOMAIN}_refresh", _on_refresh)
+    )
 
 
 def _cleanup_legacy_target_buttons(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -112,3 +143,60 @@ class IntentionalClearManualOverridesButton(ButtonEntity):
     async def async_press(self) -> None:
         self._engine.clear_user_intents(self._target)
         self.hass.bus.async_fire(f"{DOMAIN}_refresh", {"entry_id": self._entry.entry_id})
+
+
+class IntentionalClearRoomOverridesButton(ButtonEntity):
+    """Button that clears manual/user intents for one Home Assistant area."""
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:eraser"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        engine,
+        entry: ConfigEntry,
+        area_id: str,
+    ) -> None:
+        self.hass = hass
+        self._engine = engine
+        self._entry = entry
+        self._area_id = area_id
+        self._attr_unique_id = f"{entry.entry_id}_area_{slugify_area_id(area_id)}_clear_manual"
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return _device_info(self._entry)
+
+    @property
+    def name(self) -> str | None:
+        control = self._room_control()
+        room_name = control.name if control is not None else self._area_id
+        return f"Clear {room_name} manual overrides"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        control = self._room_control()
+        if control is None:
+            return {"area_id": self._area_id, "targets": []}
+        return {
+            "area_id": control.area_id,
+            "area_name": control.name,
+            "targets": sorted(control.targets),
+            "manual_override_targets": sorted(control.manual_override_targets),
+        }
+
+    async def async_press(self) -> None:
+        control = self._room_control()
+        if control is None:
+            return
+        for target in control.targets | control.manual_override_targets:
+            self._engine.clear_user_intents(target)
+        self.hass.bus.async_fire(f"{DOMAIN}_refresh", {"entry_id": self._entry.entry_id})
+
+    def _room_control(self):
+        return room_controls_for_engine(
+            self._engine,
+            lambda target: area_for_target(self.hass, target),
+        ).get(self._area_id)

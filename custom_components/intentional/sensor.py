@@ -35,6 +35,7 @@ from .const import (
     DEFAULT_NAME,
     DOMAIN,
 )
+from .room_controls import area_for_target, room_controls_for_engine, slugify_area_id
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -49,7 +50,14 @@ async def async_setup_entry(
 
     # Summary sensor — always present
     summary = IntentionalSummarySensor(hass, engine, entry)
-    async_add_entities([summary])
+    room_entities = {
+        area_id: IntentionalRoomStatusSensor(hass, engine, entry, area_id)
+        for area_id in room_controls_for_engine(
+            engine,
+            lambda target: area_for_target(hass, target),
+        )
+    }
+    async_add_entities([summary, *room_entities.values()])
 
     _cleanup_legacy_target_sensors(hass, entry)
 
@@ -58,6 +66,22 @@ async def async_setup_entry(
         if event.data.get("entry_id") != entry.entry_id:
             return
         summary.async_write_ha_state()
+        current_room_ids = set(room_controls_for_engine(
+            engine,
+            lambda target: area_for_target(hass, target),
+        ))
+        for removed_id in set(room_entities) - current_room_ids:
+            entity = room_entities.pop(removed_id)
+            await entity.async_remove()
+        new_entities = []
+        for area_id in current_room_ids - set(room_entities):
+            entity = IntentionalRoomStatusSensor(hass, engine, entry, area_id)
+            room_entities[area_id] = entity
+            new_entities.append(entity)
+        for area_id in current_room_ids & set(room_entities):
+            room_entities[area_id].async_write_ha_state()
+        if new_entities:
+            async_add_entities(new_entities)
 
     entry.async_on_unload(
         hass.bus.async_listen(f"{DOMAIN}_refresh", _on_refresh)
@@ -191,3 +215,78 @@ class IntentionalSummarySensor(SensorEntity):
             "target_count": len(active_targets),
             "active_targets": list(active_targets),
         }
+
+
+class IntentionalRoomStatusSensor(SensorEntity):
+    """A sensor summarizing rules and overrides for one Home Assistant area."""
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:floor-plan"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        engine,
+        entry: ConfigEntry,
+        area_id: str,
+    ) -> None:
+        self.hass = hass
+        self._engine = engine
+        self._entry = entry
+        self._area_id = area_id
+        self._attr_unique_id = f"{entry.entry_id}_area_{slugify_area_id(area_id)}_status"
+
+    @property
+    def device_info(self):
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+            "name": DEFAULT_NAME,
+            "manufacturer": "Intentional",
+            "model": "Intent Engine",
+        }
+
+    @property
+    def name(self) -> str | None:
+        control = self._room_control()
+        room_name = control.name if control is not None else self._area_id
+        return f"{room_name} status"
+
+    @property
+    def native_value(self) -> str:
+        control = self._room_control()
+        if control is None:
+            return "unknown"
+        if control.paused:
+            return "paused"
+        if control.manual_override_targets:
+            return "manual_override"
+        if control.active_rule_ids:
+            return "active"
+        return "idle"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        control = self._room_control()
+        if control is None:
+            return {"area_id": self._area_id}
+        return {
+            "area_id": control.area_id,
+            "area_name": control.name,
+            "paused": control.paused,
+            "rule_count": len(control.rule_ids),
+            "active_rule_count": len(control.active_rule_ids),
+            "manual_override_count": len(control.manual_override_targets),
+            "active_intent_count": control.active_intent_count,
+            "rule_ids": sorted(control.rule_ids),
+            "active_rule_ids": sorted(control.active_rule_ids),
+            "paused_rule_ids": sorted(control.paused_rule_ids),
+            "targets": sorted(control.targets),
+            "manual_override_targets": sorted(control.manual_override_targets),
+        }
+
+    def _room_control(self):
+        return room_controls_for_engine(
+            self._engine,
+            lambda target: area_for_target(self.hass, target),
+        ).get(self._area_id)

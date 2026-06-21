@@ -67,6 +67,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
+from datetime import datetime
 from functools import partial
 from typing import Any
 
@@ -76,7 +77,12 @@ from homeassistant.core import HomeAssistant
 
 from ._engine import __version__  # noqa: TID252
 from ._engine.engine import Engine  # noqa: TID252
-from ._engine.projection import simulation_step  # noqa: TID252
+from ._engine.projection import (  # noqa: TID252
+    dashboard_cards,
+    explain_card,
+    preview_targets,
+    simulation_step,
+)
 from ._engine.reconciliation import (  # noqa: TID252
     actual_conditions_for_desired_record,
     actual_snapshot,
@@ -85,6 +91,7 @@ from ._engine.schema import dsl_schema  # noqa: TID252
 from ._engine.yaml_loader import RuleLoadError, load_rules_from_string  # noqa: TID252
 from .const import CONF_RULE_DIR, DEFAULT_RULE_DIR, DOMAIN  # noqa: TID252
 from .diagnostics import list_diagnostics  # noqa: TID252
+from .room_controls import area_for_target, room_controls_for_engine  # noqa: TID252
 from .rule_files import (  # noqa: TID252
     _delete_rule_file,
     _is_safe_filename,
@@ -677,9 +684,67 @@ class IntentionalDryRunView(HomeAssistantView):
             "valid": True,
             "active_targets": list(engine.list_active_targets()),
             "resolved_targets": resolved,
+            "preview": preview_targets(engine),
             "effects": effects,
             "errors": [],
         })
+
+
+class IntentionalPreviewView(HomeAssistantView):
+    """POST /api/intentional/preview — show desired-vs-actual target diffs."""
+
+    url = "/api/intentional/preview"
+    name = "api:intentional:preview"
+    requires_auth = True
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        try:
+            data = await request.json()
+        except (ValueError, json.JSONDecodeError) as err:
+            return _error(f"Invalid JSON: {err}", "bad_request", 400)
+
+        engine, error = _preview_engine(hass, data)
+        if error is not None:
+            return error
+        assert engine is not None
+        return web.json_response({
+            "valid": True,
+            "preview": preview_targets(engine, actual_for_target=lambda target: _actual_for_target(hass, target)),
+            "errors": [],
+        })
+
+
+class IntentionalCardView(HomeAssistantView):
+    """GET /api/intentional/card — Lovelace-friendly explain data."""
+
+    url = "/api/intentional/card"
+    name = "api:intentional:card"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        engine = _engine_for(hass)
+        if engine is None:
+            return _error("Integration not configured", "not_configured", 503)
+        target = request.query.get("target")
+        return web.json_response(explain_card(engine, target=target))
+
+
+class IntentionalDashboardView(HomeAssistantView):
+    """GET /api/intentional/dashboard — suggested Lovelace room cards."""
+
+    url = "/api/intentional/dashboard"
+    name = "api:intentional:dashboard"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        engine = _engine_for(hass)
+        if engine is None:
+            return _error("Integration not configured", "not_configured", 503)
+        rooms = room_controls_for_engine(engine, lambda target: area_for_target(hass, target))
+        return web.json_response(dashboard_cards(rooms))
 
 
 class IntentionalSimulateView(HomeAssistantView):
@@ -727,6 +792,57 @@ class IntentionalSimulateView(HomeAssistantView):
             engine.evaluate_all()
             steps.append(simulation_step(engine, index=index))
 
+        return web.json_response({"valid": True, "steps": steps, "errors": []})
+
+
+class IntentionalReplayView(HomeAssistantView):
+    """POST /api/intentional/replay — simulate rules over HA history-shaped data."""
+
+    url = "/api/intentional/replay"
+    name = "api:intentional:replay"
+    requires_auth = True
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        try:
+            data = await request.json()
+        except (ValueError, json.JSONDecodeError) as err:
+            return _error(f"Invalid JSON: {err}", "bad_request", 400)
+        contents = data.get("contents")
+        if not isinstance(contents, str):
+            store = _rule_store_for(hass)
+            contents = store.contents if store is not None else None
+        if not isinstance(contents, str):
+            return _error("Replay requires `contents` when storage-backed rules are unavailable", "bad_request", 400)
+        timeline = data.get("timeline")
+        if timeline is None:
+            timeline = _timeline_from_history(data.get("history"))
+        if not isinstance(timeline, list):
+            return _error("Request body must include list `timeline` or HA history `history`", "bad_request", 400)
+        try:
+            rules = load_rules_from_string(contents)
+        except RuleLoadError as err:
+            return web.json_response({"valid": False, "errors": [str(err)]}, status=400)
+
+        engine = Engine(clock_fn=lambda: 0, selector_resolver=lambda _selector: [])
+        engine.load_rules(rules)
+        steps = []
+        for index, step in enumerate(timeline):
+            if not isinstance(step, dict):
+                return _error(f"timeline[{index}] must be a mapping", "bad_request", 400)
+            advance_ms = step.get("advance_ms", 0)
+            if isinstance(advance_ms, int) and advance_ms > 0:
+                engine.advance_clock(advance_ms)
+            states = step.get("states", {})
+            if not isinstance(states, dict):
+                return _error(f"timeline[{index}].states must be a mapping", "bad_request", 400)
+            for key, value in states.items():
+                if not isinstance(key, str) or "." not in key:
+                    continue
+                entity_id, _sep, field = key.rpartition(".")
+                engine.update_state(entity_id, value, field=field)
+            engine.evaluate_all()
+            steps.append(simulation_step(engine, index=index))
         return web.json_response({"valid": True, "steps": steps, "errors": []})
 
 
@@ -814,6 +930,89 @@ def _rule_document_response(store: StorageRuleStore) -> dict[str, Any]:
     }
 
 
+def _preview_engine(hass: HomeAssistant, data: dict[str, Any]) -> tuple[Any | None, web.Response | None]:
+    contents = data.get("contents")
+    state_overrides = data.get("state_overrides", {})
+    if not isinstance(state_overrides, dict):
+        return None, _error("`state_overrides` must be a mapping", "bad_request", 400)
+    if isinstance(contents, str):
+        try:
+            rules = load_rules_from_string(contents)
+        except RuleLoadError as err:
+            return None, web.json_response({"valid": False, "errors": [str(err)]}, status=400)
+        source = _engine_for(hass)
+        engine = Engine(selector_resolver=lambda _selector: [])
+        if source is not None:
+            for key, value in source.state.items():
+                if isinstance(key, str) and "." in key:
+                    entity_id, _sep, field = key.rpartition(".")
+                    engine.update_state(entity_id, value, field=field)
+        engine.load_rules(rules)
+        for key, value in state_overrides.items():
+            if not isinstance(key, str) or "." not in key:
+                continue
+            entity_id, _sep, field = key.rpartition(".")
+            engine.update_state(entity_id, value, field=field)
+        engine.evaluate_all()
+    else:
+        if state_overrides:
+            return None, _error("`state_overrides` require preview `contents`", "bad_request", 400)
+        engine = _engine_for(hass)
+        if engine is None:
+            return None, _error("Integration not configured", "not_configured", 503)
+    return engine, None
+
+
+def _actual_for_target(hass: HomeAssistant, target: str) -> dict[str, Any] | None:
+    state = hass.states.get(target)
+    if state is None:
+        return None
+    return actual_snapshot(state)
+
+
+def _timeline_from_history(history: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(history, list):
+        return None
+    events = []
+    for series in history:
+        if not isinstance(series, list):
+            continue
+        for item in series:
+            if not isinstance(item, dict):
+                continue
+            entity_id = item.get("entity_id")
+            if not isinstance(entity_id, str):
+                continue
+            timestamp = _parse_history_time(item.get("last_changed") or item.get("last_updated"))
+            states = {f"{entity_id}.state": item.get("state")}
+            attributes = item.get("attributes")
+            if isinstance(attributes, dict):
+                for key, value in attributes.items():
+                    if isinstance(key, str):
+                        states[f"{entity_id}.{key}"] = value
+            events.append((timestamp, states))
+    events.sort(key=lambda event: event[0] or datetime.min)
+    previous: datetime | None = None
+    timeline = []
+    for timestamp, states in events:
+        advance_ms = 0
+        if timestamp is not None and previous is not None:
+            advance_ms = max(0, int((timestamp - previous).total_seconds() * 1000))
+        if timestamp is not None:
+            previous = timestamp
+        timeline.append({"advance_ms": advance_ms, "states": states})
+    return timeline
+
+
+def _parse_history_time(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 # ── Registration ───────────────────────────────────────────────────
 
 
@@ -838,7 +1037,11 @@ def register_api(hass: HomeAssistant) -> None:
         IntentionalSchemaView,
         IntentionalValidateView,
         IntentionalDryRunView,
+        IntentionalPreviewView,
+        IntentionalCardView,
+        IntentionalDashboardView,
         IntentionalSimulateView,
+        IntentionalReplayView,
         IntentionalWorldView,
         IntentionalDiagnosticsView,
     ]

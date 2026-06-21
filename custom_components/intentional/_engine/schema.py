@@ -10,14 +10,14 @@ def dsl_schema() -> dict[str, Any]:
     return {
         "dsl_version": "vnext-draft",
         "top_level_rule_fields": [
-            "id", "enabled", "labels", "notes", "while", "after", "hold", "observe", "intent",
+            "id", "enabled", "labels", "notes", "while", "after", "stable_for", "hold", "observe", "intent",
             "effect", "authority", "confidence", "reason", "group", "profile",
         ],
         "top_level_document_fields": ["rules", "scenes", "targets"],
         "target_policy_fields": ["default"],
         "observe_operators": [
             "is", "is_not", "lt", "lte", "gt", "gte", "all", "any",
-            "not", "none", "changed", "happened", "for",
+            "not", "none", "changed", "happened", "for", "stable_for",
         ],
         "intent_field_operators": [
             "value", "min", "max", "offset", "multiply", "animate", "generate",
@@ -27,7 +27,7 @@ def dsl_schema() -> dict[str, Any]:
         ],
         "target_metadata": ["ttl", "linger", "transition", "easing"],
         "lifecycle_fields": [
-            "while", "after", "hold.while", "hold.until", "hold.until.for",
+            "while", "after", "stable_for", "hold.while", "hold.until", "hold.until.for",
             "hold.after", "hold.after_when_stops",
         ],
         "simulation_endpoint": "/api/intentional/simulate",

@@ -1342,6 +1342,33 @@ class TestManualIntents:
         ] == [Authority.AUTOMATION]
         assert engine.list_active_intents("light.y") == []
 
+    def test_paused_rule_does_not_emit_or_keep_intents(self) -> None:
+        engine = Engine()
+        engine.load_rules([
+            _rule("living-room", 'binary_sensor.presence.state == "on"'),
+            _rule("kitchen", 'binary_sensor.presence.state == "on"', target="light.kitchen"),
+        ])
+        engine.update_state("binary_sensor.presence", "on")
+        engine.evaluate_all()
+
+        engine.set_rule_paused("living-room", True)
+        engine.evaluate_all()
+
+        assert engine.resolve("light.x") is None
+        assert engine.resolve("light.kitchen") is not None
+        assert engine.list_authored_rule_statuses()["living-room"]["paused"] is True
+
+    def test_paused_rule_ids_are_persisted(self) -> None:
+        engine = Engine()
+        engine.load_rules([_rule("living-room", 'binary_sensor.presence.state == "on"')])
+        engine.set_rule_paused("living-room", True)
+
+        restored = Engine()
+        restored.load_rules([_rule("living-room", 'binary_sensor.presence.state == "on"')])
+        restored.import_lifecycle_records(engine.export_lifecycle_records())
+
+        assert restored.is_rule_paused("living-room") is True
+
 
 # ── Rule reload ─────────────────────────────────────────────────────
 
