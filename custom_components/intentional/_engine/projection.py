@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import unicodedata
 from typing import Any, Protocol
 
 
@@ -83,7 +84,7 @@ def dashboard_cards(rooms: Any) -> dict[str, Any]:
     """Return a simple Lovelace entities-card layout for room controls."""
     cards = []
     for room in rooms.values():
-        slug = "".join(ch if ch.isalnum() else "_" for ch in room.area_id).strip("_") or "area"
+        slug = _entity_slug(room.name)
         cards.append({
             "type": "entities",
             "title": f"Intentional: {room.name}",
@@ -94,6 +95,14 @@ def dashboard_cards(rooms: Any) -> dict[str, Any]:
             ],
         })
     return {"title": "Intentional Rooms", "cards": cards}
+
+
+def _entity_slug(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    return "_".join(
+        part for part in "".join(ch.lower() if ch.isalnum() else "_" for ch in normalized).split("_")
+        if part
+    ) or "area"
 
 
 def active_rule_statuses(engine: SimulationEngine) -> list[dict[str, Any]]:

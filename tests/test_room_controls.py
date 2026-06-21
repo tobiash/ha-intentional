@@ -69,3 +69,21 @@ def test_room_controls_expose_paused_rules() -> None:
 
     assert controls["living_room"].paused is True
     assert controls["living_room"].paused_rule_ids == {"living-room-evening"}
+
+
+def test_dashboard_cards_use_room_name_slugs() -> None:
+    from types import SimpleNamespace
+
+    from intentional.projection import dashboard_cards
+
+    cards = dashboard_cards({
+        "living_room": SimpleNamespace(area_id="living_room", name="Wohnzimmer"),
+        "office": SimpleNamespace(area_id="office", name="Büro Tobias"),
+    })
+
+    entities = [entity for card in cards["cards"] for entity in card["entities"]]
+
+    assert "sensor.intentional_wohnzimmer_status" in entities
+    assert "switch.intentional_pause_wohnzimmer_rules" in entities
+    assert "button.intentional_clear_wohnzimmer_manual_overrides" in entities
+    assert "sensor.intentional_buro_tobias_status" in entities

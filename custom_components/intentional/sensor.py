@@ -98,7 +98,7 @@ def _cleanup_legacy_target_sensors(hass: HomeAssistant, entry: ConfigEntry) -> N
         if registry_entry.domain != Platform.SENSOR:
             continue
         unique_id = registry_entry.unique_id
-        if unique_id.startswith(prefix):
+        if unique_id.startswith(prefix) and not unique_id.startswith(f"{prefix}area_"):
             registry.async_remove(entity_id)
 
 
