@@ -3424,11 +3424,80 @@ class _FakeStates:
         self._states[entity_id] = state
 
 
+async def _apply_resolved_targets(
+    hass: Any,
+    engine: Any,
+    last_applied: dict,
+    last_resolved: dict | None = None,
+    drift_suppressed_until: dict | None = None,
+    drift_candidates: dict | None = None,
+    service_failure_backoff: dict | None = None,
+    intentional_contexts: Any | None = None,
+) -> None:
+    """Compatibility wrapper bridging the old dict-style call to Reconciliation.tick."""
+    import custom_components.intentional as integration
+    from custom_components.intentional import _HAAdapter
+    from custom_components.intentional._engine.reconciliation import Reconciliation
+    from custom_components.intentional.runtime_context import IntentionalContextTracker
+
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=1500,
+        service_failure_backoff_ms=30_000,
+    )
+    reconciler._last_applied.update(last_applied)
+    if last_resolved:
+        reconciler._last_resolved.update(last_resolved)
+    if drift_suppressed_until:
+        reconciler._drift_suppressed_until.update(drift_suppressed_until)
+    if drift_candidates:
+        reconciler._drift_candidates.update(drift_candidates)
+    if service_failure_backoff:
+        reconciler._service_failure_backoff.update(service_failure_backoff)
+    tracker = intentional_contexts if intentional_contexts is not None else IntentionalContextTracker()
+    adapter = _HAAdapter(hass, tracker)
+    now_ms = integration._monotonic_ms()
+    await reconciler.apply(engine, adapter, now_ms)
+    last_applied.clear()
+    last_applied.update(reconciler._last_applied)
+    if last_resolved is not None:
+        last_resolved.clear()
+        last_resolved.update(reconciler._last_resolved)
+    if drift_suppressed_until is not None:
+        drift_suppressed_until.clear()
+        drift_suppressed_until.update(reconciler._drift_suppressed_until)
+    if drift_candidates is not None:
+        drift_candidates.clear()
+        drift_candidates.update(reconciler._drift_candidates)
+    if service_failure_backoff is not None:
+        service_failure_backoff.clear()
+        service_failure_backoff.update(reconciler._service_failure_backoff)
+
+
+def _restore_pending_withdraws(
+    records: dict | None,
+    *,
+    linger_rule_ids: set[str] | None = None,
+    now_ms: int | None = None,
+) -> dict:
+    """Compatibility wrapper bridging the old restore call to Reconciliation."""
+    from custom_components.intentional._engine.reconciliation import Reconciliation
+
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=1500,
+        service_failure_backoff_ms=30_000,
+    )
+    reconciler.restore_pending_withdraws(
+        records, linger_rule_ids=linger_rule_ids, now_ms=now_ms
+    )
+    return dict(reconciler._last_resolved)
+
+
 @pytest.mark.asyncio
 async def test_apply_resolved_targets_suppresses_duplicate_calls() -> None:
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
-    from custom_components.intentional import _apply_resolved_targets
     from custom_components.intentional._engine import Engine
     from custom_components.intentional._engine.yaml_loader import Rule
 
@@ -3476,6 +3545,7 @@ async def test_intentional_context_state_change_does_not_emit_manual_override() 
         service_plan_signature,
     )
     from custom_components.intentional._engine.intent import Authority
+    from custom_components.intentional._engine.reconciliation import Reconciliation
     from custom_components.intentional._engine.yaml_loader import Rule
     from custom_components.intentional.diagnostics import DiagnosticRateLimiter
     from custom_components.intentional.runtime_context import IntentionalContextTracker
@@ -3491,15 +3561,18 @@ async def test_intentional_context_state_change_does_not_emit_manual_override() 
     ])
     engine.update_state("input_boolean.work", "on")
     engine.evaluate_all()
-    last_applied = {
-        "light.desk": service_plan_signature(
-            service_calls_for_resolved_target(
-                "light.desk",
-                {"state": "on", "brightness_pct": 60},
-            )
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=1500,
+        service_failure_backoff_ms=30_000,
+    )
+    reconciler._last_applied["light.desk"] = service_plan_signature(
+        service_calls_for_resolved_target(
+            "light.desk",
+            {"state": "on", "brightness_pct": 60},
         )
-    }
-    drift_candidates = {"light.desk": (10_000, (("state", "off"),))}
+    )
+    reconciler._drift_candidates["light.desk"] = (10_000, (("state", "off"),))
     intentional_contexts = IntentionalContextTracker(clock_fn=lambda: 10_000)
     diagnostic_rate_limiter = DiagnosticRateLimiter()
     context = intentional_contexts.new_context()
@@ -3507,12 +3580,10 @@ async def test_intentional_context_state_change_does_not_emit_manual_override() 
     listener = _on_ha_state_change_factory(
         hass,
         engine,
-        last_applied,
-        {},
-        drift_candidates,
-        set(),
+        reconciler,
         intentional_contexts,
         diagnostic_rate_limiter,
+        set(),
     )
 
     event = SimpleNamespace(data={
@@ -3531,8 +3602,8 @@ async def test_intentional_context_state_change_does_not_emit_manual_override() 
     listener(event)
     listener(event)
 
-    assert "light.desk" in last_applied
-    assert drift_candidates == {}
+    assert "light.desk" in reconciler._last_applied
+    assert reconciler._drift_candidates == {}
     assert all(
         intent.authority is not Authority.USER
         for intent in engine.list_active_intents("light.desk")
@@ -3548,7 +3619,6 @@ async def test_intentional_context_state_change_does_not_emit_manual_override() 
 async def test_apply_resolved_targets_reuses_context_for_service_plan() -> None:
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
-    from custom_components.intentional import _apply_resolved_targets
     from custom_components.intentional._engine import Engine
     from custom_components.intentional._engine.yaml_loader import Rule
     from custom_components.intentional.runtime_context import IntentionalContextTracker
@@ -3610,7 +3680,6 @@ async def test_apply_resolved_targets_retries_ignored_activation_after_grace(mon
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
     import custom_components.intentional as integration
-    from custom_components.intentional import _apply_resolved_targets
     from custom_components.intentional._engine import Engine
     from custom_components.intentional._engine.yaml_loader import Rule
 
@@ -3679,7 +3748,6 @@ async def test_apply_resolved_targets_waits_for_pending_manual_drift(monkeypatch
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
     import custom_components.intentional as integration
-    from custom_components.intentional import _apply_resolved_targets
     from custom_components.intentional._engine import Engine
     from custom_components.intentional._engine.ha_adapter import (
         service_calls_for_resolved_target,
@@ -3732,7 +3800,6 @@ async def test_apply_resolved_targets_waits_for_pending_manual_drift(monkeypatch
 async def test_expired_linger_restores_as_pending_withdraw_after_restart() -> None:
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
-    from custom_components.intentional import _apply_resolved_targets, _restore_pending_withdraws
     from custom_components.intentional._engine import Engine
 
     engine = Engine(clock_fn=lambda: 10_000)
@@ -3789,7 +3856,6 @@ async def test_expired_linger_restores_as_pending_withdraw_after_restart() -> No
 async def test_apply_resolved_targets_backs_off_failed_service_signature() -> None:
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
-    from custom_components.intentional import _apply_resolved_targets
     from custom_components.intentional._engine import Engine
     from custom_components.intentional._engine.yaml_loader import Rule
 
@@ -3831,7 +3897,6 @@ async def test_apply_resolved_targets_backs_off_failed_service_signature() -> No
 async def test_apply_resolved_targets_allows_empty_action_payloads() -> None:
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
-    from custom_components.intentional import _apply_resolved_targets
     from custom_components.intentional._engine import Engine
     from custom_components.intentional._engine.yaml_loader import Rule
 
@@ -3868,7 +3933,6 @@ async def test_apply_resolved_targets_allows_empty_action_payloads() -> None:
 async def test_apply_resolved_targets_uses_assert_and_withdraw_transitions() -> None:
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
-    from custom_components.intentional import _apply_resolved_targets
     from custom_components.intentional._engine import Engine
     from custom_components.intentional._engine.yaml_loader import load_rules_from_string
 
@@ -3920,7 +3984,6 @@ async def test_apply_resolved_targets_does_not_send_change_during_assert_transit
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
     import custom_components.intentional as integration
-    from custom_components.intentional import _apply_resolved_targets
     from custom_components.intentional._engine import Engine
     from custom_components.intentional._engine.yaml_loader import load_rules_from_string
 
@@ -3994,7 +4057,6 @@ async def test_apply_resolved_targets_does_not_send_change_during_assert_transit
 async def test_apply_resolved_targets_withdraws_brightness_only_light_activation() -> None:
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
-    from custom_components.intentional import _apply_resolved_targets
     from custom_components.intentional._engine import Engine
     from custom_components.intentional._engine.yaml_loader import load_rules_from_string
 
@@ -4044,7 +4106,6 @@ async def test_apply_resolved_targets_retries_withdraw_until_state_matches(monke
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
     import custom_components.intentional as integration
-    from custom_components.intentional import _apply_resolved_targets
     from custom_components.intentional._engine import Engine
     from custom_components.intentional._engine.yaml_loader import load_rules_from_string
 
@@ -4150,7 +4211,6 @@ async def test_apply_resolved_targets_does_not_fight_user_change_after_withdraw(
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
     import custom_components.intentional as integration
-    from custom_components.intentional import _apply_resolved_targets
     from custom_components.intentional._engine import Engine
     from custom_components.intentional._engine.yaml_loader import load_rules_from_string
 
@@ -4229,7 +4289,6 @@ async def test_apply_resolved_targets_reasserts_when_rule_reactivates_during_pen
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
     import custom_components.intentional as integration
-    from custom_components.intentional import _apply_resolved_targets
     from custom_components.intentional._engine import Engine
     from custom_components.intentional._engine.yaml_loader import load_rules_from_string
 
@@ -4314,7 +4373,6 @@ async def test_apply_resolved_targets_reasserts_when_rule_reactivates_during_pen
 async def test_apply_resolved_targets_withdraw_reconciles_to_revealed_intent() -> None:
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
-    from custom_components.intentional import _apply_resolved_targets
     from custom_components.intentional._engine import Engine
     from custom_components.intentional._engine.yaml_loader import load_rules_from_string
 
@@ -4378,7 +4436,6 @@ async def test_apply_resolved_targets_withdraw_reconciles_to_revealed_intent() -
 async def test_apply_resolved_targets_uses_assert_when_stronger_intent_replaces_weaker() -> None:
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
-    from custom_components.intentional import _apply_resolved_targets
     from custom_components.intentional._engine import Engine
     from custom_components.intentional._engine.yaml_loader import load_rules_from_string
 
