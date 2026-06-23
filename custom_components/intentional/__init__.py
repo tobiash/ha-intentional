@@ -95,14 +95,15 @@ class _HAAdapter:
         return new_intentional_context(self._context_tracker)
 
 
-def _record_reconciliation_events(
+def _apply_reconciliation_events(
     hass: HomeAssistant,
+    engine: Engine,
     events: list[ReconciliationEvent],
     *,
     now_ms: int,
     rate_limiter: DiagnosticRateLimiter | None = None,
 ) -> None:
-    """Translate reconciliation events into the in-memory diagnostic ring."""
+    """Apply reconciliation events (overrides) and record diagnostics."""
     for event in events:
         if event.kind == "context_ignored":
             record_intentional_context_ignored_for_drift(
@@ -113,6 +114,12 @@ def _record_reconciliation_events(
                 rate_limiter=rate_limiter,
             )
         elif event.kind == "drift_promoted":
+            engine.emit_user_intent(
+                target=event.details["target"],
+                set=event.details["set"],
+                ttl_ms=event.details["ttl_ms"],
+                reason=event.details["reason"],
+            )
             record_diagnostic(
                 hass, "drift_promoted", target=event.target,
                 reason=event.details.get("reason", ""),
@@ -377,8 +384,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             events = await _reconciler.tick(
                 engine, _ha_adapter, _intentional_contexts, now_ms
             )
-            _record_reconciliation_events(
-                hass, events, now_ms=now_ms, rate_limiter=_diagnostic_rate_limiter
+            _apply_reconciliation_events(
+                hass, engine, events, now_ms=now_ms, rate_limiter=_diagnostic_rate_limiter
             )
             # Activate any newly-firing scene rules
             _active_scenes = await _activate_scene_rules(
@@ -611,8 +618,8 @@ def _on_ha_state_change_factory(
         now_ms = _monotonic_ms()
         events = reconciler.on_state_delta(engine, new_state, context_tracker, now_ms)
         if events:
-            _record_reconciliation_events(
-                hass, events, now_ms=now_ms, rate_limiter=diagnostic_rate_limiter
+            _apply_reconciliation_events(
+                hass, engine, events, now_ms=now_ms, rate_limiter=diagnostic_rate_limiter
             )
         # Re-evaluate immediately for snappy response
         sync_time_context_into_engine(engine)

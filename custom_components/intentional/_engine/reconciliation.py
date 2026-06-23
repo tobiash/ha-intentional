@@ -20,14 +20,13 @@ from typing import Any, Protocol, runtime_checkable
 
 from .ha_adapter import (
     ServicePlanSignature,
+    classify_state_drift,
     clear_pending_state_drift,
-    emit_manual_override_for_state_drift,
     pending_drift_targets,
     service_calls_for_resolved_target,
     service_plan_matches_state,
     service_plan_signature,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Collaborators injected by the integration
@@ -287,7 +286,7 @@ class Reconciliation:
         if context_tracker.owns_state(state):
             clear_pending_state_drift(self._drift_candidates, entity_id)
             return [ReconciliationEvent("context_ignored", entity_id, {"state": state})]
-        promoted = emit_manual_override_for_state_drift(
+        promoted = classify_state_drift(
             engine,
             self._last_applied,
             state,
@@ -297,12 +296,8 @@ class Reconciliation:
             drift_candidates=self._drift_candidates,
             confirmation_ms=self._drift_confirmation_ms,
         )
-        if promoted:
-            return [
-                ReconciliationEvent(
-                    "drift_promoted", entity_id, {"reason": "Manual HA state change"}
-                )
-            ]
+        if promoted is not None:
+            return [ReconciliationEvent("drift_promoted", entity_id, promoted)]
         return []
 
     # ----- entry point 1: the listener path -----
