@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.27] - 2026-06-25
+
+### Fixed
+- **Rule enable switches** no longer write a new state on every 100ms engine tick, which caused runaway Home Assistant recorder database growth. The continuously-changing elapsed-time attributes (`active_for_ms`, `condition_active_for_ms`, `held_for_ms`, `for_remaining_ms`) are now excluded from the switch entity so Home Assistant's no-change short-circuit suppresses the per-tick writes; live values remain available via the HTTP API and diagnostic sensors.
+
 ## [0.7.26] - 2026-06-21
 
 ### Fixed
