@@ -22,6 +22,8 @@ REPO_ROOT = Path(__file__).parent.parent
 SOURCE_DIR = REPO_ROOT / "src" / "intentional"
 BUNDLE_DIR = REPO_ROOT / "custom_components" / "intentional" / "_engine"
 
+PACKAGES = ("adapter",)
+
 
 def check_files_match(source: Path, bundle: Path, name: str) -> list[str]:
     """Return a list of error messages if the files have unauthorized drift.
@@ -63,7 +65,12 @@ def check_files_match(source: Path, bundle: Path, name: str) -> list[str]:
 def check_internal_imports(bundle: Path) -> list[str]:
     """Verify bundle files use relative imports, not absolute 'intentional.X'."""
     errors: list[str] = []
-    for py_file in bundle.glob("*.py"):
+    py_files = list(bundle.glob("*.py"))
+    for pkg in PACKAGES:
+        pkg_dir = bundle / pkg
+        if pkg_dir.is_dir():
+            py_files.extend(pkg_dir.glob("*.py"))
+    for py_file in py_files:
         text = py_file.read_text()
         for i, line in enumerate(text.splitlines(), 1):
             stripped = line.strip()
@@ -72,7 +79,7 @@ def check_internal_imports(bundle: Path) -> list[str]:
             if (stripped.startswith("from intentional.")
                 or stripped.startswith("import intentional")):
                 errors.append(
-                    f"{py_file.name}:{i}: absolute 'intentional' import "
+                    f"{py_file.relative_to(bundle)}:{i}: absolute 'intentional' import "
                     f"found in bundle. Convert to relative: {line!r}"
                 )
     return errors
@@ -111,6 +118,26 @@ def main() -> int:
             errors.extend(check_files_match(
                 SOURCE_DIR / name, BUNDLE_DIR / name, name
             ))
+
+    # 2b. Check package subdirectories
+    for pkg in PACKAGES:
+        src_pkg = SOURCE_DIR / pkg
+        bnd_pkg = BUNDLE_DIR / pkg
+        if not src_pkg.is_dir():
+            continue
+        src_pkg_files = sorted(p.name for p in src_pkg.glob("*.py"))
+        bnd_pkg_files = sorted(p.name for p in bnd_pkg.glob("*.py")) if bnd_pkg.is_dir() else []
+        missing = set(src_pkg_files) - set(bnd_pkg_files)
+        extra = set(bnd_pkg_files) - set(src_pkg_files)
+        if missing:
+            errors.append(f"Package '{pkg}' files missing from bundle: {sorted(missing)}")
+        if extra:
+            errors.append(f"Package '{pkg}' files missing from source: {sorted(extra)}")
+        for name in src_pkg_files:
+            if name in bnd_pkg_files:
+                errors.extend(check_files_match(
+                    src_pkg / name, bnd_pkg / name, f"{pkg}/{name}"
+                ))
 
     # 3. Check that bundle uses relative imports
     errors.extend(check_internal_imports(BUNDLE_DIR))

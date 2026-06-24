@@ -5,14 +5,36 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from intentional.adapter import (
+    FrozenValue as FrozenValue,
+)
+from intentional.adapter import (
+    SceneActivationPlan as SceneActivationPlan,
+)
+from intentional.adapter import (
+    ServiceCall as ServiceCall,
+)
+from intentional.adapter import (
+    ServicePlanSignature as ServicePlanSignature,
+)
+from intentional.adapter import (
+    ServiceSignature as ServiceSignature,
+)
+from intentional.adapter.extractor import (
+    manual_set_from_state_object as manual_set_from_state_object,
+)
+from intentional.adapter.signer import (
+    _freeze_signature_value as _freeze_signature_value,
+)
+from intentional.adapter.signer import (
+    service_plan_signature as service_plan_signature,
+)
+from intentional.adapter.signer import (
+    service_signature as service_signature,
+)
 from intentional.engine import Engine
 from intentional.registry import LIGHT_COLOR_FIELDS
 
-ServiceCall = tuple[str, str, dict[str, Any]]
-FrozenValue = Any
-ServiceSignature = tuple[str, str, tuple[tuple[str, FrozenValue], ...]]
-ServicePlanSignature = tuple[ServiceSignature, ...]
-SceneActivationPlan = tuple[tuple[ServiceCall, ...], set[str], set[str]]
 MANUAL_SET_FIELDS = (
     "state",
     "brightness_pct",
@@ -126,39 +148,6 @@ MANUAL_SET_FIELDS = (
     "battery",
     "update_entity",
 )
-MANUAL_STATE_DOMAINS = frozenset({
-    "light",
-    "switch",
-    "input_boolean",
-    "media_player",
-    "fan",
-    "lock",
-    "siren",
-    "lawn_mower",
-    "remote",
-})
-MANUAL_ATTRIBUTE_FIELDS = frozenset({
-    "brightness_pct",
-    "brightness",
-    "color_temp_k",
-    "color_temp_mired",
-    "rgb_color",
-    "rgbw_color",
-    "rgbww_color",
-    "hs_color",
-    "xy_color",
-    "effect",
-    "volume_level",
-    "is_volume_muted",
-    "source",
-    "sound_mode",
-    "shuffle",
-    "repeat",
-    "percentage",
-    "preset_mode",
-    "direction",
-    "oscillating",
-})
 COVER_STATE_SERVICES = {
     "open": "open_cover",
     "opening": "open_cover",
@@ -386,117 +375,6 @@ def sync_time_context_into_engine(engine: Engine, now: datetime | None = None) -
         time_of_day_bucket(current.hour),
         clock=f"{current.hour:02d}:{current.minute:02d}",
     )
-
-
-def manual_set_from_state_object(state: Any) -> dict[str, Any]:
-    """Extract a user-intent set payload from an HA-style State object."""
-    domain, sep, _object_id = state.entity_id.partition(".")
-    if not sep:
-        return {}
-
-    attributes = getattr(state, "attributes", {})
-    state_value = state.state
-    result: dict[str, Any] = {}
-
-    if domain in MANUAL_STATE_DOMAINS:
-        result["state"] = state_value
-    if domain == "alarm_control_panel":
-        result["state"] = state_value
-    if domain == "cover":
-        result["state"] = state_value
-        if "current_position" in attributes:
-            result["position"] = attributes["current_position"]
-        if "current_tilt_position" in attributes:
-            result["tilt_position"] = attributes["current_tilt_position"]
-    if domain == "valve":
-        result["state"] = state_value
-        if "current_position" in attributes:
-            result["position"] = attributes["current_position"]
-        elif "position" in attributes:
-            result["position"] = attributes["position"]
-    if domain == "climate":
-        result["hvac_mode"] = state_value
-        for field in (
-            "temperature",
-            "target_temp_low",
-            "target_temp_high",
-            "preset_mode",
-            "fan_mode",
-            "target_humidity",
-            "humidity",
-            "swing_mode",
-            "swing_horizontal_mode",
-            "aux_heat",
-        ):
-            if field in attributes:
-                if field == "target_humidity":
-                    result["humidity"] = attributes[field]
-                else:
-                    result[field] = attributes[field]
-    if domain in {"number", "input_number", "counter"}:
-        result["value"] = attributes.get("value", state_value)
-    if domain in {"select", "input_select"}:
-        result["option"] = state_value
-    if domain in {"text", "input_text"}:
-        result["value"] = state_value
-    if domain == "input_datetime":
-        has_date = attributes.get("has_date")
-        has_time = attributes.get("has_time")
-        if "timestamp" in attributes:
-            result["timestamp"] = attributes["timestamp"]
-        if has_date is True and has_time is False:
-            result["date"] = state_value
-        elif has_time is True and has_date is False:
-            result["time"] = state_value
-        else:
-            result["datetime"] = state_value
-    if domain == "timer":
-        result["state"] = state_value
-        if "duration" in attributes:
-            result["duration"] = attributes["duration"]
-    if domain == "humidifier":
-        result["state"] = state_value
-        if "target_humidity" in attributes:
-            result["humidity"] = attributes["target_humidity"]
-        if "mode" in attributes:
-            result["mode"] = attributes["mode"]
-    if domain == "water_heater":
-        result["state"] = state_value
-        if state_value not in {"on", "off", "unknown", "unavailable"}:
-            result["operation_mode"] = state_value
-        if "target_temperature" in attributes:
-            result["temperature"] = attributes["target_temperature"]
-        elif "temperature" in attributes:
-            result["temperature"] = attributes["temperature"]
-        if "operation_mode" in attributes:
-            result["operation_mode"] = attributes["operation_mode"]
-        if "away_mode" in attributes:
-            result["away_mode"] = attributes["away_mode"]
-    if domain == "vacuum":
-        result["state"] = state_value
-        if "fan_speed" in attributes:
-            result["fan_speed"] = attributes["fan_speed"]
-    if domain == "fan":
-        for field in ("preset_mode", "direction", "oscillating"):
-            if field in attributes:
-                result[field] = attributes[field]
-    if domain == "remote":
-        if "current_activity" in attributes:
-            result["activity"] = attributes["current_activity"]
-        elif "activity" in attributes:
-            result["activity"] = attributes["activity"]
-    if domain == "camera":
-        result["state"] = state_value
-
-    for field in MANUAL_ATTRIBUTE_FIELDS:
-        if field in attributes:
-            result[field] = attributes[field]
-    if "color_temp_kelvin" in attributes:
-        result["color_temp_k"] = attributes["color_temp_kelvin"]
-    if "color_temp" in attributes:
-        result["color_temp_mired"] = attributes["color_temp"]
-
-    return result
 
 
 def service_call_for_resolved_target(
@@ -1329,49 +1207,6 @@ def scene_activation_plan(
             service_data["transition"] = intent.transition_ms / 1000.0
         calls.append(("scene", "turn_on", service_data))
     return tuple(calls), active, no_longer_active
-
-
-def service_signature(
-    domain: str,
-    service: str,
-    service_data: dict[str, Any],
-) -> ServiceSignature:
-    """Return a deterministic signature for suppressing duplicate service calls."""
-    return (
-        domain,
-        service,
-        tuple(
-            (key, _freeze_signature_value(value))
-            for key, value in sorted(service_data.items())
-        ),
-    )
-
-
-def service_plan_signature(calls: tuple[ServiceCall, ...]) -> tuple[ServiceSignature, ...]:
-    """Return a deterministic signature for a multi-call service plan."""
-    return tuple(service_signature(domain, service, data) for domain, service, data in calls)
-
-
-def _freeze_signature_value(value: Any) -> FrozenValue:
-    """Return a recursively hashable representation of service data."""
-    if isinstance(value, dict):
-        return tuple(
-            (
-                _freeze_signature_value(key),
-                _freeze_signature_value(item_value),
-            )
-            for key, item_value in sorted(value.items(), key=lambda item: repr(item[0]))
-        )
-    if isinstance(value, list | tuple):
-        return tuple(_freeze_signature_value(item) for item in value)
-    if isinstance(value, set | frozenset):
-        return tuple(
-            sorted(
-                (_freeze_signature_value(item) for item in value),
-                key=repr,
-            )
-        )
-    return value
 
 
 def invalidate_service_plan_for_state_change(
