@@ -23,6 +23,7 @@ MODULES = (
     "projection.py",
     "records.py",
     "reconciliation.py",
+    "registry.py",
     "rule_lifecycle.py",
     "rule_model.py",
     "schema.py",

@@ -43,6 +43,7 @@ from typing import Any
 
 from intentional.animation import AnimationSpec
 from intentional.intent import Intent
+from intentional.registry import LIGHT_COLOR_FIELDS as COLOR_FIELDS
 
 # Device-specific physical bounds applied after modifiers.
 # Fields not in this table pass through unclamped.
@@ -53,16 +54,6 @@ DEVICE_BOUNDS: dict[str, tuple[float, float]] = {
     "color_temp_k": (1000, 10000),  # sane range, devices vary
     "color_temp_mired": (50, 500),
 }
-
-COLOR_FIELDS = frozenset({
-    "color_temp_k",
-    "color_temp_mired",
-    "rgb_color",
-    "rgbw_color",
-    "rgbww_color",
-    "hs_color",
-    "xy_color",
-})
 
 
 @dataclass(frozen=True)

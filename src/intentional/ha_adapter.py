@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any
 
 from intentional.engine import Engine
+from intentional.registry import LIGHT_COLOR_FIELDS
 
 ServiceCall = tuple[str, str, dict[str, Any]]
 FrozenValue = Any
@@ -331,15 +332,6 @@ ACTION_SERVICE_FIELDS = frozenset({
 })
 TTS_SERVICE_TARGETS = frozenset({"speak", "cloud_say", "clear_cache"})
 LIGHT_BRIGHTNESS_FIELDS = ("brightness", "brightness_pct")
-LIGHT_COLOR_FIELDS = (
-    "color_temp_k",
-    "color_temp_mired",
-    "rgbww_color",
-    "rgbw_color",
-    "rgb_color",
-    "hs_color",
-    "xy_color",
-)
 LIGHT_FIELD_ALIASES = {
     "color_temp_k": "color_temp_kelvin",
     "color_temp_mired": "color_temp",
