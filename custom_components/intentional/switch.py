@@ -17,6 +17,15 @@ from .room_controls import area_for_target, room_controls_for_engine, slugify_ar
 from .rule_files import _list_rules, _set_rule_enabled
 from .rule_store import StorageRuleStore, rule_store_key
 
+_RULE_SWITCH_VOLATILE_STATUS_ATTRS = frozenset(
+    {
+        "active_for_ms",
+        "condition_active_for_ms",
+        "held_for_ms",
+        "for_remaining_ms",
+    }
+)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -236,7 +245,7 @@ class IntentionalRuleSwitch(SwitchEntity):
         return {
             key: value
             for key, value in status.items()
-            if key != "rule_id"
+            if key != "rule_id" and key not in _RULE_SWITCH_VOLATILE_STATUS_ATTRS
         }
 
     async def async_turn_on(self, **kwargs: Any) -> None:
