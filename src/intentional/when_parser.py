@@ -512,3 +512,42 @@ def _clock_minutes(value: str) -> int | None:
     if match is None:
         return None
     return int(match.group("hour")) * 60 + int(match.group("minute"))
+
+
+# ── Entity-reference collection ──────────────────────────────────────
+
+
+def referenced_entities(rules: Any) -> frozenset[str]:
+    """Return entity_ids statically referenced by rule expressions.
+
+    Walks the parsed AST of each rule's ``when``, ``hold_when``, and
+    ``hold_until_when`` expressions, collecting ``EntityRef`` values.
+    Excludes the ``__time__`` helper. Selector-based references are not
+    included (they resolve dynamically during evaluation); see ADR-0003.
+    """
+    entity_ids: set[str] = set()
+    for rule in rules:
+        for expr in (rule.when, rule.hold_when, rule.hold_until_when):
+            if not expr:
+                continue
+            try:
+                ast = parse_when(expr)
+            except WhenSyntaxError:
+                continue
+            entity_ids.update(_collect_entity_ids(ast))
+        if rule.for_entity:
+            entity_ids.add(rule.for_entity)
+    entity_ids.discard("__time__")
+    return frozenset(entity_ids)
+
+
+def _collect_entity_ids(node: WhenAST) -> set[str]:
+    """Recursively collect entity_ids from a parsed when-AST."""
+    ids: set[str] = set()
+    if isinstance(node, EntityRef):
+        ids.add(node.entity_id)
+    elif isinstance(node, (Comparison, LogicalOp)):
+        ids.update(_collect_entity_ids(node.left))
+        if node.right is not None:
+            ids.update(_collect_entity_ids(node.right))
+    return ids
