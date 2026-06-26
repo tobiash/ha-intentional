@@ -41,6 +41,7 @@ from ._engine.ha_adapter import (
     sync_time_context_into_engine,
 )
 from ._engine.reconciliation import Reconciliation, ReconciliationEvent
+from ._engine.when_parser import referenced_entities
 from ._engine.yaml_loader import Rule
 from .const import (
     ATTR_TARGET,
@@ -350,6 +351,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         now_ms=engine.now_ms(),
     )
     _active_rule_ids: set[str] = set()
+    # Entities statically referenced by rule expressions, cached per reload.
+    # The tick loop scopes state-sync to these + active targets; a periodic
+    # full sweep covers selector-matched entities. See ADR-0003.
+    _referenced_key = f"{entry.entry_id}:referenced"
+    hass.data[DOMAIN][_referenced_key] = referenced_entities(initial_rules)
+    _full_sweep_counter = 0
     # Track state-change pulses that should stay true through one apply cycle.
     _state_change_pulses: set[str] = set()
     # Event used to signal the tick loop to stop. We use an event rather
@@ -361,7 +368,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     stop_event = asyncio.Event()
 
     async def _tick_loop() -> None:
-        nonlocal _active_scenes, _active_rule_ids
+        nonlocal _active_scenes, _active_rule_ids, _full_sweep_counter
         while not stop_event.is_set():
             # Sleep with a timeout so we can react to stop_event promptly.
             try:
@@ -372,7 +379,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 pass  # normal tick interval
             # Drive the engine's evaluation cycle
             sync_time_context_into_engine(engine)
-            _sync_state_into_engine(hass, engine)
+            _full_sweep_counter += 1
+            if _full_sweep_counter >= 10:
+                _full_sweep_counter = 0
+                _sync_state_into_engine(hass, engine)
+            else:
+                _referenced = hass.data[DOMAIN].get(_referenced_key, frozenset())
+                _sync_state_into_engine(
+                    hass, engine,
+                    entity_ids=set(_referenced) | set(engine.list_active_targets()),
+                )
             engine.evaluate_all()
             now_ms = _monotonic_ms()
             _active_rule_ids = _record_rule_activity_changes(
@@ -560,17 +576,26 @@ async def _maybe_install_starter_rules(hass: HomeAssistant, rule_dir: str) -> in
         return 0
 
 
-def _sync_state_into_engine(hass: HomeAssistant, engine: Engine) -> None:
-    """Pull a snapshot of HA state into the engine.
+def _sync_state_into_engine(
+    hass: HomeAssistant,
+    engine: Engine,
+    entity_ids: set[str] | None = None,
+) -> None:
+    """Pull HA state into the engine.
 
-    The engine only tracks entities that rules reference; this is a
-    best-effort sync of the entities we know about.
+    When *entity_ids* is given, only those entities are synced (scoped poll).
+    When None, all entities are synced (full sweep for selector coverage).
+    See ADR-0003.
     """
-    # In a real implementation, we'd track the entity_ids referenced
-    # by rules. For now, we sync ALL light.* and sensor.* states —
-    # cheap, since most homes have a few hundred at most.
-    for state in hass.states.async_all():
-        sync_state_object_into_engine(engine, state)
+    if entity_ids is None:
+        for state in hass.states.async_all():
+            sync_state_object_into_engine(engine, state)
+    else:
+        states = hass.states
+        for entity_id in entity_ids:
+            state = states.get(entity_id)
+            if state is not None:
+                sync_state_object_into_engine(engine, state)
 
 
 def _resolve_intent_selector(hass: HomeAssistant, selector: Any) -> list[str]:
@@ -838,6 +863,7 @@ async def _register_services(
             _LOGGER.error("Rule reload failed: %s", err)
             return
         engine.load_rules(new_rules)
+        hass.data[DOMAIN][f"{entry.entry_id}:referenced"] = referenced_entities(new_rules)
         sync_time_context_into_engine(engine)
         engine.evaluate_all()
         await _refresh_entities(hass, entry)
