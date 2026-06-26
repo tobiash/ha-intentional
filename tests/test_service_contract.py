@@ -12,13 +12,14 @@ from intentional.ha_adapter import MANUAL_SET_FIELDS
 from intentional.yaml_loader import load_rules_from_string
 
 REPO_ROOT = Path(__file__).parent.parent
-SRC_ADAPTER = REPO_ROOT / "src" / "intentional" / "ha_adapter.py"
+SRC_ADAPTER = REPO_ROOT / "src" / "intentional" / "adapter" / "translator.py"
 BUNDLED_ADAPTER = (
     REPO_ROOT
     / "custom_components"
     / "intentional"
     / "_engine"
-    / "ha_adapter.py"
+    / "adapter"
+    / "translator.py"
 )
 INTEGRATION_INIT = REPO_ROOT / "custom_components" / "intentional" / "__init__.py"
 SERVICES_YAML = REPO_ROOT / "custom_components" / "intentional" / "services.yaml"
