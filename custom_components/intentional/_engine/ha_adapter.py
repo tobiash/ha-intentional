@@ -36,9 +36,6 @@ from .reconciliation import (
     clear_pending_state_drift as clear_pending_state_drift,
 )
 from .reconciliation import (
-    emit_manual_override_for_state_drift as emit_manual_override_for_state_drift,
-)
-from .reconciliation import (
     invalidate_service_plan_for_state_change as invalidate_service_plan_for_state_change,
 )
 from .reconciliation import (

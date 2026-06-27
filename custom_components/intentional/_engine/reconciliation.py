@@ -312,45 +312,6 @@ def classify_state_drift(
     return {"target": entity_id, "set": set_dict, "ttl_ms": ttl_ms, "reason": reason}
 
 
-def emit_manual_override_for_state_drift(
-    engine: Any,
-    last_applied: dict[str, ServicePlanSignature],
-    state: Any,
-    *,
-    ttl_ms: int,
-    now_ms: int | None = None,
-    drift_suppressed_until: dict[str, int] | None = None,
-    drift_candidates: dict[str, tuple[int, FrozenValue]] | None = None,
-    confirmation_ms: int = 0,
-    reason: str = "Manual HA state change",
-) -> bool:
-    """Emit a USER intent when a managed target drifts from the applied plan.
-
-    Legacy wrapper around classify_state_drift that applies the override
-    directly to the engine. Prefer classify_state_drift for new callers.
-    """
-    result = classify_state_drift(
-        engine,
-        last_applied,
-        state,
-        ttl_ms=ttl_ms,
-        now_ms=now_ms,
-        drift_suppressed_until=drift_suppressed_until,
-        drift_candidates=drift_candidates,
-        confirmation_ms=confirmation_ms,
-        reason=reason,
-    )
-    if result is None:
-        return False
-    engine.emit_user_intent(
-        target=result["target"],
-        set=result["set"],
-        ttl_ms=result["ttl_ms"],
-        reason=result["reason"],
-    )
-    return True
-
-
 def invalidate_service_plan_for_state_change(
     last_applied: dict[str, ServicePlanSignature],
     state: Any,

@@ -698,11 +698,10 @@ def test_state_change_invalidates_cached_media_player_transport_plan_for_drift()
 def test_state_drift_emits_manual_override_for_managed_target() -> None:
     from intentional.engine import Engine
     from intentional.ha_adapter import (
-        emit_manual_override_for_state_drift,
+        classify_state_drift,
         service_calls_for_resolved_target,
         service_plan_signature,
     )
-    from intentional.intent import Authority
     from intentional.yaml_loader import Rule
 
     engine = Engine(clock_fn=lambda: 1000)
@@ -722,7 +721,7 @@ def test_state_drift_emits_manual_override_for_managed_target() -> None:
     )
     last_applied = {"light.desk": service_plan_signature(calls)}
 
-    emitted = emit_manual_override_for_state_drift(
+    emitted = classify_state_drift(
         engine,
         last_applied,
         SimpleNamespace(
@@ -734,19 +733,17 @@ def test_state_drift_emits_manual_override_for_managed_target() -> None:
         ttl_ms=7_200_000,
     )
 
-    assert emitted is True
+    assert emitted is not None
     assert "light.desk" not in last_applied
-    intents = engine.list_active_intents("light.desk")
-    manual = [intent for intent in intents if intent.authority is Authority.USER]
-    assert len(manual) == 1
-    assert manual[0].set == {"state": "off"}
-    assert manual[0].ttl_ms == 7_200_000
+    assert emitted["target"] == "light.desk"
+    assert emitted["set"] == {"state": "off"}
+    assert emitted["ttl_ms"] == 7_200_000
 
 
 def test_state_drift_does_not_emit_manual_override_for_matching_state() -> None:
     from intentional.engine import Engine
     from intentional.ha_adapter import (
-        emit_manual_override_for_state_drift,
+        classify_state_drift,
         service_calls_for_resolved_target,
         service_plan_signature,
     )
@@ -769,7 +766,7 @@ def test_state_drift_does_not_emit_manual_override_for_matching_state() -> None:
     )
     last_applied = {"light.desk": service_plan_signature(calls)}
 
-    emitted = emit_manual_override_for_state_drift(
+    emitted = classify_state_drift(
         engine,
         last_applied,
         SimpleNamespace(
@@ -780,7 +777,7 @@ def test_state_drift_does_not_emit_manual_override_for_matching_state() -> None:
         ttl_ms=7_200_000,
     )
 
-    assert emitted is False
+    assert emitted is None
     assert "light.desk" in last_applied
     from intentional.intent import Authority
 
@@ -793,11 +790,10 @@ def test_state_drift_does_not_emit_manual_override_for_matching_state() -> None:
 def test_state_drift_requires_stable_confirmation_when_candidates_are_tracked() -> None:
     from intentional.engine import Engine
     from intentional.ha_adapter import (
-        emit_manual_override_for_state_drift,
+        classify_state_drift,
         service_calls_for_resolved_target,
         service_plan_signature,
     )
-    from intentional.intent import Authority
     from intentional.yaml_loader import Rule
 
     engine = Engine(clock_fn=lambda: 1000)
@@ -824,7 +820,7 @@ def test_state_drift_requires_stable_confirmation_when_candidates_are_tracked() 
         context=SimpleNamespace(user_id="user-1"),
     )
 
-    first = emit_manual_override_for_state_drift(
+    first = classify_state_drift(
         engine,
         last_applied,
         drift_state,
@@ -833,7 +829,7 @@ def test_state_drift_requires_stable_confirmation_when_candidates_are_tracked() 
         drift_candidates=drift_candidates,
         confirmation_ms=1_500,
     )
-    second = emit_manual_override_for_state_drift(
+    second = classify_state_drift(
         engine,
         last_applied,
         drift_state,
@@ -842,7 +838,7 @@ def test_state_drift_requires_stable_confirmation_when_candidates_are_tracked() 
         drift_candidates=drift_candidates,
         confirmation_ms=1_500,
     )
-    third = emit_manual_override_for_state_drift(
+    third = classify_state_drift(
         engine,
         last_applied,
         drift_state,
@@ -852,24 +848,18 @@ def test_state_drift_requires_stable_confirmation_when_candidates_are_tracked() 
         confirmation_ms=1_500,
     )
 
-    assert first is False
-    assert second is False
-    assert third is True
+    assert first is None
+    assert second is None
+    assert third is not None
     assert drift_candidates == {}
     assert "light.desk" not in last_applied
-    manual = [
-        intent
-        for intent in engine.list_active_intents("light.desk")
-        if intent.authority is Authority.USER
-    ]
-    assert len(manual) == 1
-    assert manual[0].set == {"state": "off"}
+    assert third["set"] == {"state": "off"}
 
 
 def test_state_drift_matching_state_clears_pending_candidate() -> None:
     from intentional.engine import Engine
     from intentional.ha_adapter import (
-        emit_manual_override_for_state_drift,
+        classify_state_drift,
         service_calls_for_resolved_target,
         service_plan_signature,
     )
@@ -893,7 +883,7 @@ def test_state_drift_matching_state_clears_pending_candidate() -> None:
     last_applied = {"light.desk": service_plan_signature(calls)}
     drift_candidates = {}
 
-    emit_manual_override_for_state_drift(
+    classify_state_drift(
         engine,
         last_applied,
         SimpleNamespace(
@@ -907,7 +897,7 @@ def test_state_drift_matching_state_clears_pending_candidate() -> None:
         drift_candidates=drift_candidates,
         confirmation_ms=1_500,
     )
-    emitted = emit_manual_override_for_state_drift(
+    emitted = classify_state_drift(
         engine,
         last_applied,
         SimpleNamespace(entity_id="light.desk", state="on", attributes={"brightness": 153}),
@@ -917,7 +907,7 @@ def test_state_drift_matching_state_clears_pending_candidate() -> None:
         confirmation_ms=1_500,
     )
 
-    assert emitted is False
+    assert emitted is None
     assert drift_candidates == {}
     assert "light.desk" in last_applied
 
@@ -925,11 +915,10 @@ def test_state_drift_matching_state_clears_pending_candidate() -> None:
 def test_state_drift_changed_candidate_restarts_confirmation_window() -> None:
     from intentional.engine import Engine
     from intentional.ha_adapter import (
-        emit_manual_override_for_state_drift,
+        classify_state_drift,
         service_calls_for_resolved_target,
         service_plan_signature,
     )
-    from intentional.intent import Authority
     from intentional.yaml_loader import Rule
 
     engine = Engine(clock_fn=lambda: 1000)
@@ -950,7 +939,7 @@ def test_state_drift_changed_candidate_restarts_confirmation_window() -> None:
     last_applied = {"light.desk": service_plan_signature(calls)}
     drift_candidates = {}
 
-    emit_manual_override_for_state_drift(
+    classify_state_drift(
         engine,
         last_applied,
         SimpleNamespace(entity_id="light.desk", state="on", attributes={"brightness": 100}),
@@ -959,7 +948,7 @@ def test_state_drift_changed_candidate_restarts_confirmation_window() -> None:
         drift_candidates=drift_candidates,
         confirmation_ms=1_500,
     )
-    changed = emit_manual_override_for_state_drift(
+    changed = classify_state_drift(
         engine,
         last_applied,
         SimpleNamespace(
@@ -973,7 +962,7 @@ def test_state_drift_changed_candidate_restarts_confirmation_window() -> None:
         drift_candidates=drift_candidates,
         confirmation_ms=1_500,
     )
-    confirmed = emit_manual_override_for_state_drift(
+    confirmed = classify_state_drift(
         engine,
         last_applied,
         SimpleNamespace(
@@ -988,21 +977,15 @@ def test_state_drift_changed_candidate_restarts_confirmation_window() -> None:
         confirmation_ms=1_500,
     )
 
-    assert changed is False
-    assert confirmed is True
-    manual = [
-        intent
-        for intent in engine.list_active_intents("light.desk")
-        if intent.authority is Authority.USER
-    ]
-    assert len(manual) == 1
-    assert manual[0].set == {"state": "off"}
+    assert changed is None
+    assert confirmed is not None
+    assert confirmed["set"] == {"state": "off"}
 
 
 def test_state_drift_retries_ignored_light_turn_on_without_manual_override() -> None:
     from intentional.engine import Engine
     from intentional.ha_adapter import (
-        emit_manual_override_for_state_drift,
+        classify_state_drift,
         service_calls_for_resolved_target,
         service_plan_signature,
     )
@@ -1027,7 +1010,7 @@ def test_state_drift_retries_ignored_light_turn_on_without_manual_override() -> 
     last_applied = {"light.desk": service_plan_signature(calls)}
     drift_candidates = {"light.desk": (10_000, (("state", "off"),))}
 
-    emitted = emit_manual_override_for_state_drift(
+    emitted = classify_state_drift(
         engine,
         last_applied,
         SimpleNamespace(
@@ -1042,7 +1025,7 @@ def test_state_drift_retries_ignored_light_turn_on_without_manual_override() -> 
         confirmation_ms=1_500,
     )
 
-    assert emitted is False
+    assert emitted is None
     assert drift_candidates == {}
     assert "light.desk" not in last_applied
     assert all(
@@ -1054,7 +1037,7 @@ def test_state_drift_retries_ignored_light_turn_on_without_manual_override() -> 
 def test_state_drift_does_not_emit_manual_override_during_owned_transition() -> None:
     from intentional.engine import Engine
     from intentional.ha_adapter import (
-        emit_manual_override_for_state_drift,
+        classify_state_drift,
         service_calls_for_resolved_target,
         service_plan_signature,
     )
@@ -1080,7 +1063,7 @@ def test_state_drift_does_not_emit_manual_override_during_owned_transition() -> 
     last_applied = {"light.desk": service_plan_signature(calls)}
     drift_suppressed_until = {"light.desk": 30_000}
 
-    emitted = emit_manual_override_for_state_drift(
+    emitted = classify_state_drift(
         engine,
         last_applied,
         SimpleNamespace(
@@ -1093,7 +1076,7 @@ def test_state_drift_does_not_emit_manual_override_during_owned_transition() -> 
         drift_suppressed_until=drift_suppressed_until,
     )
 
-    assert emitted is False
+    assert emitted is None
     assert "light.desk" in last_applied
     assert drift_suppressed_until == {"light.desk": 30_000}
     assert all(
@@ -1105,11 +1088,10 @@ def test_state_drift_does_not_emit_manual_override_during_owned_transition() -> 
 def test_state_drift_emits_manual_override_after_transition_grace_expires() -> None:
     from intentional.engine import Engine
     from intentional.ha_adapter import (
-        emit_manual_override_for_state_drift,
+        classify_state_drift,
         service_calls_for_resolved_target,
         service_plan_signature,
     )
-    from intentional.intent import Authority
     from intentional.yaml_loader import Rule
 
     engine = Engine(clock_fn=lambda: 1000)
@@ -1131,7 +1113,7 @@ def test_state_drift_emits_manual_override_after_transition_grace_expires() -> N
     last_applied = {"light.desk": service_plan_signature(calls)}
     drift_suppressed_until = {"light.desk": 30_000}
 
-    emitted = emit_manual_override_for_state_drift(
+    emitted = classify_state_drift(
         engine,
         last_applied,
         SimpleNamespace(
@@ -1144,15 +1126,10 @@ def test_state_drift_emits_manual_override_after_transition_grace_expires() -> N
         drift_suppressed_until=drift_suppressed_until,
     )
 
-    assert emitted is True
+    assert emitted is not None
     assert "light.desk" not in last_applied
     assert drift_suppressed_until == {}
-    manual = [
-        intent
-        for intent in engine.list_active_intents("light.desk")
-        if intent.authority is Authority.USER
-    ]
-    assert len(manual) == 1
+    assert emitted["target"] == "light.desk"
 
 
 def test_service_plan_matches_equivalent_actual_light_state() -> None:
@@ -1226,7 +1203,7 @@ def test_service_plan_does_not_match_conflicting_actual_light_state() -> None:
 
 def test_state_drift_does_not_emit_manual_override_for_unmanaged_target() -> None:
     from intentional.engine import Engine
-    from intentional.ha_adapter import emit_manual_override_for_state_drift
+    from intentional.ha_adapter import classify_state_drift
 
     engine = Engine(clock_fn=lambda: 1000)
     last_applied = {
@@ -1239,14 +1216,14 @@ def test_state_drift_does_not_emit_manual_override_for_unmanaged_target() -> Non
         ),
     }
 
-    emitted = emit_manual_override_for_state_drift(
+    emitted = classify_state_drift(
         engine,
         last_applied,
         SimpleNamespace(entity_id="light.desk", state="off", attributes={}),
         ttl_ms=7_200_000,
     )
 
-    assert emitted is False
+    assert emitted is None
     assert engine.list_active_intents("light.desk") == []
 
 
