@@ -29,6 +29,21 @@ from .adapter.translator import (
     service_calls_for_resolved_target as service_calls_for_resolved_target,
 )
 from .engine import Engine
+from .reconciliation import (
+    classify_state_drift as classify_state_drift,
+)
+from .reconciliation import (
+    clear_pending_state_drift as clear_pending_state_drift,
+)
+from .reconciliation import (
+    emit_manual_override_for_state_drift as emit_manual_override_for_state_drift,
+)
+from .reconciliation import (
+    invalidate_service_plan_for_state_change as invalidate_service_plan_for_state_change,
+)
+from .reconciliation import (
+    pending_drift_targets as pending_drift_targets,
+)
 from .registry import ALARM_STATE_SERVICES as ALARM_STATE_SERVICES
 
 
@@ -50,157 +65,6 @@ def sync_time_context_into_engine(engine: Engine, now: datetime | None = None) -
         time_of_day_bucket(current.hour),
         clock=f"{current.hour:02d}:{current.minute:02d}",
     )
-
-
-def invalidate_service_plan_for_state_change(
-    last_applied: dict[str, ServicePlanSignature],
-    state: Any,
-) -> bool:
-    """Forget a cached service plan when HA reports conflicting state."""
-    entity_id = state.entity_id
-    plan = last_applied.get(entity_id)
-    if plan is None:
-        return False
-    if service_plan_matches_state(plan, state):
-        return False
-    last_applied.pop(entity_id, None)
-    return True
-
-
-def classify_state_drift(
-    engine: Engine,
-    last_applied: dict[str, ServicePlanSignature],
-    state: Any,
-    *,
-    ttl_ms: int,
-    now_ms: int | None = None,
-    drift_suppressed_until: dict[str, int] | None = None,
-    drift_candidates: dict[str, tuple[int, FrozenValue]] | None = None,
-    confirmation_ms: int = 0,
-    reason: str = "Manual HA state change",
-) -> dict[str, Any] | None:
-    """Classify a state change and return the override payload, or None.
-
-    Does NOT emit the intent; the caller applies the returned payload.
-    """
-    entity_id = state.entity_id
-    if drift_suppressed_until is not None:
-        suppress_until = drift_suppressed_until.get(entity_id)
-        if suppress_until is not None:
-            if now_ms is None:
-                raise ValueError("now_ms is required with drift_suppressed_until")
-            if now_ms < suppress_until:
-                if drift_candidates is not None:
-                    drift_candidates.pop(entity_id, None)
-                return None
-            drift_suppressed_until.pop(entity_id, None)
-    plan = last_applied.get(entity_id)
-    if plan is None:
-        if drift_candidates is not None:
-            drift_candidates.pop(entity_id, None)
-        return None
-    if service_plan_matches_state(plan, state):
-        if drift_candidates is not None:
-            drift_candidates.pop(entity_id, None)
-        return None
-    if not engine.has_active_target(entity_id):
-        if drift_candidates is not None:
-            drift_candidates.pop(entity_id, None)
-        return None
-    if _state_change_looks_like_ignored_activation(plan, state):
-        if drift_candidates is not None:
-            drift_candidates.pop(entity_id, None)
-        last_applied.pop(entity_id, None)
-        return None
-    set_dict = manual_set_from_state_object(state)
-    if not set_dict:
-        if drift_candidates is not None:
-            drift_candidates.pop(entity_id, None)
-        return None
-    if drift_candidates is not None and confirmation_ms > 0:
-        if now_ms is None:
-            raise ValueError("now_ms is required with drift_candidates")
-        candidate_signature = _freeze_signature_value(set_dict)
-        candidate = drift_candidates.get(entity_id)
-        if candidate is None or candidate[1] != candidate_signature:
-            drift_candidates[entity_id] = (now_ms, candidate_signature)
-            return None
-        first_seen_ms, _signature = candidate
-        if now_ms - first_seen_ms < confirmation_ms:
-            return None
-        drift_candidates.pop(entity_id, None)
-    last_applied.pop(entity_id, None)
-    return {"target": entity_id, "set": set_dict, "ttl_ms": ttl_ms, "reason": reason}
-
-
-def emit_manual_override_for_state_drift(
-    engine: Engine,
-    last_applied: dict[str, ServicePlanSignature],
-    state: Any,
-    *,
-    ttl_ms: int,
-    now_ms: int | None = None,
-    drift_suppressed_until: dict[str, int] | None = None,
-    drift_candidates: dict[str, tuple[int, FrozenValue]] | None = None,
-    confirmation_ms: int = 0,
-    reason: str = "Manual HA state change",
-) -> bool:
-    """Emit a USER intent when a managed target drifts from the applied plan.
-
-    Legacy wrapper around classify_state_drift that applies the override
-    directly to the engine. Prefer classify_state_drift for new callers.
-    """
-    result = classify_state_drift(
-        engine,
-        last_applied,
-        state,
-        ttl_ms=ttl_ms,
-        now_ms=now_ms,
-        drift_suppressed_until=drift_suppressed_until,
-        drift_candidates=drift_candidates,
-        confirmation_ms=confirmation_ms,
-        reason=reason,
-    )
-    if result is None:
-        return False
-    engine.emit_user_intent(
-        target=result["target"],
-        set=result["set"],
-        ttl_ms=result["ttl_ms"],
-        reason=result["reason"],
-    )
-    return True
-
-
-def _state_change_looks_like_ignored_activation(
-    plan: ServicePlanSignature,
-    state: Any,
-) -> bool:
-    """True when HA still reports off after an Intentional turn_on call.
-
-    Some light integrations accept ``light.turn_on`` but the device never reaches
-    ``on``. Without this guard that stale off state is promoted to a manual
-    override, blocking retries for the drift TTL.
-    """
-    if str(getattr(state, "state", "")) != "off":
-        return False
-    context = getattr(state, "context", None)
-    if getattr(context, "user_id", None) is not None:
-        return False
-    return any(domain == "light" and service == "turn_on" for domain, service, _data in plan)
-
-
-def pending_drift_targets(drift_candidates: dict[str, tuple[int, FrozenValue]]) -> tuple[str, ...]:
-    """Return targets with unconfirmed drift observations."""
-    return tuple(sorted(drift_candidates))
-
-
-def clear_pending_state_drift(
-    drift_candidates: dict[str, tuple[int, FrozenValue]],
-    target: str,
-) -> None:
-    """Forget any unconfirmed drift observation for a target."""
-    drift_candidates.pop(target, None)
 
 
 def sync_state_object_into_engine(engine: Engine, state: Any) -> None:
