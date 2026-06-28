@@ -70,14 +70,14 @@ class _OwningContextTracker:
         return getattr(ctx, "id", None) == self._owned_id
 
 
-def _make_engine_with_light_rule() -> Engine:
+def _make_engine_with_light_rule(*, brightness_pct: int = 60) -> Engine:
     engine = Engine(clock_fn=lambda: 1000)
     engine.load_rules([
         Rule(
             id="desk-on",
             when="input_boolean.work == 'on'",
             target="light.desk",
-            set={"state": "on", "brightness_pct": 60},
+            set={"state": "on", "brightness_pct": brightness_pct},
         )
     ])
     engine.update_state("input_boolean.work", "on")
@@ -175,6 +175,54 @@ async def test_on_state_delta_stages_then_promotes_across_confirmation_window() 
     promoted = _events_of(events, "drift_promoted")
     assert len(promoted) == 1
     assert promoted[0].details["set"] == {"state": "off"}
+
+
+@pytest.mark.asyncio
+async def test_on_state_delta_ignores_small_brightness_pct_quantization_echo() -> None:
+    """A light echoing 80% as brightness 198 must not become a manual override."""
+    engine = _make_engine_with_light_rule(brightness_pct=80)
+    adapter = _FakeAdapter()
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=1_500,
+        service_failure_backoff_ms=30_000,
+    )
+    await reconciler.apply(engine, adapter, now_ms=1_000)
+
+    # HA light integrations expose brightness on 0..255, and some devices echo
+    # a nearby level rather than the exact brightness_pct-derived value.
+    adapter.set_state("light.desk", "on", attributes={"brightness": 198})
+    state = adapter.get_state("light.desk")
+
+    events = reconciler.on_state_delta(engine, state, _NoContextTracker(), now_ms=10_000)
+    assert _events_of(events, "drift_promoted") == []
+
+    events = await reconciler.tick(engine, adapter, _NoContextTracker(), now_ms=12_000)
+    assert _events_of(events, "drift_promoted") == []
+
+
+@pytest.mark.asyncio
+async def test_on_state_delta_promotes_brightness_pct_drift_beyond_tolerance() -> None:
+    """A stable brightness change larger than device quantization is manual drift."""
+    engine = _make_engine_with_light_rule(brightness_pct=80)
+    adapter = _FakeAdapter()
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=1_500,
+        service_failure_backoff_ms=30_000,
+    )
+    await reconciler.apply(engine, adapter, now_ms=1_000)
+
+    adapter.set_state("light.desk", "on", attributes={"brightness": 190})
+    state = adapter.get_state("light.desk")
+
+    events = reconciler.on_state_delta(engine, state, _NoContextTracker(), now_ms=10_000)
+    assert _events_of(events, "drift_promoted") == []
+
+    events = await reconciler.tick(engine, adapter, _NoContextTracker(), now_ms=12_000)
+    promoted = _events_of(events, "drift_promoted")
+    assert len(promoted) == 1
+    assert promoted[0].details["set"] == {"state": "on", "brightness": 190}
 
 
 # --------------------------------------------------------------------------- #

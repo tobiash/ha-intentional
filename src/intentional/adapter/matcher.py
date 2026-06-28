@@ -202,7 +202,7 @@ def _values_match(actual: Any, expected: Any, *, field: str | None = None) -> bo
             _values_match(actual_item, expected_item, field=field)
             for actual_item, expected_item in zip(actual, expected, strict=True)
         )
-    tolerance = 25 if field in {"color_temp_kelvin", "color_temp_k"} else 1
+    tolerance = _numeric_tolerance(field)
     if isinstance(actual, int | float) and isinstance(expected, int | float):
         return abs(float(actual) - float(expected)) <= tolerance
     if isinstance(expected, int | float):
@@ -211,3 +211,11 @@ def _values_match(actual: Any, expected: Any, *, field: str | None = None) -> bo
         except (TypeError, ValueError):
             pass
     return actual == expected
+
+
+def _numeric_tolerance(field: str | None) -> int:
+    if field in {"color_temp_kelvin", "color_temp_k"}:
+        return 25
+    if field == "brightness_pct":
+        return 2
+    return 1
