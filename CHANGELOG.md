@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.28] - 2026-06-28
+
+### Fixed
+- **Manual override drift detection** now tolerates small Home Assistant light brightness quantization gaps when matching `brightness_pct` service plans against echoed `brightness` attributes, avoiding false manual overrides after Intentional's own light transitions.
+
+### Changed
+- **Reconciliation internals** now own drift classification directly, removing the legacy adapter wrapper and keeping drift decisions with service application state.
+- **State ingestion** now scopes most poll ticks to rule-referenced entities plus active targets, while retaining periodic full sweeps for selector-backed rules.
+- **Home Assistant adapter code** is split into translator, matcher, signer, and extractor modules to isolate service translation, plan matching, signature freezing, and state-to-manual-intent extraction.
+
 ## [0.7.27] - 2026-06-25
 
 ### Fixed
