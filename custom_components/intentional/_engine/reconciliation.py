@@ -670,11 +670,9 @@ class Reconciliation:
     # ----- lifecycle / restart safety -----
 
     def export_pending_withdraws(self, engine: Any) -> list[dict[str, Any]]:
-        active_targets = set(engine.list_active_targets())
+        """Return target ownership records needed to withdraw after reload/restart."""
         records: list[dict[str, Any]] = []
         for target, state in sorted(self._last_resolved.items()):
-            if target in active_targets:
-                continue
             records.append(
                 {
                     "target": target,

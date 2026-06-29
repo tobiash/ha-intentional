@@ -311,6 +311,65 @@ async def test_apply_withdraws_stale_target_to_off() -> None:
     assert len(withdraw_calls) == 1
 
 
+@pytest.mark.asyncio
+async def test_apply_active_off_intent_turns_light_off() -> None:
+    """An explicit active off intent must call light.turn_off even without prior ownership."""
+    engine = Engine(clock_fn=lambda: 1000)
+    engine.load_rules([
+        Rule(
+            id="desk-off",
+            when="input_boolean.work == 'off'",
+            target="light.desk",
+            set={"state": "off"},
+        )
+    ])
+    engine.update_state("input_boolean.work", "off")
+    engine.evaluate_all()
+    adapter = _FakeAdapter()
+    adapter.set_state("light.desk", "on", attributes={"brightness": 153})
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=0,
+        service_failure_backoff_ms=30_000,
+    )
+
+    await reconciler.apply(engine, adapter, now_ms=1_000)
+
+    assert adapter.calls == [("light", "turn_off", {"entity_id": "light.desk"})]
+
+
+@pytest.mark.asyncio
+async def test_restored_resolved_target_withdraws_after_restart_when_rule_is_idle() -> None:
+    """Restart/reload recovery keeps enough ownership memory to withdraw idle targets."""
+    engine = _make_engine_with_light_rule()
+    adapter = _FakeAdapter()
+    adapter.set_state("light.desk", "off")
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=0,
+        service_failure_backoff_ms=30_000,
+    )
+
+    await reconciler.apply(engine, adapter, now_ms=1_000)
+    records = reconciler.export_pending_withdraws(engine)
+
+    restarted = _make_engine_with_light_rule()
+    restarted.update_state("input_boolean.work", "off")
+    restarted.evaluate_all()
+    restored = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=0,
+        service_failure_backoff_ms=30_000,
+    )
+    restored.restore_pending_withdraws({"pending_withdraws": records})
+    adapter.set_state("light.desk", "on", attributes={"brightness": 153})
+
+    await restored.apply(restarted, adapter, now_ms=2_000)
+
+    withdraw_calls = [c for c in adapter.calls if c[1] == "turn_off"]
+    assert len(withdraw_calls) == 1
+
+
 # --------------------------------------------------------------------------- #
 # tick (confirm + apply)
 # --------------------------------------------------------------------------- #
