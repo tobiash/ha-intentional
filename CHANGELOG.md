@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.29] - 2026-06-29
+
+### Fixed
+- **Reload/restart reconciliation** now persists Intentional's target ownership records while targets are still active, so stale light targets can be withdrawn after integration reloads or restarts instead of being stranded with skipped service calls.
+
 ## [0.7.28] - 2026-06-28
 
 ### Fixed
