@@ -119,7 +119,11 @@ class RuleWorkspace:
             replacement_rules = load_rules_from_string(contents)
         except RuleLoadError as err:
             return {"error": "validation_failed", "message": str(err)}
-        if not any(rule.id == rule_id for rule in replacement_rules):
+        try:
+            replacement_has_rule = _yaml_contains_authored_rule_id(contents, rule_id)
+        except yaml.YAMLError as err:
+            return {"error": "validation_failed", "message": str(err)}
+        if not replacement_rules or not replacement_has_rule:
             return {"error": "rule_id_missing"}
 
         for file_info in self.list_files():
@@ -128,10 +132,10 @@ class RuleWorkspace:
             if current is None:
                 continue
             try:
-                rules = load_rules_from_string(current)
-            except RuleLoadError:
+                file_has_rule = _yaml_contains_authored_rule_id(current, rule_id)
+            except yaml.YAMLError:
                 continue
-            if not any(rule.id == rule_id for rule in rules):
+            if not file_has_rule:
                 continue
             generation = self.generation(filename)
             if generation != expected_generation:
@@ -337,6 +341,59 @@ def _set_rule_enabled_in_yaml(contents: str, rule_id: str, enabled: bool) -> str
         for doc in docs
         if doc is not None
     )
+
+
+def _replace_authored_rule_in_yaml(
+    contents: str,
+    rule_id: str,
+    replacement_contents: str,
+) -> dict[str, Any]:
+    """Return YAML contents with one authored rule replaced."""
+    try:
+        replacement_rules = _raw_rule_items_from_yaml(replacement_contents)
+        docs = list(yaml.safe_load_all(contents))
+    except yaml.YAMLError as err:
+        return {"error": "validation_failed", "message": str(err)}
+    if len(replacement_rules) != 1:
+        return {"error": "replacement_must_be_single_rule"}
+    replacement = replacement_rules[0]
+    if replacement.get("id") != rule_id:
+        return {"error": "rule_id_missing"}
+
+    changed = False
+    for doc in docs:
+        rule_items = None
+        if isinstance(doc, list):
+            rule_items = doc
+        elif isinstance(doc, dict) and isinstance(doc.get("rules"), list):
+            rule_items = doc["rules"]
+        if rule_items is None:
+            continue
+        for index, item in enumerate(rule_items):
+            if isinstance(item, dict) and item.get("id") == rule_id:
+                rule_items[index] = replacement
+                changed = True
+                break
+        if changed:
+            break
+    if not changed:
+        return {"error": "not_found"}
+
+    updated = "---\n".join(
+        yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
+        for doc in docs
+        if doc is not None
+    )
+    try:
+        load_rules_from_string(updated)
+    except RuleLoadError as err:
+        return {"error": "validation_failed", "message": str(err)}
+    return {"contents": updated}
+
+
+def _yaml_contains_authored_rule_id(contents: str, rule_id: str) -> bool:
+    """Return whether YAML contains the authored rule ID before expansion."""
+    return any(rule.get("id") == rule_id for rule in _raw_rule_items_from_yaml(contents))
 
 
 def _raw_rule_items_from_yaml(contents: str) -> list[dict[str, Any]]:

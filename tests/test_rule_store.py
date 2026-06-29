@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
@@ -128,3 +129,67 @@ async def test_storage_rule_store_rollback_checks_expected_generation(monkeypatc
     )
 
     assert result == {"error": "generation_mismatch"}
+
+
+async def test_storage_rule_store_patch_replaces_authored_rule_only(monkeypatch, fake_hass) -> None:
+    from custom_components.intentional import rule_store as rule_store_module
+
+    monkeypatch.setattr(rule_store_module, "Store", _FakeStore)
+    store = StorageRuleStore(fake_hass, "entry-1")
+    await store.async_load_or_import("/missing")
+    await store.async_write(
+        RULE_STORE_FILENAME,
+        """- id: office-lights
+  observe:
+    binary_sensor.office_occupancy: on
+  intent:
+    light.left:
+      state: on
+    light.right:
+      state: on
+- id: untouched
+  observe:
+    input_boolean.untouched: on
+  intent:
+    light.untouched:
+      state: on
+""",
+    )
+    generation = store.generation
+
+    result = await store.async_patch_rule_by_id(
+        "office-lights",
+        """- id: office-lights
+  observe:
+    binary_sensor.office_occupancy: on
+  intent:
+    light.left:
+      state: off
+    light.right:
+      state: off
+""",
+        expected_generation=generation,
+    )
+
+    assert "error" not in result
+    docs = list(yaml.safe_load_all(store.contents))
+    assert docs == [[
+        {
+            "id": "office-lights",
+            "observe": {"binary_sensor.office_occupancy": True},
+            "intent": {
+                "light.left": {"state": False},
+                "light.right": {"state": False},
+            },
+        },
+        {
+            "id": "untouched",
+            "observe": {"input_boolean.untouched": True},
+            "intent": {"light.untouched": {"state": True}},
+        },
+    ]]
+    assert [rule.id for rule in load_rules_from_string(store.contents)] == [
+        "office-lights:light.left",
+        "office-lights:light.right",
+        "untouched",
+    ]

@@ -20,7 +20,9 @@ from ._engine.yaml_loader import Rule, load_rules_from_string
 from .rule_files import (
     _raw_rule_items_from_yaml,
     _read_rule_dir_as_yaml,
+    _replace_authored_rule_in_yaml,
     _set_rule_enabled_in_yaml,
+    _yaml_contains_authored_rule_id,
 )
 
 RULE_STORE_VERSION = 1
@@ -127,10 +129,17 @@ class StorageRuleStore:
             replacement_rules = load_rules_from_string(contents)
         except RuleLoadError as err:
             return {"error": "validation_failed", "message": str(err)}
-        if not any(rule.id == rule_id for rule in replacement_rules):
+        try:
+            replacement_has_rule = _yaml_contains_authored_rule_id(contents, rule_id)
+        except yaml.YAMLError as err:
+            return {"error": "validation_failed", "message": str(err)}
+        if not replacement_rules or not replacement_has_rule:
             return {"error": "rule_id_missing"}
+        updated = _replace_authored_rule_in_yaml(self._contents, rule_id, contents)
+        if "error" in updated:
+            return updated
         self._record_history(f"patch:{rule_id}")
-        self._contents = contents
+        self._contents = updated["contents"]
         await self.async_save()
         return {"filename": RULE_STORE_FILENAME, "generation": self.generation}
 

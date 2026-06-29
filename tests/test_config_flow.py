@@ -221,6 +221,39 @@ def test_patch_rule_by_id_rejects_stale_generation(tmp_path: Path) -> None:
     assert result == {"error": "generation_mismatch"}
 
 
+def test_patch_rule_by_id_accepts_authored_multi_target_rule_id(tmp_path: Path) -> None:
+    original = """- id: office-lights
+  observe:
+    binary_sensor.office_occupancy: on
+  intent:
+    light.left:
+      state: on
+    light.right:
+      state: on
+"""
+    replacement = """- id: office-lights
+  observe:
+    binary_sensor.office_occupancy: on
+  intent:
+    light.left:
+      state: off
+    light.right:
+      state: off
+"""
+    _write_rule_file(str(tmp_path), "office.yaml", original)
+    generation = _rule_file_generation(str(tmp_path), "office.yaml")
+
+    result = _patch_rule_by_id(
+        str(tmp_path),
+        "office-lights",
+        replacement,
+        expected_generation=generation,
+    )
+
+    assert result == {"filename": "office.yaml", "generation": _rule_file_generation(str(tmp_path), "office.yaml")}
+    assert _read_rule_file(str(tmp_path), "office.yaml") == replacement
+
+
 def test_list_rules_returns_enabled_metadata(tmp_path: Path) -> None:
     _write_rule_file(str(tmp_path), "rules.yaml", """- id: enabled-rule
   when: 'true'
