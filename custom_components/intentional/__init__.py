@@ -385,7 +385,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         entity_ids=set(_referenced) | set(engine.list_active_targets()),
                     )
                 engine.evaluate_all()
-                now_ms = monotonic_ms()
+                now_ms = _monotonic_ms()
                 _runtime.active_rule_ids = _record_rule_activity_changes(
                     hass,
                     engine,
@@ -416,9 +416,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 await store.async_save(lifecycle_snapshot)
                 await _refresh_entities(hass, entry)
-                _runtime.mark_success(now_ms=monotonic_ms())
+                _runtime.mark_success(now_ms=_monotonic_ms())
             except Exception as err:  # noqa: BLE001
-                now_ms = monotonic_ms()
+                now_ms = _monotonic_ms()
                 _runtime.mark_failure(err, now_ms=now_ms)
                 if _runtime.should_report_failure(now_ms=now_ms):
                     _LOGGER.exception("Intentional tick failed; continuing")
@@ -644,7 +644,7 @@ def _on_ha_state_change_factory(
             engine, old_state, new_state
         ):
             state_change_pulses.add(new_state.entity_id)
-        now_ms = monotonic_ms()
+        now_ms = _monotonic_ms()
         events = reconciler.on_state_delta(engine, new_state, context_tracker, now_ms)
         if events:
             _apply_reconciliation_events(
@@ -655,6 +655,11 @@ def _on_ha_state_change_factory(
         engine.evaluate_all()
 
     return _listener
+
+
+def _monotonic_ms() -> int:
+    """Compatibility helper for tests that patch integration monotonic time."""
+    return monotonic_ms()
 
 
 def _record_rule_activity_changes(
