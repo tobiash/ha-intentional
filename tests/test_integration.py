@@ -170,6 +170,7 @@ async def test_tick_loop_records_failure_and_continues(
 ) -> None:
     """A transient tick exception must not permanently stop reconciliation."""
     import custom_components.intentional as intentional
+    from custom_components.intentional._engine.runtime import runtime_key
     from custom_components.intentional.diagnostics import list_diagnostics
 
     original_sync = intentional._sync_state_into_engine
@@ -186,15 +187,25 @@ async def test_tick_loop_records_failure_and_continues(
 
     config_entry.add_to_hass(hass)
     await hass.config_entries.async_setup(config_entry.entry_id)
+    runtime = hass.data[DOMAIN][runtime_key(config_entry.entry_id)]
 
     for _ in range(20):
         await asyncio.sleep(0.05)
         diagnostics = list_diagnostics(hass)
-        if calls >= 2 and any(event["type"] == "tick_failed" for event in diagnostics):
+        if (
+            calls >= 2
+            and runtime.failure_count >= 1
+            and runtime.success_count >= 1
+            and any(event["type"] == "tick_failed" for event in diagnostics)
+        ):
             break
 
     diagnostics = list_diagnostics(hass)
     assert calls >= 2
+    assert runtime.failure_count == 1
+    assert runtime.success_count >= 1
+    assert runtime.consecutive_failures == 0
+    assert runtime.health()["status"] == "ok"
     assert any(
         event["type"] == "tick_failed"
         and "synthetic tick failure" in event.get("error", "")

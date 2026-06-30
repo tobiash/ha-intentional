@@ -40,6 +40,14 @@ _Avoid_: user intent (too broad — any user-authority intent qualifies).
 The loop that compares resolved **Intent**s against actual state, decides which **Service plan**s to call, what to suppress, and what **Drift** to promote as a **Manual override**.
 _Avoid_: apply loop, sync.
 
+**Tick runtime**:
+The Home Assistant integration state that drives periodic **Rule** evaluation and **Reconciliation**: scene activation memory, authored-rule activity memory, state-change pulse draining, and liveness counters.
+_Avoid_: scheduler (too broad), health check (only one output of the runtime).
+
+**State-change pulse**:
+A one-cycle observation that a Home Assistant entity changed (`changed`, and `triggered` for event entities). Pulses are drained only after they have been visible to a **Tick runtime** cycle.
+_Avoid_: trigger (overlaps HA automation language), event (too broad).
+
 ## Relationships
 
 - A **Rule** produces zero or more **Intent**s when active.
@@ -48,6 +56,7 @@ _Avoid_: apply loop, sync.
 - **Drift** on a managed **Target** may become a **Manual override** through **Reconciliation**.
 - A **Manual override** is an **Intent** at `user` authority and overrides all `automation`/`sensor` intents on its **Target** until its TTL expires.
 - **Reconciliation** reads resolved **Intent**s and emits **Service plan**s and **Manual override** promotions; it does not evaluate **Rule**s.
+- The **Tick runtime** owns the cadence and liveness of **Rule** evaluation plus **Reconciliation**; it does not decide **Service plan** policy.
 
 ## Example dialogue
 
@@ -58,4 +67,4 @@ _Avoid_: apply loop, sync.
 
 ## Flagged ambiguities
 
-- `custom_components/intentional/_engine/reconciliation.py` is named "reconciliation" but does **not** perform **Reconciliation** — it is a thin wrapper around the **Service plan** matcher for the HTTP API. The proper home of **Reconciliation** is the decide+apply+promote loop currently inline in `custom_components/intentional/__init__.py` (`_apply_resolved_targets`, `_on_ha_state_change_factory`, `_confirm_pending_state_drift`).
+- `custom_components/intentional/_engine/reconciliation.py` now performs **Reconciliation** policy, but the **Tick runtime** cadence and Home Assistant state ingest still live in the integration layer. Avoid moving state ingest into **Reconciliation** unless ADR-0001 is reopened.

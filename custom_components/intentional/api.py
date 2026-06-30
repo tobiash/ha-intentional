@@ -87,6 +87,7 @@ from ._engine.reconciliation import (  # noqa: TID252
     actual_conditions_for_desired_record,
     actual_snapshot,
 )
+from ._engine.runtime import TickRuntime, runtime_key  # noqa: TID252
 from ._engine.schema import dsl_schema  # noqa: TID252
 from ._engine.yaml_loader import RuleLoadError, load_rules_from_string  # noqa: TID252
 from .const import CONF_RULE_DIR, DEFAULT_RULE_DIR, DOMAIN  # noqa: TID252
@@ -143,6 +144,27 @@ def _rule_store_for(hass: HomeAssistant) -> StorageRuleStore | None:
     return store if isinstance(store, StorageRuleStore) else None
 
 
+def _runtime_for(hass: HomeAssistant) -> TickRuntime | None:
+    """Return tick runtime state for the first config entry, if loaded."""
+    entry = _entry_for_view(hass)
+    if entry is None:
+        return None
+    runtime = hass.data.get(DOMAIN, {}).get(runtime_key(entry.entry_id))
+    return runtime if isinstance(runtime, TickRuntime) else None
+
+
+def _runtime_health(hass: HomeAssistant) -> dict[str, Any]:
+    runtime = _runtime_for(hass)
+    if runtime is None:
+        return {"status": "degraded", "error": "runtime_not_loaded"}
+    return runtime.health()
+
+
+def _overall_status(runtime_health: dict[str, Any]) -> str:
+    status = runtime_health.get("status")
+    return "ok" if status in ("ok", "starting") else "degraded"
+
+
 def _error(message: str, code: str, status: int = 400) -> web.Response:
     """Return a JSON error response."""
     return web.json_response(
@@ -183,12 +205,14 @@ class IntentionalHealthView(HomeAssistantView):
         entry = _entry_for_view(hass)
         if engine is None or entry is None:
             return _error("Integration not configured", "not_configured", 503)
+        runtime_health = _runtime_health(hass)
         return web.json_response({
-            "status": "ok",
+            "status": _overall_status(runtime_health),
             "version": __version__,
             "rule_dir": entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR),
             "rule_count": engine.rule_count(),
             "active_intent_count": engine.active_intent_count(),
+            "runtime": runtime_health,
         })
 
 
@@ -871,10 +895,12 @@ class IntentionalWorldView(HomeAssistantView):
             else:
                 record["conditions"].extend(actual_conditions_for_desired_record(record, None))
 
+        runtime_health = _runtime_health(hass)
         world["health"] = {
-            "status": "ok",
+            "status": _overall_status(runtime_health),
             "rule_count": engine.rule_count(),
             "active_intent_count": engine.active_intent_count(),
+            "runtime": runtime_health,
         }
         world["entities"] = entities
         return web.json_response(world)

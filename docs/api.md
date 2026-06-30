@@ -13,7 +13,7 @@ Long-lived tokens are created in Home Assistant under Profile -> Long-Lived Acce
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/intentional/health` | Integration status, version, rule count, active intent count. |
+| `GET` | `/api/intentional/health` | Integration status, version, rule count, active intent count, and reconciliation runtime liveness. |
 | `GET` | `/api/intentional/rules/document` | Read the storage-backed authored rule document. |
 | `PUT` | `/api/intentional/rules/document` | Validate, write, and reload the storage-backed authored rule document. |
 | `DELETE` | `/api/intentional/rules/document` | Clear the storage-backed authored rule document and reload. |
@@ -46,9 +46,27 @@ GET /api/intentional/health
   "version": "0.6.3",
   "rule_dir": "/config/intentional/rules",
   "rule_count": 4,
-  "active_intent_count": 2
+  "active_intent_count": 2,
+  "runtime": {
+    "status": "ok",
+    "tick_interval_ms": 100,
+    "stale_after_ms": 10000,
+    "last_success_age_ms": 42,
+    "last_failure_age_ms": null,
+    "consecutive_failures": 0,
+    "success_count": 128,
+    "failure_count": 0,
+    "current_error": null,
+    "last_failure_error": null,
+    "pending_pulse_count": 0
+  }
 }
 ```
+
+The top-level `status` becomes `degraded` when the reconciliation tick runtime
+has not completed successfully within its liveness window or is currently failing.
+This distinguishes "the integration loaded" from "Intentional is actively
+evaluating and reconciling Targets".
 
 ## Rule Documents
 

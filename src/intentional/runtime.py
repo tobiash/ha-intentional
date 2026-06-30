@@ -1,0 +1,155 @@
+"""Runtime state helpers for the Home Assistant integration loop."""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+
+def monotonic_ms() -> int:
+    """Return process-monotonic milliseconds for runtime liveness checks."""
+    return int(time.monotonic() * 1000)
+
+
+def runtime_key(entry_id: str) -> str:
+    """Return the hass.data key for one config entry's runtime state."""
+    return f"{entry_id}:runtime"
+
+
+@dataclass(frozen=True)
+class PulseDrain:
+    """Snapshot of pulses that are eligible to clear after one tick."""
+
+    tokens: dict[str, int]
+
+    def __bool__(self) -> bool:
+        return bool(self.tokens)
+
+
+class StateChangePulseQueue:
+    """Drainable queue for one-cycle state-change pulses.
+
+    Pulses may arrive while a tick is awaiting Home Assistant service calls. A
+    plain set cannot distinguish "already existed at tick start" from "newly
+    added during this tick". Tokens let the tick clear only the pulse generation
+    it observed, leaving newer same-entity pulses for the next cycle.
+    """
+
+    def __init__(self) -> None:
+        self._tokens: dict[str, int] = {}
+        self._next_token = 0
+
+    def add(self, entity_id: str) -> None:
+        self._next_token += 1
+        self._tokens[entity_id] = self._next_token
+
+    def begin_drain(self) -> PulseDrain:
+        return PulseDrain(dict(self._tokens))
+
+    def current_entity_ids(self, drain: PulseDrain) -> frozenset[str]:
+        return frozenset(
+            entity_id
+            for entity_id, token in drain.tokens.items()
+            if self._tokens.get(entity_id) == token
+        )
+
+    def finish_drain(self, drain: PulseDrain) -> None:
+        for entity_id, token in drain.tokens.items():
+            if self._tokens.get(entity_id) == token:
+                self._tokens.pop(entity_id, None)
+
+    def entity_ids(self) -> frozenset[str]:
+        return frozenset(self._tokens)
+
+    def __bool__(self) -> bool:
+        return bool(self._tokens)
+
+    def __len__(self) -> int:
+        return len(self._tokens)
+
+
+@dataclass
+class TickRuntime:
+    """Mutable runtime state for Intentional's periodic reconciliation loop."""
+
+    tick_interval_ms: int
+    stale_after_ms: int = 10_000
+    active_scenes: set[str] = field(default_factory=set)
+    active_rule_ids: set[str] = field(default_factory=set)
+    pulses: StateChangePulseQueue = field(default_factory=StateChangePulseQueue)
+    full_sweep_counter: int = 0
+    last_success_ms: int | None = None
+    last_failure_ms: int | None = None
+    last_failure_error: str | None = None
+    current_error: str | None = None
+    consecutive_failures: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    _last_failure_report_ms: int | None = None
+
+    def should_full_sweep(self, *, every: int) -> bool:
+        self.full_sweep_counter += 1
+        if self.full_sweep_counter >= every:
+            self.full_sweep_counter = 0
+            return True
+        return False
+
+    def mark_success(self, *, now_ms: int | None = None) -> None:
+        self.last_success_ms = monotonic_ms() if now_ms is None else now_ms
+        self.consecutive_failures = 0
+        self.current_error = None
+        self.success_count += 1
+
+    def mark_failure(self, error: BaseException, *, now_ms: int | None = None) -> None:
+        self.last_failure_ms = monotonic_ms() if now_ms is None else now_ms
+        self.last_failure_error = str(error)
+        self.current_error = str(error)
+        self.consecutive_failures += 1
+        self.failure_count += 1
+
+    def should_report_failure(
+        self,
+        *,
+        now_ms: int | None = None,
+        cooldown_ms: int = 60_000,
+    ) -> bool:
+        now = monotonic_ms() if now_ms is None else now_ms
+        if self._last_failure_report_ms is None:
+            self._last_failure_report_ms = now
+            return True
+        if now - self._last_failure_report_ms < cooldown_ms:
+            return False
+        self._last_failure_report_ms = now
+        return True
+
+    def health(self, *, now_ms: int | None = None) -> dict[str, Any]:
+        now = monotonic_ms() if now_ms is None else now_ms
+        last_success_age_ms = _age(now, self.last_success_ms)
+        last_failure_age_ms = _age(now, self.last_failure_ms)
+        status = "ok"
+        if self.consecutive_failures:
+            status = "degraded"
+        elif last_success_age_ms is None:
+            status = "starting"
+        elif last_success_age_ms > self.stale_after_ms:
+            status = "degraded"
+        return {
+            "status": status,
+            "tick_interval_ms": self.tick_interval_ms,
+            "stale_after_ms": self.stale_after_ms,
+            "last_success_age_ms": last_success_age_ms,
+            "last_failure_age_ms": last_failure_age_ms,
+            "consecutive_failures": self.consecutive_failures,
+            "success_count": self.success_count,
+            "failure_count": self.failure_count,
+            "current_error": self.current_error,
+            "last_failure_error": self.last_failure_error,
+            "pending_pulse_count": len(self.pulses),
+        }
+
+
+def _age(now_ms: int, then_ms: int | None) -> int | None:
+    if then_ms is None:
+        return None
+    return max(0, now_ms - then_ms)

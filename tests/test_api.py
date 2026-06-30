@@ -63,6 +63,32 @@ def test_health_view_has_correct_url() -> None:
     assert IntentionalHealthView.name == "api:intentional:health"
 
 
+async def test_health_view_includes_tick_runtime_liveness() -> None:
+    from custom_components.intentional._engine import Engine
+    from custom_components.intentional._engine.runtime import TickRuntime, runtime_key
+    from custom_components.intentional.api import IntentionalHealthView
+    from custom_components.intentional.const import CONF_RULE_DIR, DOMAIN
+
+    engine = Engine(clock_fn=lambda: 1000)
+    runtime = TickRuntime(tick_interval_ms=100)
+    runtime.mark_success()
+    entry = SimpleNamespace(entry_id="entry-1", data={CONF_RULE_DIR: "/tmp/rules"})
+    hass = SimpleNamespace(
+        config_entries=SimpleNamespace(async_entries=lambda domain: [entry]),
+        data={DOMAIN: {"entry-1": engine, runtime_key("entry-1"): runtime}},
+    )
+    request = SimpleNamespace(app={"hass": hass})
+
+    response = await IntentionalHealthView().get(request)
+    body = json.loads(response.body.decode())
+
+    assert response.status == 200
+    assert body["status"] == "ok"
+    assert body["runtime"]["status"] == "ok"
+    assert body["runtime"]["last_success_age_ms"] is not None
+    assert body["runtime"]["failure_count"] == 0
+
+
 def test_rules_view_has_correct_url() -> None:
     from custom_components.intentional.api import IntentionalRulesView
 

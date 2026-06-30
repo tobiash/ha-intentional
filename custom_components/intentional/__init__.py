@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -41,6 +40,7 @@ from ._engine.ha_adapter import (
     sync_time_context_into_engine,
 )
 from ._engine.reconciliation import Reconciliation, ReconciliationEvent
+from ._engine.runtime import StateChangePulseQueue, TickRuntime, monotonic_ms, runtime_key
 from ._engine.when_parser import referenced_entities
 from ._engine.yaml_loader import Rule
 from .const import (
@@ -333,10 +333,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Set up tick loop — runs every 100ms, drives animations + TTL expiry
     tick_interval_ms = 100
-    # Track which scenes we've already activated in this session, to avoid
-    # firing scene.turn_on on every tick. Cleared when a scene rule stops
-    # firing, so the next activation re-fires.
-    _active_scenes: set[str] = set()
+    # Runtime owns tick-local state such as scene activations, rule activity,
+    # state-change pulses, and reconciliation-loop liveness.
     _intentional_contexts = IntentionalContextTracker()
     _diagnostic_rate_limiter = DiagnosticRateLimiter()
     _ha_adapter = _HAAdapter(hass, _intentional_contexts)
@@ -350,16 +348,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         linger_rule_ids={rule.id for rule in initial_rules if rule.linger_ms},
         now_ms=engine.now_ms(),
     )
-    _active_rule_ids: set[str] = set()
+    _runtime = TickRuntime(tick_interval_ms=tick_interval_ms)
+    hass.data[DOMAIN][runtime_key(entry.entry_id)] = _runtime
     # Entities statically referenced by rule expressions, cached per reload.
     # The tick loop scopes state-sync to these + active targets; a periodic
     # full sweep covers selector-matched entities. See ADR-0003.
     _referenced_key = f"{entry.entry_id}:referenced"
     hass.data[DOMAIN][_referenced_key] = referenced_entities(initial_rules)
-    _full_sweep_counter = 0
-    # Track state-change pulses that should stay true through one apply cycle.
-    _state_change_pulses: set[str] = set()
-    _last_tick_error_log_ms = -60_000
     # Event used to signal the tick loop to stop. We use an event rather
     # than ``while True:`` + ``task.cancel()`` because cancellation only
     # takes effect at the next ``await``; if a slow ``_refresh_entities``
@@ -369,8 +364,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     stop_event = asyncio.Event()
 
     async def _tick_loop() -> None:
-        nonlocal _active_scenes, _active_rule_ids, _full_sweep_counter
-        nonlocal _last_tick_error_log_ms
         while not stop_event.is_set():
             # Sleep with a timeout so we can react to stop_event promptly.
             try:
@@ -379,12 +372,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 break
             except TimeoutError:
                 pass  # normal tick interval
+            pulse_drain = _runtime.pulses.begin_drain()
             try:
                 # Drive the engine's evaluation cycle
                 sync_time_context_into_engine(engine)
-                _full_sweep_counter += 1
-                if _full_sweep_counter >= 10:
-                    _full_sweep_counter = 0
+                if _runtime.should_full_sweep(every=10):
                     _sync_state_into_engine(hass, engine)
                 else:
                     _referenced = hass.data[DOMAIN].get(_referenced_key, frozenset())
@@ -393,11 +385,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         entity_ids=set(_referenced) | set(engine.list_active_targets()),
                     )
                 engine.evaluate_all()
-                now_ms = _monotonic_ms()
-                _active_rule_ids = _record_rule_activity_changes(
+                now_ms = monotonic_ms()
+                _runtime.active_rule_ids = _record_rule_activity_changes(
                     hass,
                     engine,
-                    _active_rule_ids,
+                    _runtime.active_rule_ids,
                 )
                 engine.tick(tick_interval_ms)
                 events = await _reconciler.tick(
@@ -407,14 +399,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     hass, engine, events, now_ms=now_ms, rate_limiter=_diagnostic_rate_limiter
                 )
                 # Activate any newly-firing scene rules
-                _active_scenes = await _activate_scene_rules(
-                    hass, engine, _active_scenes, _intentional_contexts
+                _runtime.active_scenes = await _activate_scene_rules(
+                    hass, engine, _runtime.active_scenes, _intentional_contexts
                 )
                 await _apply_pending_effects(hass, engine, _intentional_contexts)
-                if _state_change_pulses:
-                    cleared_pulses = set(_state_change_pulses)
-                    clear_state_change_pulses(engine, cleared_pulses)
-                    _state_change_pulses.difference_update(cleared_pulses)
+                pulses_to_clear = _runtime.pulses.current_entity_ids(pulse_drain)
+                if pulses_to_clear:
+                    clear_state_change_pulses(engine, set(pulses_to_clear))
+                    _runtime.pulses.finish_drain(pulse_drain)
                     engine.evaluate_all()
                     _reconciler.drop_inactive_applied(set(engine.list_active_targets()))
                 # Push resolved values to entities
@@ -424,10 +416,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 await store.async_save(lifecycle_snapshot)
                 await _refresh_entities(hass, entry)
+                _runtime.mark_success(now_ms=monotonic_ms())
             except Exception as err:  # noqa: BLE001
-                now_ms = _monotonic_ms()
-                if now_ms - _last_tick_error_log_ms >= 60_000:
-                    _last_tick_error_log_ms = now_ms
+                now_ms = monotonic_ms()
+                _runtime.mark_failure(err, now_ms=now_ms)
+                if _runtime.should_report_failure(now_ms=now_ms):
                     _LOGGER.exception("Intentional tick failed; continuing")
                     record_diagnostic(hass, "tick_failed", error=str(err))
 
@@ -468,7 +461,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _reconciler,
                 _intentional_contexts,
                 _diagnostic_rate_limiter,
-                _state_change_pulses,
+                _runtime.pulses,
             ),
         )
     )
@@ -482,6 +475,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id, None)
         hass.data[DOMAIN].pop(rule_store_key(entry.entry_id), None)
+        hass.data[DOMAIN].pop(runtime_key(entry.entry_id), None)
     return unload_ok
 
 
@@ -636,7 +630,7 @@ def _on_ha_state_change_factory(
     reconciler: Reconciliation,
     context_tracker: IntentionalContextTracker | None = None,
     diagnostic_rate_limiter: DiagnosticRateLimiter | None = None,
-    state_change_pulses: set[str] | None = None,
+    state_change_pulses: StateChangePulseQueue | None = None,
 ):
     """Return a state_changed listener that pushes updates into the engine."""
 
@@ -650,7 +644,7 @@ def _on_ha_state_change_factory(
             engine, old_state, new_state
         ):
             state_change_pulses.add(new_state.entity_id)
-        now_ms = _monotonic_ms()
+        now_ms = monotonic_ms()
         events = reconciler.on_state_delta(engine, new_state, context_tracker, now_ms)
         if events:
             _apply_reconciliation_events(
@@ -779,10 +773,6 @@ async def _apply_pending_effects(
                 effect.service,
                 err,
             )
-
-
-def _monotonic_ms() -> int:
-    return int(time.monotonic() * 1000)
 
 
 async def _refresh_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
