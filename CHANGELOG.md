@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.31] - 2026-06-30
+
+### Fixed
+- **Tick-loop resilience** now snapshots state-change pulse clearing and records/retries unexpected tick failures, preventing one pulse-set mutation error from permanently stopping reconciliation.
+
 ## [0.7.30] - 2026-06-30
 
 ### Fixed
