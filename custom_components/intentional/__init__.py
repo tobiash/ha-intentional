@@ -359,6 +359,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _full_sweep_counter = 0
     # Track state-change pulses that should stay true through one apply cycle.
     _state_change_pulses: set[str] = set()
+    _last_tick_error_log_ms = -60_000
     # Event used to signal the tick loop to stop. We use an event rather
     # than ``while True:`` + ``task.cancel()`` because cancellation only
     # takes effect at the next ``await``; if a slow ``_refresh_entities``
@@ -369,6 +370,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def _tick_loop() -> None:
         nonlocal _active_scenes, _active_rule_ids, _full_sweep_counter
+        nonlocal _last_tick_error_log_ms
         while not stop_event.is_set():
             # Sleep with a timeout so we can react to stop_event promptly.
             try:
@@ -377,49 +379,57 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 break
             except TimeoutError:
                 pass  # normal tick interval
-            # Drive the engine's evaluation cycle
-            sync_time_context_into_engine(engine)
-            _full_sweep_counter += 1
-            if _full_sweep_counter >= 10:
-                _full_sweep_counter = 0
-                _sync_state_into_engine(hass, engine)
-            else:
-                _referenced = hass.data[DOMAIN].get(_referenced_key, frozenset())
-                _sync_state_into_engine(
-                    hass, engine,
-                    entity_ids=set(_referenced) | set(engine.list_active_targets()),
-                )
-            engine.evaluate_all()
-            now_ms = _monotonic_ms()
-            _active_rule_ids = _record_rule_activity_changes(
-                hass,
-                engine,
-                _active_rule_ids,
-            )
-            engine.tick(tick_interval_ms)
-            events = await _reconciler.tick(
-                engine, _ha_adapter, _intentional_contexts, now_ms
-            )
-            _apply_reconciliation_events(
-                hass, engine, events, now_ms=now_ms, rate_limiter=_diagnostic_rate_limiter
-            )
-            # Activate any newly-firing scene rules
-            _active_scenes = await _activate_scene_rules(
-                hass, engine, _active_scenes, _intentional_contexts
-            )
-            await _apply_pending_effects(hass, engine, _intentional_contexts)
-            if _state_change_pulses:
-                clear_state_change_pulses(engine, _state_change_pulses)
-                _state_change_pulses.clear()
+            try:
+                # Drive the engine's evaluation cycle
+                sync_time_context_into_engine(engine)
+                _full_sweep_counter += 1
+                if _full_sweep_counter >= 10:
+                    _full_sweep_counter = 0
+                    _sync_state_into_engine(hass, engine)
+                else:
+                    _referenced = hass.data[DOMAIN].get(_referenced_key, frozenset())
+                    _sync_state_into_engine(
+                        hass, engine,
+                        entity_ids=set(_referenced) | set(engine.list_active_targets()),
+                    )
                 engine.evaluate_all()
-                _reconciler.drop_inactive_applied(set(engine.list_active_targets()))
-            # Push resolved values to entities
-            lifecycle_snapshot = engine.export_lifecycle_records()
-            lifecycle_snapshot["pending_withdraws"] = _reconciler.export_pending_withdraws(
-                engine
-            )
-            await store.async_save(lifecycle_snapshot)
-            await _refresh_entities(hass, entry)
+                now_ms = _monotonic_ms()
+                _active_rule_ids = _record_rule_activity_changes(
+                    hass,
+                    engine,
+                    _active_rule_ids,
+                )
+                engine.tick(tick_interval_ms)
+                events = await _reconciler.tick(
+                    engine, _ha_adapter, _intentional_contexts, now_ms
+                )
+                _apply_reconciliation_events(
+                    hass, engine, events, now_ms=now_ms, rate_limiter=_diagnostic_rate_limiter
+                )
+                # Activate any newly-firing scene rules
+                _active_scenes = await _activate_scene_rules(
+                    hass, engine, _active_scenes, _intentional_contexts
+                )
+                await _apply_pending_effects(hass, engine, _intentional_contexts)
+                if _state_change_pulses:
+                    cleared_pulses = set(_state_change_pulses)
+                    clear_state_change_pulses(engine, cleared_pulses)
+                    _state_change_pulses.difference_update(cleared_pulses)
+                    engine.evaluate_all()
+                    _reconciler.drop_inactive_applied(set(engine.list_active_targets()))
+                # Push resolved values to entities
+                lifecycle_snapshot = engine.export_lifecycle_records()
+                lifecycle_snapshot["pending_withdraws"] = _reconciler.export_pending_withdraws(
+                    engine
+                )
+                await store.async_save(lifecycle_snapshot)
+                await _refresh_entities(hass, entry)
+            except Exception as err:  # noqa: BLE001
+                now_ms = _monotonic_ms()
+                if now_ms - _last_tick_error_log_ms >= 60_000:
+                    _last_tick_error_log_ms = now_ms
+                    _LOGGER.exception("Intentional tick failed; continuing")
+                    record_diagnostic(hass, "tick_failed", error=str(err))
 
     if hasattr(hass, "async_create_background_task"):
         hass.async_create_background_task(_tick_loop(), name=f"{DOMAIN}_tick")

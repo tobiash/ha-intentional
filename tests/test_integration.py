@@ -30,6 +30,7 @@ CI run these — see ``ci/test.yml`` for the GitHub Actions config.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -160,6 +161,45 @@ async def test_rule_file_loaded(
     engine = hass.data[DOMAIN][config_entry.entry_id]
     assert len(engine._rules) == 1  # noqa: SLF001
     assert "test-rule" in engine._rules  # noqa: SLF001
+
+
+async def test_tick_loop_records_failure_and_continues(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient tick exception must not permanently stop reconciliation."""
+    import custom_components.intentional as intentional
+    from custom_components.intentional.diagnostics import list_diagnostics
+
+    original_sync = intentional._sync_state_into_engine
+    calls = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("synthetic tick failure")
+        return original_sync(*args, **kwargs)
+
+    monkeypatch.setattr(intentional, "_sync_state_into_engine", fail_once)
+
+    config_entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(config_entry.entry_id)
+
+    for _ in range(20):
+        await asyncio.sleep(0.05)
+        diagnostics = list_diagnostics(hass)
+        if calls >= 2 and any(event["type"] == "tick_failed" for event in diagnostics):
+            break
+
+    diagnostics = list_diagnostics(hass)
+    assert calls >= 2
+    assert any(
+        event["type"] == "tick_failed"
+        and "synthetic tick failure" in event.get("error", "")
+        for event in diagnostics
+    )
 
 
 async def test_reload_service_works(

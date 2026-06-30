@@ -176,6 +176,27 @@ def test_regular_state_change_exposes_one_cycle_changed_pulse() -> None:
     assert "binary_sensor.front_door.triggered" not in engine.state
 
 
+def test_clearing_state_change_pulses_tolerates_reentrant_pulse_addition() -> None:
+    from intentional.engine import Engine
+    from intentional.ha_adapter import clear_state_change_pulses
+
+    engine = Engine(clock_fn=lambda: 1000)
+    pulses = {"binary_sensor.front_door"}
+    engine.update_state("binary_sensor.front_door", True, field="changed")
+    engine.update_state("binary_sensor.back_door", True, field="changed")
+
+    def add_pulse(_entity_id: str, _value: object) -> None:
+        pulses.add("binary_sensor.back_door")
+
+    engine.on_state_change(add_pulse)
+
+    clear_state_change_pulses(engine, pulses)
+
+    assert engine.state["binary_sensor.front_door.changed"] is False
+    assert engine.state["binary_sensor.back_door.changed"] is True
+    assert pulses == {"binary_sensor.front_door", "binary_sensor.back_door"}
+
+
 def test_vnext_edge_intent_persists_until_ttl_after_pulse_clears() -> None:
     from intentional.engine import Engine
     from intentional.ha_adapter import (

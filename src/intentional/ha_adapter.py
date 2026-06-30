@@ -126,7 +126,7 @@ def pulse_event_state_change(
 
 def clear_state_change_pulses(engine: Engine, entity_ids: set[str]) -> None:
     """Clear one-cycle state-change pulses after the integration applies them."""
-    for entity_id in entity_ids:
+    for entity_id in tuple(entity_ids):
         engine.update_state(entity_id, False, field="changed")
         if entity_id.startswith("event."):
             engine.update_state(entity_id, False, field="triggered")
