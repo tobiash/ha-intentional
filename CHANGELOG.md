@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.32] - 2026-06-30
+
+### Added
+- **Tick runtime health** now reports reconciliation-loop liveness, recent tick failures, and pending state-change pulse count through `/api/intentional/health` and `/api/intentional/world`.
+
+### Changed
+- **State-change pulse handling** now uses tokenized drain semantics so pulses added during a tick survive to the next reconciliation cycle instead of being cleared before they were observed.
+
 ## [0.7.31] - 2026-06-30
 
 ### Fixed

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ha-intentional"
-version = "0.7.31"
+version = "0.7.32"
 description = "Declarative intent-based automation for Home Assistant"
 readme = "README.md"
 license = { text = "MIT" }
