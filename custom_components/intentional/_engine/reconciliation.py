@@ -20,7 +20,11 @@ from typing import Any, Protocol, runtime_checkable
 
 from .adapter import FrozenValue, ServicePlanSignature
 from .adapter.extractor import manual_set_from_state_object
-from .adapter.matcher import service_plan_matches_state
+from .adapter.matcher import (
+    ServicePlanMatch,
+    service_plan_match,
+    service_plan_matches_state,
+)
 from .adapter.signer import _freeze_signature_value, service_plan_signature
 from .adapter.translator import service_calls_for_resolved_target
 
@@ -229,7 +233,9 @@ def _resolved_target_state_from_record(
             value=dict(value),
             winner_key=winner_key,
             winner_confidence=_optional_float(
-                raw.get("winner_confidence") if "winner_confidence" in raw else raw.get("confidence")
+                raw.get("winner_confidence")
+                if "winner_confidence" in raw
+                else raw.get("confidence")
             ),
             transition_ms=int(raw.get("transition_ms") or 0),
             transition_withdraw_ms=_optional_int(raw.get("transition_withdraw_ms")),
@@ -278,7 +284,7 @@ def classify_state_drift(
         if drift_candidates is not None:
             drift_candidates.pop(entity_id, None)
         return None
-    if service_plan_matches_state(plan, state):
+    if service_plan_match(plan, state) is not ServicePlanMatch.MISMATCH:
         if drift_candidates is not None:
             drift_candidates.pop(entity_id, None)
         return None
@@ -321,7 +327,7 @@ def invalidate_service_plan_for_state_change(
     plan = last_applied.get(entity_id)
     if plan is None:
         return False
-    if service_plan_matches_state(plan, state):
+    if service_plan_match(plan, state) is not ServicePlanMatch.MISMATCH:
         return False
     last_applied.pop(entity_id, None)
     return True
@@ -435,7 +441,13 @@ class Reconciliation:
         """Confirm pending drift, apply resolved targets, and withdraw stale ones."""
         events: list[ReconciliationEvent] = []
         events.extend(self._confirm_pending_drift(engine, adapter, context_tracker, now_ms))
-        events.extend(await self.apply(engine, adapter, now_ms))
+        promoted_targets = {event.target for event in events if event.kind == "drift_promoted"}
+        events.extend(
+            await self._apply_active_targets(
+                engine, adapter, now_ms, excluded_targets=promoted_targets
+            )
+        )
+        events.extend(await self._withdraw_stale_targets(engine, adapter, now_ms))
         return events
 
     async def apply(
@@ -471,10 +483,15 @@ class Reconciliation:
         engine: Any,
         adapter: HAAdapter,
         now_ms: int,
+        *,
+        excluded_targets: set[str] | None = None,
     ) -> list[ReconciliationEvent]:
         events: list[ReconciliationEvent] = []
         active_targets = set(engine.list_active_targets())
         for target in sorted(active_targets):
+            if excluded_targets and target in excluded_targets:
+                events.append(ReconciliationEvent("service_skipped_drift_promoted", target))
+                continue
             resolved = engine.resolve(target)
             if resolved is None:
                 self._last_resolved.pop(target, None)
@@ -511,12 +528,13 @@ class Reconciliation:
                 and now_ms < suppress_until
             ):
                 self._last_resolved[target] = _build_resolved_target_state(resolved, calls)
-                events.append(
-                    ReconciliationEvent("service_skipped_pending_transition", target)
-                )
+                events.append(ReconciliationEvent("service_skipped_pending_transition", target))
                 continue
             if self._last_applied.get(target) == signature:
-                if current_state is None or service_plan_matches_state(signature, current_state):
+                if (
+                    current_state is None
+                    or service_plan_match(signature, current_state) is not ServicePlanMatch.MISMATCH
+                ):
                     self._last_resolved[target] = _build_resolved_target_state(resolved, calls)
                     continue
                 if target in pending_drift_targets(self._drift_candidates):
@@ -534,12 +552,12 @@ class Reconciliation:
                 self._last_resolved[target] = _build_resolved_target_state(resolved, calls)
                 events.append(ReconciliationEvent("service_skipped_matching_state", target))
                 continue
-            applied = await self._invoke_service_plan(
-                adapter, target, calls
-            )
+            applied = await self._invoke_service_plan(adapter, target, calls)
             events.extend(applied.events)
             if applied.failed:
-                self._service_failure_backoff[backoff_key] = now_ms + self._service_failure_backoff_ms
+                self._service_failure_backoff[backoff_key] = (
+                    now_ms + self._service_failure_backoff_ms
+                )
             else:
                 self._service_failure_backoff.pop(backoff_key, None)
                 self._last_applied[target] = signature
@@ -585,9 +603,7 @@ class Reconciliation:
             if current_state is not None and service_plan_matches_state(signature, current_state):
                 self._last_resolved.pop(stale_target, None)
                 self._last_applied[stale_target] = signature
-                events.append(
-                    ReconciliationEvent("service_skipped_matching_state", stale_target)
-                )
+                events.append(ReconciliationEvent("service_skipped_matching_state", stale_target))
                 continue
             if self._last_applied.get(stale_target) == signature:
                 if current_state is not None and _state_has_user_context(current_state):
@@ -601,17 +617,19 @@ class Reconciliation:
                 suppress_until = self._drift_suppressed_until.get(stale_target)
                 if suppress_until is not None and now_ms < suppress_until:
                     continue
-            applied = await self._invoke_service_plan(
-                adapter, stale_target, calls, withdraw=True
-            )
+            applied = await self._invoke_service_plan(adapter, stale_target, calls, withdraw=True)
             events.extend(applied.events)
             if applied.failed:
-                self._service_failure_backoff[backoff_key] = now_ms + self._service_failure_backoff_ms
+                self._service_failure_backoff[backoff_key] = (
+                    now_ms + self._service_failure_backoff_ms
+                )
             else:
                 self._service_failure_backoff.pop(backoff_key, None)
                 self._last_applied[stale_target] = signature
                 clear_pending_state_drift(self._drift_candidates, stale_target)
                 self._suppress_drift_during_transition(stale_target, transition_ms, now_ms)
+                if current_state is None:
+                    self._last_resolved.pop(stale_target, None)
         return events
 
     async def _invoke_service_plan(
@@ -627,9 +645,7 @@ class Reconciliation:
         context = adapter.new_context()
         for domain, service, service_data in calls:
             try:
-                await adapter.async_call(
-                    domain, service, service_data, context=context
-                )
+                await adapter.async_call(domain, service, service_data, context=context)
             except Exception as err:  # noqa: BLE001 — record and back off
                 fired.append(
                     ReconciliationEvent(

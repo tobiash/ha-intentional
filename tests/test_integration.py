@@ -136,6 +136,26 @@ async def test_services_registered(hass: HomeAssistant, config_entry: MockConfig
     assert "activate_scene" in intentional_services
 
 
+async def test_second_config_entry_is_rejected(
+    hass: HomeAssistant, config_entry: MockConfigEntry, tmp_path: Path
+) -> None:
+    """Singleton domain services must not be rebound to another engine."""
+    config_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+
+    second_rule_dir = tmp_path / "other-rules"
+    second_rule_dir.mkdir()
+    second_entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_RULE_DIR: str(second_rule_dir)},
+        title="Intentional Second Entry",
+    )
+    second_entry.add_to_hass(hass)
+
+    assert not await hass.config_entries.async_setup(second_entry.entry_id)
+    assert second_entry.entry_id not in hass.data[DOMAIN]
+
+
 async def test_sensor_entities_created(
     hass: HomeAssistant, config_entry: MockConfigEntry
 ) -> None:
@@ -340,9 +360,154 @@ async def test_integration_unload(hass: HomeAssistant, config_entry: MockConfigE
     config_entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(config_entry.entry_id)
 
+    from custom_components.intentional._engine.runtime import runtime_key
+
+    runtime = hass.data[DOMAIN][runtime_key(config_entry.entry_id)]
     assert await hass.config_entries.async_unload(config_entry.entry_id)
     # Engine should be removed from hass.data
     assert config_entry.entry_id not in hass.data.get(DOMAIN, {})
+    assert runtime.tick_task is not None
+    assert runtime.tick_task.done()
+
+
+async def test_unload_continues_when_final_lifecycle_save_fails(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed final save is diagnosed without preventing clean unload."""
+    from homeassistant.helpers.storage import Store
+
+    from custom_components.intentional._engine.runtime import runtime_key
+    from custom_components.intentional.diagnostics import list_diagnostics
+
+    config_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+
+    async def fail_save(self, data):
+        raise RuntimeError("synthetic final save failure")
+
+    monkeypatch.setattr(Store, "async_save", fail_save)
+
+    assert await hass.config_entries.async_unload(config_entry.entry_id)
+    assert config_entry.entry_id not in hass.data[DOMAIN]
+    assert runtime_key(config_entry.entry_id) not in hass.data[DOMAIN]
+    assert any(
+        event["type"] == "lifecycle_save_failed"
+        and event["error"] == "synthetic final save failure"
+        for event in list_diagnostics(hass)
+    )
+
+
+async def test_failed_platform_unload_keeps_tick_runtime_operational(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rejected platform unload must leave the loaded runtime running."""
+    from custom_components.intentional import async_unload_entry
+    from custom_components.intentional._engine.runtime import runtime_key
+
+    config_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    runtime = hass.data[DOMAIN][runtime_key(config_entry.entry_id)]
+    await asyncio.sleep(0.15)
+    success_count = runtime.success_count
+
+    async def reject_platform_unload(entry, platforms):
+        return False
+
+    monkeypatch.setattr(
+        hass.config_entries, "async_unload_platforms", reject_platform_unload
+    )
+
+    assert not await async_unload_entry(hass, config_entry)
+    assert not runtime.stop_event.is_set()
+    assert runtime.tick_task is not None
+    assert not runtime.tick_task.done()
+    assert config_entry.entry_id in hass.data[DOMAIN]
+    assert rule_store_key(config_entry.entry_id) in hass.data[DOMAIN]
+
+    await asyncio.sleep(0.15)
+    assert runtime.success_count > success_count
+
+
+async def test_unload_cleans_up_when_tick_task_raises(
+    hass: HomeAssistant, config_entry: MockConfigEntry
+) -> None:
+    """An unexpected tick-task exception must not bypass platform cleanup."""
+    from custom_components.intentional._engine.runtime import runtime_key
+    from custom_components.intentional.diagnostics import list_diagnostics
+
+    config_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    runtime = hass.data[DOMAIN][runtime_key(config_entry.entry_id)]
+
+    runtime.stop_event.set()
+    assert runtime.tick_task is not None
+    await runtime.tick_task
+
+    async def fail_tick_task() -> None:
+        raise RuntimeError("synthetic task completion failure")
+
+    runtime.tick_task = hass.async_create_task(fail_tick_task())
+
+    assert await hass.config_entries.async_unload(config_entry.entry_id)
+    assert config_entry.entry_id not in hass.data[DOMAIN]
+    assert runtime_key(config_entry.entry_id) not in hass.data[DOMAIN]
+    assert any(
+        event["type"] == "tick_task_failed"
+        and event["error"] == "synthetic task completion failure"
+        for event in list_diagnostics(hass)
+    )
+
+
+async def test_deleted_entity_state_is_removed_from_engine(
+    hass: HomeAssistant, config_entry: MockConfigEntry
+) -> None:
+    """Entity removal must not leave stale facts firing rules."""
+    config_entry.add_to_hass(hass)
+    hass.states.async_set("input_boolean.test", "on")
+    await hass.config_entries.async_setup(config_entry.entry_id)
+    engine = hass.data[DOMAIN][config_entry.entry_id]
+    await asyncio.sleep(0)
+
+    assert engine.state["input_boolean.test.state"] == "on"
+
+    hass.states.async_remove("input_boolean.test")
+    await asyncio.sleep(0)
+
+    assert not any(
+        key.startswith("input_boolean.test.") for key in engine.state
+    )
+    assert engine.resolve("light.test") is None
+
+
+async def test_lifecycle_storage_skips_unchanged_tick_snapshots(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stable lifecycle state is saved once during ticks and once on unload."""
+    from homeassistant.helpers.storage import Store
+
+    save_count = 0
+    original_save = Store.async_save
+
+    async def count_save(self, data):
+        nonlocal save_count
+        save_count += 1
+        await original_save(self, data)
+
+    config_entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(config_entry.entry_id)
+    monkeypatch.setattr(Store, "async_save", count_save)
+
+    await asyncio.sleep(0.35)
+    assert save_count == 1
+
+    await hass.config_entries.async_unload(config_entry.entry_id)
+    assert save_count == 2
 
 
 async def test_missing_rule_dir_is_created(

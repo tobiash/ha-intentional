@@ -24,7 +24,7 @@ from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, State
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.storage import Store
@@ -289,10 +289,18 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Intentional from a config entry."""
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    if any(
+        loaded_entry.entry_id != entry.entry_id
+        and loaded_entry.entry_id in domain_data
+        for loaded_entry in hass.config_entries.async_entries(DOMAIN)
+    ):
+        raise ConfigEntryError("Intentional supports only one config entry")
+
     rule_dir = entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR)
 
     engine = Engine(selector_resolver=lambda selector: _resolve_intent_selector(hass, selector))
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = engine
+    domain_data[entry.entry_id] = engine
     rule_store = StorageRuleStore(hass, entry.entry_id)
     hass.data[DOMAIN][rule_store_key(entry.entry_id)] = rule_store
 
@@ -320,8 +328,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as err:
         raise ConfigEntryNotReady(f"Failed to load rules: {err}") from err
 
-    store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
+    store: Store = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}_{entry.entry_id}")
     lifecycle_records = await store.async_load()
+    if lifecycle_records is None:
+        legacy_store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
+        lifecycle_records = await legacy_store.async_load()
 
     engine.load_rules(initial_rules)
     if isinstance(lifecycle_records, dict):
@@ -361,79 +372,91 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # is in progress, cancellation can be delayed indefinitely and
     # ``hass.async_block_till_done()`` would hang waiting for it. An
     # event lets the loop exit cleanly on the next tick.
-    stop_event = asyncio.Event()
+    stop_event = _runtime.stop_event
+
+    def _lifecycle_snapshot() -> dict[str, Any]:
+        snapshot = engine.export_lifecycle_records()
+        snapshot["pending_withdraws"] = _reconciler.export_pending_withdraws(engine)
+        return snapshot
+
+    async def _save_lifecycle_if_changed(*, force: bool = False) -> None:
+        snapshot = _lifecycle_snapshot()
+        if force or snapshot != _runtime.lifecycle_snapshot:
+            await store.async_save(snapshot)
+            _runtime.lifecycle_snapshot = snapshot
 
     async def _tick_loop() -> None:
-        while not stop_event.is_set():
-            # Sleep with a timeout so we can react to stop_event promptly.
+        try:
+            while not stop_event.is_set():
+                # Sleep with a timeout so we can react to stop_event promptly.
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=tick_interval_ms / 1000)
+                    # If wait() returned normally, stop was requested.
+                    break
+                except TimeoutError:
+                    pass  # normal tick interval
+                async with _runtime.tick_lock:
+                    if stop_event.is_set():
+                        break
+                    pulse_drain = _runtime.pulses.begin_drain()
+                    try:
+                        # Drive the engine's evaluation cycle
+                        sync_time_context_into_engine(engine)
+                        if _runtime.should_full_sweep(every=10):
+                            _sync_state_into_engine(hass, engine)
+                        else:
+                            _referenced = hass.data[DOMAIN].get(_referenced_key, frozenset())
+                            _sync_state_into_engine(
+                                hass, engine,
+                                entity_ids=set(_referenced) | set(engine.list_active_targets()),
+                            )
+                        engine.evaluate_all()
+                        now_ms = _monotonic_ms()
+                        _runtime.active_rule_ids = _record_rule_activity_changes(
+                            hass,
+                            engine,
+                            _runtime.active_rule_ids,
+                        )
+                        engine.tick(tick_interval_ms)
+                        events = await _reconciler.tick(
+                            engine, _ha_adapter, _intentional_contexts, now_ms
+                        )
+                        _apply_reconciliation_events(
+                            hass, engine, events, now_ms=now_ms,
+                            rate_limiter=_diagnostic_rate_limiter,
+                        )
+                        # Activate any newly-firing scene rules
+                        _runtime.active_scenes = await _activate_scene_rules(
+                            hass, engine, _runtime.active_scenes, _intentional_contexts
+                        )
+                        await _apply_pending_effects(hass, engine, _intentional_contexts)
+                        pulses_to_clear = _runtime.pulses.current_entity_ids(pulse_drain)
+                        if pulses_to_clear:
+                            clear_state_change_pulses(engine, set(pulses_to_clear))
+                            _runtime.pulses.finish_drain(pulse_drain)
+                            engine.evaluate_all()
+                            _reconciler.drop_inactive_applied(set(engine.list_active_targets()))
+                        # Push resolved values to entities
+                        await _save_lifecycle_if_changed()
+                        await _refresh_entities(hass, entry)
+                        _runtime.mark_success(now_ms=_monotonic_ms())
+                    except Exception as err:  # noqa: BLE001
+                        now_ms = _monotonic_ms()
+                        _runtime.mark_failure(err, now_ms=now_ms)
+                        if _runtime.should_report_failure(now_ms=now_ms):
+                            _LOGGER.exception("Intentional tick failed; continuing")
+                            record_diagnostic(hass, "tick_failed", error=str(err))
+        finally:
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=tick_interval_ms / 1000)
-                # If wait() returned normally, stop was requested.
-                break
-            except TimeoutError:
-                pass  # normal tick interval
-            pulse_drain = _runtime.pulses.begin_drain()
-            try:
-                # Drive the engine's evaluation cycle
-                sync_time_context_into_engine(engine)
-                if _runtime.should_full_sweep(every=10):
-                    _sync_state_into_engine(hass, engine)
-                else:
-                    _referenced = hass.data[DOMAIN].get(_referenced_key, frozenset())
-                    _sync_state_into_engine(
-                        hass, engine,
-                        entity_ids=set(_referenced) | set(engine.list_active_targets()),
-                    )
-                engine.evaluate_all()
-                now_ms = _monotonic_ms()
-                _runtime.active_rule_ids = _record_rule_activity_changes(
-                    hass,
-                    engine,
-                    _runtime.active_rule_ids,
-                )
-                engine.tick(tick_interval_ms)
-                events = await _reconciler.tick(
-                    engine, _ha_adapter, _intentional_contexts, now_ms
-                )
-                _apply_reconciliation_events(
-                    hass, engine, events, now_ms=now_ms, rate_limiter=_diagnostic_rate_limiter
-                )
-                # Activate any newly-firing scene rules
-                _runtime.active_scenes = await _activate_scene_rules(
-                    hass, engine, _runtime.active_scenes, _intentional_contexts
-                )
-                await _apply_pending_effects(hass, engine, _intentional_contexts)
-                pulses_to_clear = _runtime.pulses.current_entity_ids(pulse_drain)
-                if pulses_to_clear:
-                    clear_state_change_pulses(engine, set(pulses_to_clear))
-                    _runtime.pulses.finish_drain(pulse_drain)
-                    engine.evaluate_all()
-                    _reconciler.drop_inactive_applied(set(engine.list_active_targets()))
-                # Push resolved values to entities
-                lifecycle_snapshot = engine.export_lifecycle_records()
-                lifecycle_snapshot["pending_withdraws"] = _reconciler.export_pending_withdraws(
-                    engine
-                )
-                await store.async_save(lifecycle_snapshot)
-                await _refresh_entities(hass, entry)
-                _runtime.mark_success(now_ms=_monotonic_ms())
+                await _save_lifecycle_if_changed(force=True)
             except Exception as err:  # noqa: BLE001
-                now_ms = _monotonic_ms()
-                _runtime.mark_failure(err, now_ms=now_ms)
-                if _runtime.should_report_failure(now_ms=now_ms):
-                    _LOGGER.exception("Intentional tick failed; continuing")
-                    record_diagnostic(hass, "tick_failed", error=str(err))
+                _LOGGER.exception("Could not save final Intentional lifecycle state")
+                record_diagnostic(hass, "lifecycle_save_failed", error=str(err))
 
     if hasattr(hass, "async_create_background_task"):
-        hass.async_create_background_task(_tick_loop(), name=f"{DOMAIN}_tick")
+        _runtime.tick_task = hass.async_create_background_task(_tick_loop(), name=f"{DOMAIN}_tick")
     else:
-        hass.async_create_task(_tick_loop(), name=f"{DOMAIN}_tick")
-
-    def _stop_tick_loop() -> None:
-        """Signal the tick loop to stop on entry unload."""
-        stop_event.set()
-
-    entry.async_on_unload(_stop_tick_loop)
+        _runtime.tick_task = hass.async_create_task(_tick_loop(), name=f"{DOMAIN}_tick")
 
     # Set up services
     await _register_services(hass, engine, rule_store, entry)
@@ -471,12 +494,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload an Intentional config entry."""
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id, None)
-        hass.data[DOMAIN].pop(rule_store_key(entry.entry_id), None)
-        hass.data[DOMAIN].pop(runtime_key(entry.entry_id), None)
-    return unload_ok
+    runtime = hass.data.get(DOMAIN, {}).get(runtime_key(entry.entry_id))
+    if not isinstance(runtime, TickRuntime):
+        return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+    # Keep the runtime operational if any platform rejects the unload. Holding
+    # the lock prevents a tick from racing platform entity cleanup.
+    async with runtime.tick_lock:
+        unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+        if not unload_ok:
+            return False
+        runtime.stop_event.set()
+
+    if runtime.tick_task is not None:
+        try:
+            await runtime.tick_task
+        except asyncio.CancelledError:
+            current_task = asyncio.current_task()
+            if current_task is not None and current_task.cancelling():
+                raise
+            _LOGGER.warning("Intentional tick task was cancelled during unload")
+            record_diagnostic(hass, "tick_task_cancelled")
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.exception("Intentional tick task failed during unload")
+            record_diagnostic(hass, "tick_task_failed", error=str(err))
+    hass.data[DOMAIN].pop(entry.entry_id, None)
+    hass.data[DOMAIN].pop(rule_store_key(entry.entry_id), None)
+    hass.data[DOMAIN].pop(runtime_key(entry.entry_id), None)
+    return True
 
 
 async def _register_frontend_panel(hass: HomeAssistant) -> None:
@@ -638,6 +683,10 @@ def _on_ha_state_change_factory(
         old_state: State | None = event.data.get("old_state")
         new_state: State | None = event.data.get("new_state")
         if new_state is None:
+            if old_state is not None:
+                engine.remove_state(old_state.entity_id)
+                sync_time_context_into_engine(engine)
+                engine.evaluate_all()
             return
         sync_state_object_into_engine(engine, new_state)
         if state_change_pulses is not None and pulse_state_change(

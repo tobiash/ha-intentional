@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -86,6 +87,10 @@ class TickRuntime:
     consecutive_failures: int = 0
     success_count: int = 0
     failure_count: int = 0
+    stop_event: asyncio.Event = field(default_factory=asyncio.Event)
+    tick_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    tick_task: asyncio.Task[None] | None = None
+    lifecycle_snapshot: dict[str, Any] | None = None
     _last_failure_report_ms: int | None = None
 
     def should_full_sweep(self, *, every: int) -> bool:

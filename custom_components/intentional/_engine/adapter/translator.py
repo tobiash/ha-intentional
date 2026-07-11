@@ -521,20 +521,30 @@ def _service_calls_without_update_entity(
         return tuple(calls)
 
     if domain == "cover":
+        calls = []
         if "tilt_position" in value:
-            return ((
+            calls.append((
                 domain,
                 "set_cover_tilt_position",
                 {"entity_id": target, "tilt_position": value["tilt_position"]},
-            ),)
+            ))
         if "position" in value:
-            return ((
+            calls.append((
                 domain,
                 "set_cover_position",
                 {"entity_id": target, "position": value["position"]},
-            ),)
-        service = COVER_STATE_SERVICES.get(state)
-        return ((domain, service, service_data),) if service else ()
+            ))
+        # A position is itself HA's longitudinal movement instruction. Do not
+        # follow it with a full-open/full-close service, even when the state
+        # came from the same observed cover value.
+        service = (
+            None
+            if "position" in value and state in {"open", "opening", "closed", "closing"}
+            else COVER_STATE_SERVICES.get(state)
+        )
+        if service:
+            calls.append((domain, service, service_data))
+        return tuple(calls)
 
     if domain == "fan":
         if state == "toggle":
@@ -572,14 +582,12 @@ def _service_calls_without_update_entity(
         return tuple(calls)
 
     if domain == "climate":
-        if state == "off":
-            return ((domain, "turn_off", service_data),)
-        if state == "on":
-            return ((domain, "turn_on", service_data),)
         if state == "toggle":
             return ((domain, "toggle", service_data),)
-        hvac_mode = value.get("hvac_mode", state)
         calls = []
+        if state == "on":
+            calls.append((domain, "turn_on", dict(service_data)))
+        hvac_mode = value.get("hvac_mode") if state in {"on", "off"} else value.get("hvac_mode", state)
         if hvac_mode is not None:
             calls.append((
                 domain,
@@ -637,6 +645,8 @@ def _service_calls_without_update_entity(
                 "set_aux_heat",
                 {"entity_id": target, "aux_heat": value["aux_heat"]},
             ))
+        if state == "off":
+            calls.append((domain, "turn_off", dict(service_data)))
         return tuple(calls)
 
     if domain == "number":
@@ -1158,5 +1168,3 @@ def scene_activation_plan(
             service_data["transition"] = intent.transition_ms / 1000.0
         calls.append(("scene", "turn_on", service_data))
     return tuple(calls), active, no_longer_active
-
-

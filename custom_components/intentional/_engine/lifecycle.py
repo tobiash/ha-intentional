@@ -94,6 +94,7 @@ def intent_to_lifecycle_record(intent: Intent) -> dict[str, Any]:
         "reason": intent.reason,
         "rule_id": intent.rule_id,
         "ignore_when": intent.ignore_when,
+        "selector_generated": intent.selector_generated,
         "created_at_ms": intent.created_at_ms,
         "animation": asdict(intent.animation) if intent.animation is not None else None,
         "generators": {
@@ -147,6 +148,7 @@ def intent_from_lifecycle_record(raw: Any) -> Intent | None:
         reason=str(raw.get("reason", "")),
         rule_id=str(raw.get("rule_id", "")),
         ignore_when=bool(raw.get("ignore_when", False)),
+        selector_generated=bool(raw.get("selector_generated", False)),
         created_at_ms=int(raw.get("created_at_ms") or 0),
         animation=animation,
         generators=generators,

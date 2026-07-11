@@ -427,7 +427,28 @@ class Engine:
 
         # Add new intents for rules that just started firing
         new_active = [self._refresh_generated_intent(intent, now) for intent in new_active]
-        existing_rule_ids = {i.rule_id for i in new_active if i.rule_id}
+        for rule_id in firing:
+            rule = self._rules[rule_id].rule
+            if not rule.intent_selectors:
+                continue
+            existing = [
+                intent
+                for intent in new_active
+                if intent.rule_id == rule_id and intent.selector_generated
+            ]
+            created_at_by_target = {intent.target: intent.created_at_ms for intent in existing}
+            new_active = [
+                intent
+                for intent in new_active
+                if intent.rule_id != rule_id or not intent.selector_generated
+            ]
+            new_active.extend(
+                replace(
+                    intent,
+                    created_at_ms=created_at_by_target.get(intent.target, intent.created_at_ms),
+                )
+                for intent in self._spawn_intents_from_selectors(rule, now)
+            )
         for rule_id, _target in firing.items():
             parsed = self._rules[rule_id]
             if parsed.rule.effects and rule_id not in self._active_effect_rule_ids:
@@ -435,10 +456,12 @@ class Engine:
                     (rule_id, self._template_renderer.render_effect(effect, self.state))
                     for effect in parsed.rule.effects
                 )
-            if rule_id not in existing_rule_ids:
+            has_explicit_intent = any(
+                intent.rule_id == rule_id and not intent.selector_generated
+                for intent in new_active
+            )
+            if not has_explicit_intent:
                 if not parsed.rule.target and parsed.rule.scene is None:
-                    if parsed.rule.intent_selectors:
-                        new_active.extend(self._spawn_intents_from_selectors(parsed.rule, now))
                     continue
                 intent = self._spawn_intent_from_rule(parsed.rule, now)
                 new_active.append(intent)
@@ -521,7 +544,13 @@ class Engine:
         blocked_by: dict[str, list[str]] = {}
         for rule_id in firing:
             for blocked_rule_id in self._rules[rule_id].rule.blocks:
-                blocked_by.setdefault(blocked_rule_id, []).append(rule_id)
+                for candidate_id in firing:
+                    candidate = self._rules[candidate_id].rule
+                    if (
+                        candidate_id == blocked_rule_id
+                        or candidate.authored_rule_id == blocked_rule_id
+                    ):
+                        blocked_by.setdefault(candidate_id, []).append(rule_id)
         for rule_id in blocked_by:
             firing.pop(rule_id, None)
 
@@ -638,10 +667,12 @@ class Engine:
 
     def _spawn_intents_from_selectors(self, rule: Rule, now: int) -> list[Intent]:
         intents: list[Intent] = []
+        matched_targets: set[str] = set()
         for selector in rule.intent_selectors:
             for target in self._selector_resolver(selector):
-                if target in selector.exclude:
+                if target in selector.exclude or target in matched_targets:
                     continue
+                matched_targets.add(target)
                 intents.append(Intent(
                     target=target,
                     set=self._template_renderer.render_value(selector.set, self.state),
@@ -657,6 +688,7 @@ class Engine:
                     reason=rule.reason,
                     rule_id=rule.id,
                     ignore_when=rule.edge_created,
+                    selector_generated=True,
                     created_at_ms=now,
                 ))
         return intents
@@ -788,6 +820,7 @@ class Engine:
             animation=resolved.animation,
             ttl_remaining_ms=resolved.ttl_remaining_ms,
             all_active_intents=resolved.all_active_intents,
+            diagnostics=resolved.diagnostics,
         )
 
     # ── Animation ticking ─────────────────────────────────────────
@@ -816,6 +849,7 @@ class Engine:
             resolved = {
                 "value": dict(resolved_obj.value),
                 "ttl_remaining_ms": resolved_obj.ttl_remaining_ms,
+                "diagnostics": list(resolved_obj.diagnostics),
             }
             winning_intent = _intent_to_diagnostic_dict(resolved_obj.winning_intent)
 
@@ -1133,6 +1167,7 @@ def _linger_intent(intent: Intent, linger_ms: int, now: int) -> Intent:
         reason=intent.reason,
         rule_id=intent.rule_id,
         ignore_when=True,
+        selector_generated=intent.selector_generated,
         created_at_ms=now,
         animation=intent.animation,
         generators=intent.generators,

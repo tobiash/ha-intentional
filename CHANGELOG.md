@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.34] - 2026-07-11
+
+### Fixed
+- **Rule API authorization** now restricts mutations to Home Assistant administrators and rejects non-object JSON payloads cleanly.
+- **Manual override reconciliation** no longer reapplies an automation Intent in the same cycle that confirmed Drift is promoted.
+- **Selector-backed Intents** now refresh active membership without losing explicit Targets, duplicating overlapping Targets, or compounding modifiers.
+- **Multi-target Rules** preserve suppression and selector semantics without duplicating Effects, and suppression follows authored Rule identity safely.
+- **Target reconciliation** now distinguishes matched, mismatched, and unobservable Service plan fields to avoid both false matches and repeated calls.
+- **Cover and climate Service plans** now apply compatible compound fields without issuing contradictory calls.
+- **Tick runtime lifecycle** removes deleted HA state, coalesces lifecycle persistence, isolates storage by entry, and shuts down safely across unload failures.
+- **Rule editor round trips** preserve compound conditions, multiple Effects, and nested Effect data while refusing unsupported YAML forms that could lose semantics.
+- **Rule validation** now rejects malformed modifier mappings and invalid weighted generator configurations during loading.
+
+### Changed
+- **Config entry ownership** is explicitly single-entry so domain services, API routes, and lifecycle state cannot bind to different engines.
+- **Conflicting cap and floor modifiers** resolve deterministically and report contradictory bounds in diagnostics.
+
 ## [0.7.33] - 2026-06-30
 
 ### Fixed

@@ -11,16 +11,18 @@ import pytest
 def test_manual_set_from_service_data_keeps_supported_fields() -> None:
     from intentional.ha_adapter import manual_set_from_service_data
 
-    assert manual_set_from_service_data({
-        "target": "media_player.tv",
-        "state": "on",
-        "volume_level": 0.35,
-        "is_volume_muted": False,
-        "source": "HDMI 2",
-        "sound_mode": "Movie",
-        "ttl": 7200,
-        "ignored": "nope",
-    }) == {
+    assert manual_set_from_service_data(
+        {
+            "target": "media_player.tv",
+            "state": "on",
+            "volume_level": 0.35,
+            "is_volume_muted": False,
+            "source": "HDMI 2",
+            "sound_mode": "Movie",
+            "ttl": 7200,
+            "ignored": "nope",
+        }
+    ) == {
         "state": "on",
         "volume_level": 0.35,
         "is_volume_muted": False,
@@ -32,22 +34,24 @@ def test_manual_set_from_service_data_keeps_supported_fields() -> None:
 def test_manual_set_from_service_data_supports_light_cover_and_fan_fields() -> None:
     from intentional.ha_adapter import manual_set_from_service_data
 
-    assert manual_set_from_service_data({
-        "brightness_pct": 70,
-        "brightness": 180,
-        "color_temp_k": 2700,
-        "color_temp_mired": 370,
-        "rgb_color": [255, 80, 40],
-        "rgbw_color": [255, 80, 40, 10],
-        "rgbww_color": [255, 80, 40, 10, 5],
-        "hs_color": [24.0, 90.0],
-        "xy_color": [0.45, 0.36],
-        "effect": "colorloop",
-        "flash": "short",
-        "position": 25,
-        "tilt_position": 75,
-        "percentage": 40,
-    }) == {
+    assert manual_set_from_service_data(
+        {
+            "brightness_pct": 70,
+            "brightness": 180,
+            "color_temp_k": 2700,
+            "color_temp_mired": 370,
+            "rgb_color": [255, 80, 40],
+            "rgbw_color": [255, 80, 40, 10],
+            "rgbww_color": [255, 80, 40, 10, 5],
+            "hs_color": [24.0, 90.0],
+            "xy_color": [0.45, 0.36],
+            "effect": "colorloop",
+            "flash": "short",
+            "position": 25,
+            "tilt_position": 75,
+            "percentage": 40,
+        }
+    ) == {
         "brightness_pct": 70,
         "brightness": 180,
         "color_temp_k": 2700,
@@ -68,19 +72,21 @@ def test_manual_set_from_service_data_supports_light_cover_and_fan_fields() -> N
 def test_manual_set_from_service_data_supports_climate_fields() -> None:
     from intentional.ha_adapter import manual_set_from_service_data
 
-    assert manual_set_from_service_data({
-        "hvac_mode": "heat",
-        "temperature": 21.5,
-        "target_temp_low": 18,
-        "target_temp_high": 23,
-        "preset_mode": "eco",
-        "fan_mode": "auto",
-        "direction": "forward",
-        "oscillating": True,
-        "swing_mode": "vertical",
-        "swing_horizontal_mode": "wide",
-        "aux_heat": False,
-    }) == {
+    assert manual_set_from_service_data(
+        {
+            "hvac_mode": "heat",
+            "temperature": 21.5,
+            "target_temp_low": 18,
+            "target_temp_high": 23,
+            "preset_mode": "eco",
+            "fan_mode": "auto",
+            "direction": "forward",
+            "oscillating": True,
+            "swing_mode": "vertical",
+            "swing_horizontal_mode": "wide",
+            "aux_heat": False,
+        }
+    ) == {
         "hvac_mode": "heat",
         "temperature": 21.5,
         "target_temp_low": 18,
@@ -98,72 +104,74 @@ def test_manual_set_from_service_data_supports_climate_fields() -> None:
 def test_manual_set_from_service_data_supports_helper_fields() -> None:
     from intentional.ha_adapter import manual_set_from_service_data
 
-    assert manual_set_from_service_data({
-        "value": 42,
-        "option": "Guest",
-        "cycle": False,
-        "code": "1234",
-        "message": "Door opened",
-        "title": "Front door",
-        "data": {"tag": "door"},
-        "service": "notification",
-        "service_data": {"browser_id": ["office"]},
-        "media_player_entity_id": "media_player.office",
-        "cache": True,
-        "language": "de",
-        "options": {"voice": "default"},
-        "browser_id": ["office"],
-        "user_id": ["person.tobias"],
-        "path": "/lovelace/office",
-        "action_text": "Open",
-        "action": {"action": "navigate", "navigation_path": "/lovelace/office"},
-        "parse_mode": "html",
-        "disable_notification": False,
-        "disable_web_page_preview": True,
-        "keyboard": ["/ack"],
-        "inline_keyboard": [["Acknowledge:/ack"]],
-        "message_tag": "front-door",
-        "chat_id": "12345",
-        "todo_action": "add_item",
-        "item": "Buy filters",
-        "rename": "Buy HVAC filters",
-        "status": "completed",
-        "due_date": "2026-06-06",
-        "due_datetime": "2026-06-06 10:00:00",
-        "description": "For the office purifier",
-        "variables": {"mode": "movie"},
-        "skip_condition": True,
-        "datetime": "2026-06-05 22:30:00",
-        "date": "2026-06-05",
-        "time": "22:30:00",
-        "timestamp": 1780691400,
-        "duration": "00:10:00",
-        "update_entity": True,
-        "media_action": "play_media",
-        "media_content_id": "media-source://album/1",
-        "media_content_type": "music",
-        "enqueue": "play",
-        "announce": True,
-        "extra": {"metadata": {"title": "Dinner"}},
-        "shuffle": True,
-        "repeat": "all",
-        "seek_position": 42.5,
-        "group_members": ["media_player.kitchen"],
-        "tone": "alarm",
-        "humidity": 55,
-        "mode": "eco",
-        "operation_mode": "performance",
-        "away_mode": True,
-        "fan_speed": "turbo",
-        "command": "clean_segments",
-        "params": {"segments": [1, 2]},
-        "cleaning_area_id": ["kitchen"],
-        "activity": "Watch TV",
-        "device": "soundbar",
-        "num_repeats": 2,
-        "delay_secs": 0.4,
-        "hold_secs": 0.1,
-    }) == {
+    assert manual_set_from_service_data(
+        {
+            "value": 42,
+            "option": "Guest",
+            "cycle": False,
+            "code": "1234",
+            "message": "Door opened",
+            "title": "Front door",
+            "data": {"tag": "door"},
+            "service": "notification",
+            "service_data": {"browser_id": ["office"]},
+            "media_player_entity_id": "media_player.office",
+            "cache": True,
+            "language": "de",
+            "options": {"voice": "default"},
+            "browser_id": ["office"],
+            "user_id": ["person.tobias"],
+            "path": "/lovelace/office",
+            "action_text": "Open",
+            "action": {"action": "navigate", "navigation_path": "/lovelace/office"},
+            "parse_mode": "html",
+            "disable_notification": False,
+            "disable_web_page_preview": True,
+            "keyboard": ["/ack"],
+            "inline_keyboard": [["Acknowledge:/ack"]],
+            "message_tag": "front-door",
+            "chat_id": "12345",
+            "todo_action": "add_item",
+            "item": "Buy filters",
+            "rename": "Buy HVAC filters",
+            "status": "completed",
+            "due_date": "2026-06-06",
+            "due_datetime": "2026-06-06 10:00:00",
+            "description": "For the office purifier",
+            "variables": {"mode": "movie"},
+            "skip_condition": True,
+            "datetime": "2026-06-05 22:30:00",
+            "date": "2026-06-05",
+            "time": "22:30:00",
+            "timestamp": 1780691400,
+            "duration": "00:10:00",
+            "update_entity": True,
+            "media_action": "play_media",
+            "media_content_id": "media-source://album/1",
+            "media_content_type": "music",
+            "enqueue": "play",
+            "announce": True,
+            "extra": {"metadata": {"title": "Dinner"}},
+            "shuffle": True,
+            "repeat": "all",
+            "seek_position": 42.5,
+            "group_members": ["media_player.kitchen"],
+            "tone": "alarm",
+            "humidity": 55,
+            "mode": "eco",
+            "operation_mode": "performance",
+            "away_mode": True,
+            "fan_speed": "turbo",
+            "command": "clean_segments",
+            "params": {"segments": [1, 2]},
+            "cleaning_area_id": ["kitchen"],
+            "activity": "Watch TV",
+            "device": "soundbar",
+            "num_repeats": 2,
+            "delay_secs": 0.4,
+            "hold_secs": 0.1,
+        }
+    ) == {
         "value": 42,
         "option": "Guest",
         "cycle": False,
@@ -705,14 +713,16 @@ def test_state_drift_emits_manual_override_for_managed_target() -> None:
     from intentional.yaml_loader import Rule
 
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules([
-        Rule(
-            id="desk-on",
-            when="input_boolean.work == 'on'",
-            target="light.desk",
-            set={"state": "on", "brightness_pct": 60},
-        )
-    ])
+    engine.load_rules(
+        [
+            Rule(
+                id="desk-on",
+                when="input_boolean.work == 'on'",
+                target="light.desk",
+                set={"state": "on", "brightness_pct": 60},
+            )
+        ]
+    )
     engine.update_state("input_boolean.work", "on")
     engine.evaluate_all()
     calls = service_calls_for_resolved_target(
@@ -750,14 +760,16 @@ def test_state_drift_does_not_emit_manual_override_for_matching_state() -> None:
     from intentional.yaml_loader import Rule
 
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules([
-        Rule(
-            id="desk-on",
-            when="input_boolean.work == 'on'",
-            target="light.desk",
-            set={"state": "on", "brightness_pct": 60},
-        )
-    ])
+    engine.load_rules(
+        [
+            Rule(
+                id="desk-on",
+                when="input_boolean.work == 'on'",
+                target="light.desk",
+                set={"state": "on", "brightness_pct": 60},
+            )
+        ]
+    )
     engine.update_state("input_boolean.work", "on")
     engine.evaluate_all()
     calls = service_calls_for_resolved_target(
@@ -797,14 +809,16 @@ def test_state_drift_requires_stable_confirmation_when_candidates_are_tracked() 
     from intentional.yaml_loader import Rule
 
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules([
-        Rule(
-            id="desk-on",
-            when="input_boolean.work == 'on'",
-            target="light.desk",
-            set={"state": "on", "brightness_pct": 60},
-        )
-    ])
+    engine.load_rules(
+        [
+            Rule(
+                id="desk-on",
+                when="input_boolean.work == 'on'",
+                target="light.desk",
+                set={"state": "on", "brightness_pct": 60},
+            )
+        ]
+    )
     engine.update_state("input_boolean.work", "on")
     engine.evaluate_all()
     calls = service_calls_for_resolved_target(
@@ -866,14 +880,16 @@ def test_state_drift_matching_state_clears_pending_candidate() -> None:
     from intentional.yaml_loader import Rule
 
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules([
-        Rule(
-            id="desk-on",
-            when="input_boolean.work == 'on'",
-            target="light.desk",
-            set={"state": "on", "brightness_pct": 60},
-        )
-    ])
+    engine.load_rules(
+        [
+            Rule(
+                id="desk-on",
+                when="input_boolean.work == 'on'",
+                target="light.desk",
+                set={"state": "on", "brightness_pct": 60},
+            )
+        ]
+    )
     engine.update_state("input_boolean.work", "on")
     engine.evaluate_all()
     calls = service_calls_for_resolved_target(
@@ -922,14 +938,16 @@ def test_state_drift_changed_candidate_restarts_confirmation_window() -> None:
     from intentional.yaml_loader import Rule
 
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules([
-        Rule(
-            id="desk-on",
-            when="input_boolean.work == 'on'",
-            target="light.desk",
-            set={"state": "on", "brightness_pct": 60},
-        )
-    ])
+    engine.load_rules(
+        [
+            Rule(
+                id="desk-on",
+                when="input_boolean.work == 'on'",
+                target="light.desk",
+                set={"state": "on", "brightness_pct": 60},
+            )
+        ]
+    )
     engine.update_state("input_boolean.work", "on")
     engine.evaluate_all()
     calls = service_calls_for_resolved_target(
@@ -993,14 +1011,16 @@ def test_state_drift_retries_ignored_light_turn_on_without_manual_override() -> 
     from intentional.yaml_loader import Rule
 
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules([
-        Rule(
-            id="desk-on",
-            when="input_boolean.work == 'on'",
-            target="light.desk",
-            set={"state": "on", "brightness_pct": 60},
-        )
-    ])
+    engine.load_rules(
+        [
+            Rule(
+                id="desk-on",
+                when="input_boolean.work == 'on'",
+                target="light.desk",
+                set={"state": "on", "brightness_pct": 60},
+            )
+        ]
+    )
     engine.update_state("input_boolean.work", "on")
     engine.evaluate_all()
     calls = service_calls_for_resolved_target(
@@ -1045,14 +1065,16 @@ def test_state_drift_does_not_emit_manual_override_during_owned_transition() -> 
     from intentional.yaml_loader import Rule
 
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules([
-        Rule(
-            id="ambient",
-            when="input_boolean.work == 'on'",
-            target="light.desk",
-            set={"state": "on", "rgb_color": [75, 180, 255]},
-        )
-    ])
+    engine.load_rules(
+        [
+            Rule(
+                id="ambient",
+                when="input_boolean.work == 'on'",
+                target="light.desk",
+                set={"state": "on", "rgb_color": [75, 180, 255]},
+            )
+        ]
+    )
     engine.update_state("input_boolean.work", "on")
     engine.evaluate_all()
     calls = service_calls_for_resolved_target(
@@ -1095,14 +1117,16 @@ def test_state_drift_emits_manual_override_after_transition_grace_expires() -> N
     from intentional.yaml_loader import Rule
 
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules([
-        Rule(
-            id="ambient",
-            when="input_boolean.work == 'on'",
-            target="light.desk",
-            set={"state": "on", "rgb_color": [75, 180, 255]},
-        )
-    ])
+    engine.load_rules(
+        [
+            Rule(
+                id="ambient",
+                when="input_boolean.work == 'on'",
+                target="light.desk",
+                set={"state": "on", "rgb_color": [75, 180, 255]},
+            )
+        ]
+    )
     engine.update_state("input_boolean.work", "on")
     engine.evaluate_all()
     calls = service_calls_for_resolved_target(
@@ -1198,6 +1222,63 @@ def test_service_plan_does_not_match_conflicting_actual_light_state() -> None:
             state="off",
             attributes={"brightness": 153},
         ),
+    )
+
+
+def test_service_plan_does_not_match_when_expected_attribute_is_absent() -> None:
+    from intentional.ha_adapter import (
+        service_calls_for_resolved_target,
+        service_plan_matches_state,
+        service_plan_signature,
+    )
+
+    signature = service_plan_signature(
+        service_calls_for_resolved_target("light.desk", {"state": "on", "brightness_pct": 60})
+    )
+
+    assert not service_plan_matches_state(
+        signature,
+        SimpleNamespace(entity_id="light.desk", state="on", attributes={}),
+    )
+
+
+def test_service_plan_match_is_unknown_when_expected_attribute_is_unreported() -> None:
+    from intentional.adapter.matcher import ServicePlanMatch, service_plan_match
+    from intentional.ha_adapter import (
+        service_calls_for_resolved_target,
+        service_plan_signature,
+    )
+
+    signature = service_plan_signature(
+        service_calls_for_resolved_target("light.desk", {"state": "on", "effect": "pulse"})
+    )
+
+    assert (
+        service_plan_match(
+            signature,
+            SimpleNamespace(entity_id="light.desk", state="on", attributes={}),
+        )
+        is ServicePlanMatch.UNKNOWN
+    )
+
+
+def test_service_plan_match_is_mismatch_for_reported_contradictory_attribute() -> None:
+    from intentional.adapter.matcher import ServicePlanMatch, service_plan_match
+    from intentional.ha_adapter import (
+        service_calls_for_resolved_target,
+        service_plan_signature,
+    )
+
+    signature = service_plan_signature(
+        service_calls_for_resolved_target("light.desk", {"state": "on", "effect": "pulse"})
+    )
+
+    assert (
+        service_plan_match(
+            signature,
+            SimpleNamespace(entity_id="light.desk", state="on", attributes={"effect": "solid"}),
+        )
+        is ServicePlanMatch.MISMATCH
     )
 
 
@@ -1572,9 +1653,7 @@ def test_update_entity_appends_homeassistant_update_after_target_service() -> No
     assert service_calls_for_resolved_target(
         "sensor.travel_time",
         {"update_entity": True},
-    ) == (
-        ("homeassistant", "update_entity", {"entity_id": "sensor.travel_time"}),
-    )
+    ) == (("homeassistant", "update_entity", {"entity_id": "sensor.travel_time"}),)
 
 
 def test_switch_resolved_value_maps_to_turn_off_service() -> None:
@@ -1630,9 +1709,7 @@ def test_media_player_off_ignores_other_fields() -> None:
     assert service_calls_for_resolved_target(
         "media_player.tv",
         {"state": "off", "volume_level": 0.0},
-    ) == (
-        ("media_player", "turn_off", {"entity_id": "media_player.tv"}),
-    )
+    ) == (("media_player", "turn_off", {"entity_id": "media_player.tv"}),)
 
 
 def test_media_player_state_actions_map_to_transport_services() -> None:
@@ -1787,15 +1864,11 @@ def test_cover_state_maps_to_open_close_service() -> None:
     assert service_calls_for_resolved_target(
         "cover.blinds",
         {"state": "closed"},
-    ) == (
-        ("cover", "close_cover", {"entity_id": "cover.blinds"}),
-    )
+    ) == (("cover", "close_cover", {"entity_id": "cover.blinds"}),)
     assert service_calls_for_resolved_target(
         "cover.blinds",
         {"state": "toggle"},
-    ) == (
-        ("cover", "toggle", {"entity_id": "cover.blinds"}),
-    )
+    ) == (("cover", "toggle", {"entity_id": "cover.blinds"}),)
 
 
 def test_cover_tilt_maps_to_tilt_services() -> None:
@@ -1811,29 +1884,75 @@ def test_cover_tilt_maps_to_tilt_services() -> None:
             {"entity_id": "cover.blinds", "tilt_position": 75},
         ),
     )
+
+
+def test_cover_position_and_tilt_produce_both_service_plans() -> None:
+    from intentional.ha_adapter import service_calls_for_resolved_target
+
+    assert service_calls_for_resolved_target(
+        "cover.blinds", {"position": 25, "tilt_position": 75}
+    ) == (
+        ("cover", "set_cover_tilt_position", {"entity_id": "cover.blinds", "tilt_position": 75}),
+        ("cover", "set_cover_position", {"entity_id": "cover.blinds", "position": 25}),
+    )
     assert service_calls_for_resolved_target(
         "cover.blinds",
         {"state": "tilt_open"},
-    ) == (
-        ("cover", "open_cover_tilt", {"entity_id": "cover.blinds"}),
-    )
+    ) == (("cover", "open_cover_tilt", {"entity_id": "cover.blinds"}),)
     assert service_calls_for_resolved_target(
         "cover.blinds",
         {"state": "tilt_closed"},
-    ) == (
-        ("cover", "close_cover_tilt", {"entity_id": "cover.blinds"}),
-    )
+    ) == (("cover", "close_cover_tilt", {"entity_id": "cover.blinds"}),)
     assert service_calls_for_resolved_target(
         "cover.blinds",
         {"state": "tilt_stop"},
-    ) == (
-        ("cover", "stop_cover_tilt", {"entity_id": "cover.blinds"}),
-    )
+    ) == (("cover", "stop_cover_tilt", {"entity_id": "cover.blinds"}),)
     assert service_calls_for_resolved_target(
         "cover.blinds",
         {"state": "tilt_toggle"},
+    ) == (("cover", "toggle_tilt", {"entity_id": "cover.blinds"}),)
+
+
+@pytest.mark.parametrize("state, position", [("open", 0), ("open", 100), ("closed", 0), ("closed", 25)])
+def test_cover_position_supersedes_open_closed_state(state: str, position: int) -> None:
+    from intentional.ha_adapter import service_calls_for_resolved_target
+
+    assert service_calls_for_resolved_target(
+        "cover.blinds", {"state": state, "position": position}
+    ) == (("cover", "set_cover_position", {"entity_id": "cover.blinds", "position": position}),)
+
+
+def test_cover_position_supersedes_state_while_tilt_coexists() -> None:
+    from intentional.ha_adapter import service_calls_for_resolved_target
+
+    assert service_calls_for_resolved_target(
+        "cover.blinds", {"state": "closed", "position": 25, "tilt_position": 75}
     ) == (
-        ("cover", "toggle_tilt", {"entity_id": "cover.blinds"}),
+        ("cover", "set_cover_tilt_position", {"entity_id": "cover.blinds", "tilt_position": 75}),
+        ("cover", "set_cover_position", {"entity_id": "cover.blinds", "position": 25}),
+    )
+
+
+def test_cover_position_and_tilt_plan_matches_stable_ha_state() -> None:
+    from intentional.ha_adapter import (
+        service_calls_for_resolved_target,
+        service_plan_matches_state,
+        service_plan_signature,
+    )
+
+    signature = service_plan_signature(
+        service_calls_for_resolved_target(
+            "cover.blinds", {"state": "closed", "position": 25, "tilt_position": 75}
+        )
+    )
+
+    assert service_plan_matches_state(
+        signature,
+        SimpleNamespace(
+            entity_id="cover.blinds",
+            state="open",
+            attributes={"current_position": 25, "current_tilt_position": 75},
+        ),
     )
 
 
@@ -1926,15 +2045,28 @@ def test_climate_state_alias_maps_to_hvac_mode() -> None:
     assert service_calls_for_resolved_target(
         "climate.living_room",
         {"state": "off"},
+    ) == (("climate", "turn_off", {"entity_id": "climate.living_room"}),)
+
+
+def test_climate_state_on_and_off_apply_additional_fields_safely() -> None:
+    from intentional.ha_adapter import service_calls_for_resolved_target
+
+    assert service_calls_for_resolved_target(
+        "climate.living_room", {"state": "on", "temperature": 21.5}
     ) == (
+        ("climate", "turn_on", {"entity_id": "climate.living_room"}),
+        ("climate", "set_temperature", {"entity_id": "climate.living_room", "temperature": 21.5}),
+    )
+    assert service_calls_for_resolved_target(
+        "climate.living_room", {"state": "off", "preset_mode": "eco"}
+    ) == (
+        ("climate", "set_preset_mode", {"entity_id": "climate.living_room", "preset_mode": "eco"}),
         ("climate", "turn_off", {"entity_id": "climate.living_room"}),
     )
     assert service_calls_for_resolved_target(
         "climate.living_room",
         {"state": "toggle"},
-    ) == (
-        ("climate", "toggle", {"entity_id": "climate.living_room"}),
-    )
+    ) == (("climate", "toggle", {"entity_id": "climate.living_room"}),)
 
 
 def test_humidifier_resolved_value_maps_to_services() -> None:
@@ -1959,9 +2091,7 @@ def test_humidifier_resolved_value_maps_to_services() -> None:
     assert service_calls_for_resolved_target(
         "humidifier.bedroom",
         {"state": "off"},
-    ) == (
-        ("humidifier", "turn_off", {"entity_id": "humidifier.bedroom"}),
-    )
+    ) == (("humidifier", "turn_off", {"entity_id": "humidifier.bedroom"}),)
 
 
 def test_water_heater_resolved_value_maps_to_services() -> None:
@@ -2003,9 +2133,7 @@ def test_water_heater_resolved_value_maps_to_services() -> None:
     assert service_calls_for_resolved_target(
         "water_heater.utility",
         {"state": "off"},
-    ) == (
-        ("water_heater", "turn_off", {"entity_id": "water_heater.utility"}),
-    )
+    ) == (("water_heater", "turn_off", {"entity_id": "water_heater.utility"}),)
 
 
 def test_number_input_number_and_counter_map_to_set_value_service() -> None:
@@ -2014,9 +2142,7 @@ def test_number_input_number_and_counter_map_to_set_value_service() -> None:
     assert service_calls_for_resolved_target(
         "number.amp_limit",
         {"value": 12.5},
-    ) == (
-        ("number", "set_value", {"entity_id": "number.amp_limit", "value": 12.5}),
-    )
+    ) == (("number", "set_value", {"entity_id": "number.amp_limit", "value": 12.5}),)
     assert service_calls_for_resolved_target(
         "input_number.scene_level",
         {"value": 42},
@@ -2030,15 +2156,11 @@ def test_number_input_number_and_counter_map_to_set_value_service() -> None:
     assert service_calls_for_resolved_target(
         "counter.motion_events",
         {"value": 3},
-    ) == (
-        ("counter", "set_value", {"entity_id": "counter.motion_events", "value": 3}),
-    )
+    ) == (("counter", "set_value", {"entity_id": "counter.motion_events", "value": 3}),)
     assert service_calls_for_resolved_target(
         "counter.motion_events",
         {"state": "3"},
-    ) == (
-        ("counter", "set_value", {"entity_id": "counter.motion_events", "value": 3.0}),
-    )
+    ) == (("counter", "set_value", {"entity_id": "counter.motion_events", "value": 3.0}),)
 
 
 def test_input_number_maps_state_to_increment_and_decrement_services() -> None:
@@ -2072,21 +2194,15 @@ def test_counter_maps_state_to_counter_action_services() -> None:
     assert service_calls_for_resolved_target(
         "counter.motion_events",
         {"state": "increment"},
-    ) == (
-        ("counter", "increment", {"entity_id": "counter.motion_events"}),
-    )
+    ) == (("counter", "increment", {"entity_id": "counter.motion_events"}),)
     assert service_calls_for_resolved_target(
         "counter.motion_events",
         {"state": "decrement"},
-    ) == (
-        ("counter", "decrement", {"entity_id": "counter.motion_events"}),
-    )
+    ) == (("counter", "decrement", {"entity_id": "counter.motion_events"}),)
     assert service_calls_for_resolved_target(
         "counter.motion_events",
         {"state": "reset"},
-    ) == (
-        ("counter", "reset", {"entity_id": "counter.motion_events"}),
-    )
+    ) == (("counter", "reset", {"entity_id": "counter.motion_events"}),)
 
 
 def test_select_and_input_select_map_to_select_option_service() -> None:
@@ -2130,21 +2246,15 @@ def test_select_and_input_select_state_actions_map_to_selection_services() -> No
     assert service_calls_for_resolved_target(
         "select.ev_mode",
         {"state": "previous"},
-    ) == (
-        ("select", "select_previous", {"entity_id": "select.ev_mode"}),
-    )
+    ) == (("select", "select_previous", {"entity_id": "select.ev_mode"}),)
     assert service_calls_for_resolved_target(
         "input_select.house_mode",
         {"state": "first"},
-    ) == (
-        ("input_select", "select_first", {"entity_id": "input_select.house_mode"}),
-    )
+    ) == (("input_select", "select_first", {"entity_id": "input_select.house_mode"}),)
     assert service_calls_for_resolved_target(
         "input_select.house_mode",
         {"state": "last"},
-    ) == (
-        ("input_select", "select_last", {"entity_id": "input_select.house_mode"}),
-    )
+    ) == (("input_select", "select_last", {"entity_id": "input_select.house_mode"}),)
 
 
 def test_input_text_maps_to_set_value_service() -> None:
@@ -2243,9 +2353,7 @@ def test_todo_target_maps_to_todo_services() -> None:
     assert service_calls_for_resolved_target(
         "todo.shopping_list",
         {"todo_action": "clear_completed"},
-    ) == (
-        ("todo", "remove_completed_items", {"entity_id": "todo.shopping_list"}),
-    )
+    ) == (("todo", "remove_completed_items", {"entity_id": "todo.shopping_list"}),)
     assert service_calls_for_resolved_target(
         "todo.shopping_list",
         {"todo_action": "get_items", "status": ["needs_action", "completed"]},
@@ -2324,21 +2432,15 @@ def test_timer_maps_state_to_timer_services() -> None:
     assert service_calls_for_resolved_target(
         "timer.hallway_grace",
         {"state": "paused"},
-    ) == (
-        ("timer", "pause", {"entity_id": "timer.hallway_grace"}),
-    )
+    ) == (("timer", "pause", {"entity_id": "timer.hallway_grace"}),)
     assert service_calls_for_resolved_target(
         "timer.hallway_grace",
         {"state": "idle"},
-    ) == (
-        ("timer", "cancel", {"entity_id": "timer.hallway_grace"}),
-    )
+    ) == (("timer", "cancel", {"entity_id": "timer.hallway_grace"}),)
     assert service_calls_for_resolved_target(
         "timer.hallway_grace",
         {"state": "finish"},
-    ) == (
-        ("timer", "finish", {"entity_id": "timer.hallway_grace"}),
-    )
+    ) == (("timer", "finish", {"entity_id": "timer.hallway_grace"}),)
 
 
 def test_lock_maps_state_to_lock_services() -> None:
@@ -2347,15 +2449,11 @@ def test_lock_maps_state_to_lock_services() -> None:
     assert service_calls_for_resolved_target(
         "lock.front_door",
         {"state": "locked"},
-    ) == (
-        ("lock", "lock", {"entity_id": "lock.front_door"}),
-    )
+    ) == (("lock", "lock", {"entity_id": "lock.front_door"}),)
     assert service_calls_for_resolved_target(
         "lock.front_door",
         {"state": "unlocked"},
-    ) == (
-        ("lock", "unlock", {"entity_id": "lock.front_door"}),
-    )
+    ) == (("lock", "unlock", {"entity_id": "lock.front_door"}),)
 
 
 def test_alarm_control_panel_maps_state_to_alarm_services() -> None:
@@ -2409,15 +2507,11 @@ def test_siren_resolved_value_maps_to_siren_services() -> None:
     assert service_calls_for_resolved_target(
         "siren.entry",
         {"state": "off"},
-    ) == (
-        ("siren", "turn_off", {"entity_id": "siren.entry"}),
-    )
+    ) == (("siren", "turn_off", {"entity_id": "siren.entry"}),)
     assert service_calls_for_resolved_target(
         "siren.entry",
         {"state": "toggle"},
-    ) == (
-        ("siren", "toggle", {"entity_id": "siren.entry"}),
-    )
+    ) == (("siren", "toggle", {"entity_id": "siren.entry"}),)
 
 
 def test_valve_resolved_value_maps_to_valve_services() -> None:
@@ -2426,21 +2520,15 @@ def test_valve_resolved_value_maps_to_valve_services() -> None:
     assert service_calls_for_resolved_target(
         "valve.water_main",
         {"state": "closed"},
-    ) == (
-        ("valve", "close_valve", {"entity_id": "valve.water_main"}),
-    )
+    ) == (("valve", "close_valve", {"entity_id": "valve.water_main"}),)
     assert service_calls_for_resolved_target(
         "valve.water_main",
         {"state": "open"},
-    ) == (
-        ("valve", "open_valve", {"entity_id": "valve.water_main"}),
-    )
+    ) == (("valve", "open_valve", {"entity_id": "valve.water_main"}),)
     assert service_calls_for_resolved_target(
         "valve.water_main",
         {"state": "stop"},
-    ) == (
-        ("valve", "stop_valve", {"entity_id": "valve.water_main"}),
-    )
+    ) == (("valve", "stop_valve", {"entity_id": "valve.water_main"}),)
     assert service_calls_for_resolved_target(
         "valve.water_main",
         {"position": 25},
@@ -2459,27 +2547,19 @@ def test_lawn_mower_resolved_value_maps_to_lawn_mower_services() -> None:
     assert service_calls_for_resolved_target(
         "lawn_mower.backyard",
         {"state": "mowing"},
-    ) == (
-        ("lawn_mower", "start_mowing", {"entity_id": "lawn_mower.backyard"}),
-    )
+    ) == (("lawn_mower", "start_mowing", {"entity_id": "lawn_mower.backyard"}),)
     assert service_calls_for_resolved_target(
         "lawn_mower.backyard",
         {"state": "paused"},
-    ) == (
-        ("lawn_mower", "pause", {"entity_id": "lawn_mower.backyard"}),
-    )
+    ) == (("lawn_mower", "pause", {"entity_id": "lawn_mower.backyard"}),)
     assert service_calls_for_resolved_target(
         "lawn_mower.backyard",
         {"state": "returning"},
-    ) == (
-        ("lawn_mower", "dock", {"entity_id": "lawn_mower.backyard"}),
-    )
+    ) == (("lawn_mower", "dock", {"entity_id": "lawn_mower.backyard"}),)
     assert service_calls_for_resolved_target(
         "lawn_mower.backyard",
         {"state": "dock"},
-    ) == (
-        ("lawn_mower", "dock", {"entity_id": "lawn_mower.backyard"}),
-    )
+    ) == (("lawn_mower", "dock", {"entity_id": "lawn_mower.backyard"}),)
 
 
 def test_remote_resolved_value_maps_to_remote_services() -> None:
@@ -2498,9 +2578,7 @@ def test_remote_resolved_value_maps_to_remote_services() -> None:
     assert service_calls_for_resolved_target(
         "remote.living_room",
         {"state": "off"},
-    ) == (
-        ("remote", "turn_off", {"entity_id": "remote.living_room"}),
-    )
+    ) == (("remote", "turn_off", {"entity_id": "remote.living_room"}),)
     assert service_calls_for_resolved_target(
         "remote.living_room",
         {
@@ -2555,21 +2633,15 @@ def test_alert_target_maps_to_alert_services() -> None:
     assert service_calls_for_resolved_target(
         "alert.lqi_hobbyraum",
         {"state": "on"},
-    ) == (
-        ("alert", "turn_on", {"entity_id": "alert.lqi_hobbyraum"}),
-    )
+    ) == (("alert", "turn_on", {"entity_id": "alert.lqi_hobbyraum"}),)
     assert service_calls_for_resolved_target(
         "alert.lqi_hobbyraum",
         {"state": "off"},
-    ) == (
-        ("alert", "turn_off", {"entity_id": "alert.lqi_hobbyraum"}),
-    )
+    ) == (("alert", "turn_off", {"entity_id": "alert.lqi_hobbyraum"}),)
     assert service_calls_for_resolved_target(
         "alert.lqi_hobbyraum",
         {"state": "toggle"},
-    ) == (
-        ("alert", "toggle", {"entity_id": "alert.lqi_hobbyraum"}),
-    )
+    ) == (("alert", "toggle", {"entity_id": "alert.lqi_hobbyraum"}),)
 
 
 def test_browser_mod_target_maps_to_named_service() -> None:
@@ -2653,9 +2725,7 @@ def test_stateless_service_targets_map_to_named_services() -> None:
     assert service_calls_for_resolved_target(
         "rest_command.ring_fritzbox_phones",
         {"service_data": {"phone": "**9"}},
-    ) == (
-        ("rest_command", "ring_fritzbox_phones", {"phone": "**9"}),
-    )
+    ) == (("rest_command", "ring_fritzbox_phones", {"phone": "**9"}),)
     assert service_calls_for_resolved_target(
         "persistent_notification.create",
         {
@@ -2699,9 +2769,7 @@ def test_stateless_service_targets_map_to_named_services() -> None:
     assert service_calls_for_resolved_target(
         "system_log.write",
         {"message": "Doorbell rang", "service_data": {"level": "info"}},
-    ) == (
-        ("system_log", "write", {"level": "info", "message": "Doorbell rang"}),
-    )
+    ) == (("system_log", "write", {"level": "info", "message": "Doorbell rang"}),)
     assert service_calls_for_resolved_target(
         "scheduler.run_action",
         {
@@ -2723,9 +2791,7 @@ def test_stateless_service_targets_map_to_named_services() -> None:
     assert service_calls_for_resolved_target(
         "scheduler.disable_all",
         {},
-    ) == (
-        ("scheduler", "disable_all", {}),
-    )
+    ) == (("scheduler", "disable_all", {}),)
     assert service_calls_for_resolved_target(
         "cast.show_lovelace_view",
         {
@@ -2749,23 +2815,25 @@ def test_stateless_service_targets_map_to_named_services() -> None:
     assert service_calls_for_resolved_target(
         "intentional.clear",
         {"service_data": {"target": "light.office"}},
-    ) == (
-        ("intentional", "clear", {"target": "light.office"}),
+    ) == (("intentional", "clear", {"target": "light.office"}),)
+    assert (
+        service_calls_for_resolved_target(
+            "intentional.fire",
+            {"service_data": {"target": "light.office", "state": "on"}},
+        )
+        == ()
     )
-    assert service_calls_for_resolved_target(
-        "intentional.fire",
-        {"service_data": {"target": "light.office", "state": "on"}},
-    ) == ()
     assert service_calls_for_resolved_target(
         "homeassistant.update_entity",
         {"service_data": {"entity_id": "sensor.travel_time"}},
-    ) == (
-        ("homeassistant", "update_entity", {"entity_id": "sensor.travel_time"}),
+    ) == (("homeassistant", "update_entity", {"entity_id": "sensor.travel_time"}),)
+    assert (
+        service_calls_for_resolved_target(
+            "homeassistant.restart",
+            {},
+        )
+        == ()
     )
-    assert service_calls_for_resolved_target(
-        "homeassistant.restart",
-        {},
-    ) == ()
     assert service_calls_for_resolved_target(
         "mqtt.publish",
         {
@@ -2788,20 +2856,24 @@ def test_stateless_service_targets_map_to_named_services() -> None:
             },
         ),
     )
-    assert service_calls_for_resolved_target(
-        "mqtt.dump",
-        {"service_data": {"topic": "#"}},
-    ) == ()
+    assert (
+        service_calls_for_resolved_target(
+            "mqtt.dump",
+            {"service_data": {"topic": "#"}},
+        )
+        == ()
+    )
     assert service_calls_for_resolved_target(
         "google_assistant.request_sync",
         {"service_data": {"agent_user_id": "home"}},
-    ) == (
-        ("google_assistant", "request_sync", {"agent_user_id": "home"}),
+    ) == (("google_assistant", "request_sync", {"agent_user_id": "home"}),)
+    assert (
+        service_calls_for_resolved_target(
+            "google_assistant.reload",
+            {},
+        )
+        == ()
     )
-    assert service_calls_for_resolved_target(
-        "google_assistant.reload",
-        {},
-    ) == ()
     assert service_calls_for_resolved_target(
         "assist_satellite.announce",
         {
@@ -2840,15 +2912,18 @@ def test_stateless_service_targets_map_to_named_services() -> None:
             },
         ),
     )
-    assert service_calls_for_resolved_target(
-        "assist_satellite.ask_question",
-        {
-            "service_data": {
-                "entity_id": "assist_satellite.kitchen",
-                "question": "Close the door?",
+    assert (
+        service_calls_for_resolved_target(
+            "assist_satellite.ask_question",
+            {
+                "service_data": {
+                    "entity_id": "assist_satellite.kitchen",
+                    "question": "Close the door?",
+                },
             },
-        },
-    ) == ()
+        )
+        == ()
+    )
     assert service_calls_for_resolved_target(
         "alarmo.arm",
         {
@@ -2886,10 +2961,13 @@ def test_stateless_service_targets_map_to_named_services() -> None:
             {"entity_id": "alarm_control_panel.alarmo", "code": "1234"},
         ),
     )
-    assert service_calls_for_resolved_target(
-        "alarmo.enable_user",
-        {"service_data": {"name": "Guest"}},
-    ) == ()
+    assert (
+        service_calls_for_resolved_target(
+            "alarmo.enable_user",
+            {"service_data": {"name": "Guest"}},
+        )
+        == ()
+    )
     assert service_calls_for_resolved_target(
         "device_tracker.see",
         {
@@ -2934,14 +3012,20 @@ def test_stateless_service_targets_map_to_named_services() -> None:
             {"dev_id": "phone_tobias", "location_name": "home"},
         ),
     )
-    assert service_calls_for_resolved_target(
-        "device_tracker.reload",
-        {"service_data": {}},
-    ) == ()
-    assert service_calls_for_resolved_target(
-        "device_tracker.see",
-        {"location_name": "home"},
-    ) == ()
+    assert (
+        service_calls_for_resolved_target(
+            "device_tracker.reload",
+            {"service_data": {}},
+        )
+        == ()
+    )
+    assert (
+        service_calls_for_resolved_target(
+            "device_tracker.see",
+            {"location_name": "home"},
+        )
+        == ()
+    )
 
 
 def test_camera_target_maps_to_camera_services() -> None:
@@ -3088,21 +3172,15 @@ def test_vacuum_resolved_value_maps_to_action_services() -> None:
     assert service_calls_for_resolved_target(
         "vacuum.downstairs",
         {"state": "paused"},
-    ) == (
-        ("vacuum", "pause", {"entity_id": "vacuum.downstairs"}),
-    )
+    ) == (("vacuum", "pause", {"entity_id": "vacuum.downstairs"}),)
     assert service_calls_for_resolved_target(
         "vacuum.downstairs",
         {"state": "returning"},
-    ) == (
-        ("vacuum", "return_to_base", {"entity_id": "vacuum.downstairs"}),
-    )
+    ) == (("vacuum", "return_to_base", {"entity_id": "vacuum.downstairs"}),)
     assert service_calls_for_resolved_target(
         "vacuum.downstairs",
         {"state": "locate"},
-    ) == (
-        ("vacuum", "locate", {"entity_id": "vacuum.downstairs"}),
-    )
+    ) == (("vacuum", "locate", {"entity_id": "vacuum.downstairs"}),)
 
 
 def test_vacuum_resolved_value_maps_to_area_and_command_services() -> None:
@@ -3146,9 +3224,7 @@ def test_notify_state_alias_maps_to_message() -> None:
     assert service_calls_for_resolved_target(
         "notify.persistent_notification",
         {"state": "Rule fired"},
-    ) == (
-        ("notify", "persistent_notification", {"message": "Rule fired"}),
-    )
+    ) == (("notify", "persistent_notification", {"message": "Rule fired"}),)
 
 
 def test_shopping_list_target_maps_to_shopping_list_services() -> None:
@@ -3157,21 +3233,15 @@ def test_shopping_list_target_maps_to_shopping_list_services() -> None:
     assert service_calls_for_resolved_target(
         "shopping_list.add_item",
         {"name": "Coffee"},
-    ) == (
-        ("shopping_list", "add_item", {"name": "Coffee"}),
-    )
+    ) == (("shopping_list", "add_item", {"name": "Coffee"}),)
     assert service_calls_for_resolved_target(
         "shopping_list.complete_item",
         {"state": "Milk"},
-    ) == (
-        ("shopping_list", "complete_item", {"name": "Milk"}),
-    )
+    ) == (("shopping_list", "complete_item", {"name": "Milk"}),)
     assert service_calls_for_resolved_target(
         "shopping_list.sort",
         {"reverse": True},
-    ) == (
-        ("shopping_list", "sort", {"reverse": True}),
-    )
+    ) == (("shopping_list", "sort", {"reverse": True}),)
 
 
 def test_service_plan_signature_freezes_nested_notify_data() -> None:
@@ -3205,22 +3275,16 @@ def test_button_and_scene_targets_map_to_action_services() -> None:
     assert service_calls_for_resolved_target(
         "button.restart_router",
         {},
-    ) == (
-        ("button", "press", {"entity_id": "button.restart_router"}),
-    )
+    ) == (("button", "press", {"entity_id": "button.restart_router"}),)
     assert service_calls_for_resolved_target(
         "input_button.mark_arrival",
         {"state": "press"},
-    ) == (
-        ("input_button", "press", {"entity_id": "input_button.mark_arrival"}),
-    )
+    ) == (("input_button", "press", {"entity_id": "input_button.mark_arrival"}),)
     assert service_calls_for_resolved_target(
         "scene.movie",
         {},
         transition_ms=1500,
-    ) == (
-        ("scene", "turn_on", {"entity_id": "scene.movie", "transition": 1.5}),
-    )
+    ) == (("scene", "turn_on", {"entity_id": "scene.movie", "transition": 1.5}),)
 
 
 def test_script_target_maps_to_turn_on_with_variables() -> None:
@@ -3239,9 +3303,7 @@ def test_script_target_maps_to_turn_on_with_variables() -> None:
     assert service_calls_for_resolved_target(
         "script.movie_mode",
         {"state": "off"},
-    ) == (
-        ("script", "turn_off", {"entity_id": "script.movie_mode"}),
-    )
+    ) == (("script", "turn_off", {"entity_id": "script.movie_mode"}),)
 
 
 def test_automation_target_maps_to_trigger_or_enable_disable() -> None:
@@ -3260,9 +3322,7 @@ def test_automation_target_maps_to_trigger_or_enable_disable() -> None:
     assert service_calls_for_resolved_target(
         "automation.arrival",
         {"state": "off"},
-    ) == (
-        ("automation", "turn_off", {"entity_id": "automation.arrival"}),
-    )
+    ) == (("automation", "turn_off", {"entity_id": "automation.arrival"}),)
 
 
 def test_update_target_maps_to_update_services() -> None:
@@ -3285,19 +3345,18 @@ def test_update_target_maps_to_update_services() -> None:
     assert service_calls_for_resolved_target(
         "update.router_firmware",
         {"state": "skip"},
-    ) == (
-        ("update", "skip", {"entity_id": "update.router_firmware"}),
-    )
+    ) == (("update", "skip", {"entity_id": "update.router_firmware"}),)
     assert service_calls_for_resolved_target(
         "update.router_firmware",
         {"update_action": "clear_skipped"},
-    ) == (
-        ("update", "clear_skipped", {"entity_id": "update.router_firmware"}),
+    ) == (("update", "clear_skipped", {"entity_id": "update.router_firmware"}),)
+    assert (
+        service_calls_for_resolved_target(
+            "update.router_firmware",
+            {"state": "on"},
+        )
+        == ()
     )
-    assert service_calls_for_resolved_target(
-        "update.router_firmware",
-        {"state": "on"},
-    ) == ()
 
 
 def test_fire_and_forget_targets_do_not_invalidate_when_state_settles() -> None:
@@ -3431,7 +3490,9 @@ async def _apply_resolved_targets(
         reconciler._drift_candidates.update(drift_candidates)
     if service_failure_backoff:
         reconciler._service_failure_backoff.update(service_failure_backoff)
-    tracker = intentional_contexts if intentional_contexts is not None else IntentionalContextTracker()
+    tracker = (
+        intentional_contexts if intentional_contexts is not None else IntentionalContextTracker()
+    )
     adapter = _HAAdapter(hass, tracker)
     now_ms = integration._monotonic_ms()
     await reconciler.apply(engine, adapter, now_ms)
@@ -3465,9 +3526,7 @@ def _restore_pending_withdraws(
         drift_confirmation_ms=1500,
         service_failure_backoff_ms=30_000,
     )
-    reconciler.restore_pending_withdraws(
-        records, linger_rule_ids=linger_rule_ids, now_ms=now_ms
-    )
+    reconciler.restore_pending_withdraws(records, linger_rule_ids=linger_rule_ids, now_ms=now_ms)
     return dict(reconciler._last_resolved)
 
 
@@ -3479,14 +3538,16 @@ async def test_apply_resolved_targets_suppresses_duplicate_calls() -> None:
     from custom_components.intentional._engine.yaml_loader import Rule
 
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules([
-        Rule(
-            id="desk-on",
-            when="input_boolean.work == 'on'",
-            target="light.desk",
-            set={"state": "on", "brightness_pct": 60},
-        )
-    ])
+    engine.load_rules(
+        [
+            Rule(
+                id="desk-on",
+                when="input_boolean.work == 'on'",
+                target="light.desk",
+                set={"state": "on", "brightness_pct": 60},
+            )
+        ]
+    )
     engine.update_state("input_boolean.work", "on")
     engine.evaluate_all()
 
@@ -3528,14 +3589,16 @@ async def test_intentional_context_state_change_does_not_emit_manual_override() 
     from custom_components.intentional.runtime_context import IntentionalContextTracker
 
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules([
-        Rule(
-            id="desk-on",
-            when="input_boolean.work == 'on'",
-            target="light.desk",
-            set={"state": "on", "brightness_pct": 60},
-        )
-    ])
+    engine.load_rules(
+        [
+            Rule(
+                id="desk-on",
+                when="input_boolean.work == 'on'",
+                target="light.desk",
+                set={"state": "on", "brightness_pct": 60},
+            )
+        ]
+    )
     engine.update_state("input_boolean.work", "on")
     engine.evaluate_all()
     reconciler = Reconciliation(
@@ -3563,19 +3626,21 @@ async def test_intentional_context_state_change_does_not_emit_manual_override() 
         set(),
     )
 
-    event = SimpleNamespace(data={
-        "old_state": SimpleNamespace(
-            entity_id="light.desk",
-            state="on",
-            attributes={},
-        ),
-        "new_state": SimpleNamespace(
-            entity_id="light.desk",
-            state="off",
-            attributes={},
-            context=SimpleNamespace(id=context.id, parent_id=None, user_id=None),
-        ),
-    })
+    event = SimpleNamespace(
+        data={
+            "old_state": SimpleNamespace(
+                entity_id="light.desk",
+                state="on",
+                attributes={},
+            ),
+            "new_state": SimpleNamespace(
+                entity_id="light.desk",
+                state="off",
+                attributes={},
+                context=SimpleNamespace(id=context.id, parent_id=None, user_id=None),
+            ),
+        }
+    )
     listener(event)
     listener(event)
 
@@ -3601,14 +3666,16 @@ async def test_apply_resolved_targets_reuses_context_for_service_plan() -> None:
     from custom_components.intentional.runtime_context import IntentionalContextTracker
 
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules([
-        Rule(
-            id="media-on",
-            when="input_boolean.media == 'on'",
-            target="media_player.kitchen",
-            set={"state": "on", "volume_level": 0.35},
-        )
-    ])
+    engine.load_rules(
+        [
+            Rule(
+                id="media-on",
+                when="input_boolean.media == 'on'",
+                target="media_player.kitchen",
+                set={"state": "on", "volume_level": 0.35},
+            )
+        ]
+    )
     engine.update_state("input_boolean.media", "on")
     engine.evaluate_all()
 
@@ -3653,7 +3720,9 @@ def test_intentional_context_cache_is_bounded() -> None:
 
 
 @pytest.mark.asyncio
-async def test_apply_resolved_targets_retries_ignored_activation_after_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_apply_resolved_targets_retries_ignored_activation_after_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
     import custom_components.intentional as integration
@@ -3663,19 +3732,23 @@ async def test_apply_resolved_targets_retries_ignored_activation_after_grace(mon
     now_ms = 1_000
     monkeypatch.setattr(integration, "_monotonic_ms", lambda: now_ms)
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules([
-        Rule(
-            id="desk-on",
-            when="input_boolean.work == 'on'",
-            target="light.desk",
-            set={"state": "on", "brightness_pct": 60},
-        )
-    ])
+    engine.load_rules(
+        [
+            Rule(
+                id="desk-on",
+                when="input_boolean.work == 'on'",
+                target="light.desk",
+                set={"state": "on", "brightness_pct": 60},
+            )
+        ]
+    )
     engine.update_state("input_boolean.work", "on")
     engine.evaluate_all()
 
     services = _FakeServices()
-    states = _FakeStates({"light.desk": SimpleNamespace(entity_id="light.desk", state="off", attributes={})})
+    states = _FakeStates(
+        {"light.desk": SimpleNamespace(entity_id="light.desk", state="off", attributes={})}
+    )
     hass = SimpleNamespace(services=services, states=states)
     last_applied = {}
     last_resolved = {}
@@ -3721,7 +3794,9 @@ async def test_apply_resolved_targets_retries_ignored_activation_after_grace(mon
 
 
 @pytest.mark.asyncio
-async def test_apply_resolved_targets_waits_for_pending_manual_drift(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_apply_resolved_targets_waits_for_pending_manual_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
     import custom_components.intentional as integration
@@ -3735,19 +3810,23 @@ async def test_apply_resolved_targets_waits_for_pending_manual_drift(monkeypatch
     now_ms = 10_000
     monkeypatch.setattr(integration, "_monotonic_ms", lambda: now_ms)
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules([
-        Rule(
-            id="desk-on",
-            when="input_boolean.work == 'on'",
-            target="light.desk",
-            set={"state": "on", "brightness_pct": 60},
-        )
-    ])
+    engine.load_rules(
+        [
+            Rule(
+                id="desk-on",
+                when="input_boolean.work == 'on'",
+                target="light.desk",
+                set={"state": "on", "brightness_pct": 60},
+            )
+        ]
+    )
     engine.update_state("input_boolean.work", "on")
     engine.evaluate_all()
 
     services = _FakeServices()
-    states = _FakeStates({"light.desk": SimpleNamespace(entity_id="light.desk", state="off", attributes={})})
+    states = _FakeStates(
+        {"light.desk": SimpleNamespace(entity_id="light.desk", state="off", attributes={})}
+    )
     hass = SimpleNamespace(services=services, states=states)
     last_applied = {
         "light.desk": service_plan_signature(
@@ -3814,7 +3893,13 @@ async def test_expired_linger_restores_as_pending_withdraw_after_restart() -> No
         now_ms=engine.now_ms(),
     )
     services = _FakeServices()
-    states = _FakeStates({"light.desk": SimpleNamespace(entity_id="light.desk", state="on", attributes={"brightness": 102})})
+    states = _FakeStates(
+        {
+            "light.desk": SimpleNamespace(
+                entity_id="light.desk", state="on", attributes={"brightness": 102}
+            )
+        }
+    )
     hass = SimpleNamespace(services=services, states=states)
 
     await _apply_resolved_targets(hass, engine, {}, last_resolved, {})
@@ -3837,14 +3922,16 @@ async def test_apply_resolved_targets_backs_off_failed_service_signature() -> No
     from custom_components.intentional._engine.yaml_loader import Rule
 
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules([
-        Rule(
-            id="desk-on",
-            when="input_boolean.work == 'on'",
-            target="light.desk",
-            set={"state": "on", "brightness_pct": 60},
-        )
-    ])
+    engine.load_rules(
+        [
+            Rule(
+                id="desk-on",
+                when="input_boolean.work == 'on'",
+                target="light.desk",
+                set={"state": "on", "brightness_pct": 60},
+            )
+        ]
+    )
     engine.update_state("input_boolean.work", "on")
     engine.evaluate_all()
 
@@ -3878,14 +3965,16 @@ async def test_apply_resolved_targets_allows_empty_action_payloads() -> None:
     from custom_components.intentional._engine.yaml_loader import Rule
 
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules([
-        Rule(
-            id="mark-arrival",
-            when="binary_sensor.driveway_motion == 'on'",
-            target="input_button.mark_arrival",
-            set={},
-        )
-    ])
+    engine.load_rules(
+        [
+            Rule(
+                id="mark-arrival",
+                when="binary_sensor.driveway_motion == 'on'",
+                target="input_button.mark_arrival",
+                set={},
+            )
+        ]
+    )
     engine.update_state("binary_sensor.driveway_motion", "on")
     engine.evaluate_all()
 
@@ -3914,7 +4003,8 @@ async def test_apply_resolved_targets_uses_assert_and_withdraw_transitions() -> 
     from custom_components.intentional._engine.yaml_loader import load_rules_from_string
 
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules(load_rules_from_string('''
+    engine.load_rules(
+        load_rules_from_string("""
 - id: desk-presence
   observe:
     binary_sensor.desk_presence: on
@@ -3926,7 +4016,8 @@ async def test_apply_resolved_targets_uses_assert_and_withdraw_transitions() -> 
         transition:
           assert: 2s
           withdraw: 6s
-'''))
+""")
+    )
     services = _FakeServices()
     hass = SimpleNamespace(services=services)
     last_applied = {}
@@ -3957,7 +4048,9 @@ async def test_apply_resolved_targets_uses_assert_and_withdraw_transitions() -> 
 
 
 @pytest.mark.asyncio
-async def test_apply_resolved_targets_does_not_send_change_during_assert_transition(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_apply_resolved_targets_does_not_send_change_during_assert_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
     import custom_components.intentional as integration
@@ -3967,7 +4060,8 @@ async def test_apply_resolved_targets_does_not_send_change_during_assert_transit
     now_ms = 1_000
     monkeypatch.setattr(integration, "_monotonic_ms", lambda: now_ms)
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules(load_rules_from_string('''
+    engine.load_rules(
+        load_rules_from_string("""
 - id: living-room-presence
   observe:
     binary_sensor.living_room_presence: on
@@ -3979,15 +4073,18 @@ async def test_apply_resolved_targets_does_not_send_change_during_assert_transit
         transition:
           assert: 5s
           change: 8s
-'''))
+""")
+    )
     services = _FakeServices()
-    states = _FakeStates({
-        "light.leuchte_sessel_light": SimpleNamespace(
-            entity_id="light.leuchte_sessel_light",
-            state="off",
-            attributes={},
-        ),
-    })
+    states = _FakeStates(
+        {
+            "light.leuchte_sessel_light": SimpleNamespace(
+                entity_id="light.leuchte_sessel_light",
+                state="off",
+                attributes={},
+            ),
+        }
+    )
     hass = SimpleNamespace(services=services, states=states)
     last_applied = {}
     last_resolved = {}
@@ -4038,7 +4135,8 @@ async def test_apply_resolved_targets_withdraws_brightness_only_light_activation
     from custom_components.intentional._engine.yaml_loader import load_rules_from_string
 
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules(load_rules_from_string('''
+    engine.load_rules(
+        load_rules_from_string("""
 - id: evening-light
   observe:
     schedule.living_room: on
@@ -4048,7 +4146,8 @@ async def test_apply_resolved_targets_withdraws_brightness_only_light_activation
       apply:
         transition:
           withdraw: 6s
-'''))
+""")
+    )
     services = _FakeServices()
     hass = SimpleNamespace(services=services)
     last_applied = {}
@@ -4079,7 +4178,9 @@ async def test_apply_resolved_targets_withdraws_brightness_only_light_activation
 
 
 @pytest.mark.asyncio
-async def test_apply_resolved_targets_retries_withdraw_until_state_matches(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_apply_resolved_targets_retries_withdraw_until_state_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
     import custom_components.intentional as integration
@@ -4089,7 +4190,8 @@ async def test_apply_resolved_targets_retries_withdraw_until_state_matches(monke
     now_ms = 1_000
     monkeypatch.setattr(integration, "_monotonic_ms", lambda: now_ms)
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules(load_rules_from_string('''
+    engine.load_rules(
+        load_rules_from_string("""
 - id: desk-presence
   observe:
     binary_sensor.desk_presence: on
@@ -4101,9 +4203,12 @@ async def test_apply_resolved_targets_retries_withdraw_until_state_matches(monke
         transition:
           assert: 2s
           withdraw: 6s
-'''))
+""")
+    )
     services = _FakeServices()
-    states = _FakeStates({"light.desk": SimpleNamespace(entity_id="light.desk", state="off", attributes={})})
+    states = _FakeStates(
+        {"light.desk": SimpleNamespace(entity_id="light.desk", state="off", attributes={})}
+    )
     hass = SimpleNamespace(services=services, states=states)
     last_applied = {}
     last_resolved = {}
@@ -4118,7 +4223,10 @@ async def test_apply_resolved_targets_retries_withdraw_until_state_matches(monke
         last_resolved,
         drift_suppressed_until,
     )
-    states.set("light.desk", SimpleNamespace(entity_id="light.desk", state="on", attributes={"brightness": 102}))
+    states.set(
+        "light.desk",
+        SimpleNamespace(entity_id="light.desk", state="on", attributes={"brightness": 102}),
+    )
 
     engine.update_state("binary_sensor.desk_presence", "off")
     engine.evaluate_all()
@@ -4184,7 +4292,9 @@ async def test_apply_resolved_targets_retries_withdraw_until_state_matches(monke
 
 
 @pytest.mark.asyncio
-async def test_apply_resolved_targets_does_not_fight_user_change_after_withdraw(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_apply_resolved_targets_does_not_fight_user_change_after_withdraw(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
     import custom_components.intentional as integration
@@ -4194,7 +4304,8 @@ async def test_apply_resolved_targets_does_not_fight_user_change_after_withdraw(
     now_ms = 1_000
     monkeypatch.setattr(integration, "_monotonic_ms", lambda: now_ms)
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules(load_rules_from_string('''
+    engine.load_rules(
+        load_rules_from_string("""
 - id: desk-presence
   observe:
     binary_sensor.desk_presence: on
@@ -4205,9 +4316,12 @@ async def test_apply_resolved_targets_does_not_fight_user_change_after_withdraw(
       apply:
         transition:
           withdraw: 6s
-'''))
+""")
+    )
     services = _FakeServices()
-    states = _FakeStates({"light.desk": SimpleNamespace(entity_id="light.desk", state="off", attributes={})})
+    states = _FakeStates(
+        {"light.desk": SimpleNamespace(entity_id="light.desk", state="off", attributes={})}
+    )
     hass = SimpleNamespace(services=services, states=states)
     last_applied = {}
     last_resolved = {}
@@ -4224,7 +4338,10 @@ async def test_apply_resolved_targets_does_not_fight_user_change_after_withdraw(
         drift_suppressed_until,
         drift_candidates,
     )
-    states.set("light.desk", SimpleNamespace(entity_id="light.desk", state="on", attributes={"brightness": 102}))
+    states.set(
+        "light.desk",
+        SimpleNamespace(entity_id="light.desk", state="on", attributes={"brightness": 102}),
+    )
 
     engine.update_state("binary_sensor.desk_presence", "off")
     engine.evaluate_all()
@@ -4262,7 +4379,9 @@ async def test_apply_resolved_targets_does_not_fight_user_change_after_withdraw(
 
 
 @pytest.mark.asyncio
-async def test_apply_resolved_targets_reasserts_when_rule_reactivates_during_pending_withdraw(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_apply_resolved_targets_reasserts_when_rule_reactivates_during_pending_withdraw(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     pytest.importorskip("homeassistant", reason="homeassistant not installed")
 
     import custom_components.intentional as integration
@@ -4272,7 +4391,8 @@ async def test_apply_resolved_targets_reasserts_when_rule_reactivates_during_pen
     now_ms = 1_000
     monkeypatch.setattr(integration, "_monotonic_ms", lambda: now_ms)
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules(load_rules_from_string('''
+    engine.load_rules(
+        load_rules_from_string("""
 - id: desk-presence
   observe:
     binary_sensor.desk_presence: on
@@ -4285,9 +4405,12 @@ async def test_apply_resolved_targets_reasserts_when_rule_reactivates_during_pen
           assert: 2s
           change: 4s
           withdraw: 6s
-'''))
+""")
+    )
     services = _FakeServices()
-    states = _FakeStates({"light.desk": SimpleNamespace(entity_id="light.desk", state="off", attributes={})})
+    states = _FakeStates(
+        {"light.desk": SimpleNamespace(entity_id="light.desk", state="off", attributes={})}
+    )
     hass = SimpleNamespace(services=services, states=states)
     last_applied = {}
     last_resolved = {}
@@ -4302,7 +4425,10 @@ async def test_apply_resolved_targets_reasserts_when_rule_reactivates_during_pen
         last_resolved,
         drift_suppressed_until,
     )
-    states.set("light.desk", SimpleNamespace(entity_id="light.desk", state="on", attributes={"brightness": 102}))
+    states.set(
+        "light.desk",
+        SimpleNamespace(entity_id="light.desk", state="on", attributes={"brightness": 102}),
+    )
 
     engine.update_state("binary_sensor.desk_presence", "off")
     engine.evaluate_all()
@@ -4354,7 +4480,8 @@ async def test_apply_resolved_targets_withdraw_reconciles_to_revealed_intent() -
     from custom_components.intentional._engine.yaml_loader import load_rules_from_string
 
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules(load_rules_from_string('''
+    engine.load_rules(
+        load_rules_from_string("""
 - id: ambient
   observe:
     input_boolean.ambient: on
@@ -4378,7 +4505,8 @@ async def test_apply_resolved_targets_withdraw_reconciles_to_revealed_intent() -
         transition:
           assert: 2s
           withdraw: 6s
-'''))
+""")
+    )
     services = _FakeServices()
     hass = SimpleNamespace(services=services)
     last_applied = {}
@@ -4417,7 +4545,8 @@ async def test_apply_resolved_targets_uses_assert_when_stronger_intent_replaces_
     from custom_components.intentional._engine.yaml_loader import load_rules_from_string
 
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules(load_rules_from_string('''
+    engine.load_rules(
+        load_rules_from_string("""
 - id: ambient
   observe:
     input_boolean.ambient: on
@@ -4441,7 +4570,8 @@ async def test_apply_resolved_targets_uses_assert_when_stronger_intent_replaces_
         transition:
           assert: 2s
           withdraw: 6s
-'''))
+""")
+    )
     services = _FakeServices()
     hass = SimpleNamespace(services=services)
     last_applied = {}

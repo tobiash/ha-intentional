@@ -284,6 +284,23 @@ class TestCompositionOrder:
         # 100 -> offset to 80 -> multiply by 0.5 = 40
         assert result.value == {"brightness_pct": 40}
 
+    def test_contradictory_bounds_use_cap_and_report_diagnostic(self) -> None:
+        intent = Intent(target="light.x", set={"brightness_pct": 50})
+        cap = Intent(target="light.x", cap={"brightness_pct": 30})
+        floor = Intent(target="light.x", floor={"brightness_pct": 70})
+
+        result = resolve_intents("light.x", [floor, intent, cap])
+
+        assert result is not None
+        assert result.value == {"brightness_pct": 30}
+        assert result.diagnostics == ({
+            "kind": "contradictory_bounds",
+            "field": "brightness_pct",
+            "cap": 30,
+            "floor": 70,
+            "policy": "cap_wins",
+        },)
+
 
 # ── Device bounds ────────────────────────────────────────────────────
 

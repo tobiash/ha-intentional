@@ -144,6 +144,7 @@ class Intent:
     reason: str = ""
     rule_id: str = ""
     ignore_when: bool = False
+    selector_generated: bool = False
     created_at_ms: int = field(default_factory=_now_ms)
     animation: AnimationSpec | None = None
     generators: dict[str, ValueGeneratorSpec] = field(default_factory=dict)

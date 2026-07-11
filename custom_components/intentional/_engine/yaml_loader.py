@@ -87,6 +87,7 @@ class _RawRuleDef:
     file: Path | None
     line: int | None
     scenes: dict[str, Any] = field(default_factory=dict)
+    authored_rule_id: str | None = None
 
 
 def _validate_rule(
@@ -94,6 +95,7 @@ def _validate_rule(
     *,
     file: Path | None = None,
     line: int | None = None,
+    authored_rule_id: str | None = None,
 ) -> Rule:
     """Validate a single rule dict and return a Rule object.
 
@@ -279,19 +281,25 @@ def _validate_rule(
     animation = _parse_animation(emit.get("animation"), rule_id, file, line)
     generators = _parse_generators(emit.get("generate"), rule_id, file, line)
 
+    emit_mappings = {
+        name: _normalize_emit_mapping(emit.get(name, {}))
+        for name in _MERGED_EMIT_DICTS
+    }
+
     return Rule(
         id=rule_id,
         when=when,
+        authored_rule_id=authored_rule_id or rule_id,
         for_ms=for_ms,
         for_entity=for_entity,
         for_entity_unit=for_entity_unit,
         target="" if effect_only else target or "",
         scene=scene,
-        set=_normalize_emit_mapping(emit.get("set", {})),
-        cap=_normalize_emit_mapping(emit.get("cap", {})),
-        floor=_normalize_emit_mapping(emit.get("floor", {})),
-        offset=_normalize_emit_mapping(emit.get("offset", {})),
-        multiply=_normalize_emit_mapping(emit.get("multiply", {})),
+        set=emit_mappings["set"],
+        cap=emit_mappings["cap"],
+        floor=emit_mappings["floor"],
+        offset=emit_mappings["offset"],
+        multiply=emit_mappings["multiply"],
         merge=bool(emit.get("merge", False)),
         transition_ms=transition_ms,
         transition_assert_ms=transition_assert_ms,
@@ -326,6 +334,10 @@ def _validate_rule(
 
 def _normalize_emit_mapping(raw: Any) -> dict[str, Any]:
     """Return an emit mapping with YAML-coerced HA strings normalized."""
+    if not isinstance(raw, dict):
+        raise RuleLoadError(
+            f"Intent modifier must be a mapping, got {type(raw).__name__}"
+        )
     mapping = dict(raw)
     if mapping.get("state") is True:
         mapping["state"] = "on"
@@ -839,7 +851,7 @@ def _parse_optional_duration(
     if isinstance(value, str):
         try:
             return parse_duration(value)
-        except ValueError as e:
+        except (TypeError, ValueError) as e:
             raise RuleLoadError(f"{label}: {e}", file=file, line=line) from e
     raise RuleLoadError(
         f"{label} must be an integer (ms) or a duration string, got {type(value).__name__}",
@@ -1412,7 +1424,12 @@ def _resolve_rule_inheritance(raw_rules: list[_RawRuleDef]) -> list[_RawRuleDef]
     for raw_def in raw_rules:
         rule_id = raw_def.raw.get("id")
         if isinstance(rule_id, str) and rule_id:
-            output.append(_RawRuleDef(raw=resolve(rule_id), file=raw_def.file, line=raw_def.line))
+            output.append(_RawRuleDef(
+                raw=resolve(rule_id),
+                file=raw_def.file,
+                line=raw_def.line,
+                authored_rule_id=raw_def.authored_rule_id,
+            ))
         else:
             output.append(raw_def)
     return output
@@ -1464,7 +1481,12 @@ def _validate_raw_rule_defs(raw_rules: list[_RawRuleDef]) -> list[Rule]:
     for raw_def in resolved_rules:
         expanded_rules.extend(_expand_vnext_multi_target_rule(raw_def))
     rules = [
-        _validate_rule(raw_def.raw, file=raw_def.file, line=raw_def.line)
+        _validate_rule(
+            raw_def.raw,
+            file=raw_def.file,
+            line=raw_def.line,
+            authored_rule_id=raw_def.authored_rule_id,
+        )
         for raw_def in expanded_rules
     ]
 
@@ -1496,7 +1518,13 @@ def _expand_vnext_scene_includes(
     expanded_intent = _expand_intent_includes(intent, scenes, stack=())
     expanded = deepcopy(raw)
     expanded["intent"] = expanded_intent
-    return _RawRuleDef(raw=expanded, file=raw_def.file, line=raw_def.line, scenes=raw_def.scenes)
+    return _RawRuleDef(
+        raw=expanded,
+        file=raw_def.file,
+        line=raw_def.line,
+        scenes=raw_def.scenes,
+        authored_rule_id=raw_def.authored_rule_id,
+    )
 
 
 def _expand_intent_includes(
@@ -1584,8 +1612,20 @@ def _expand_vnext_multi_target_rule(raw_def: _RawRuleDef) -> list[_RawRuleDef]:
     for target in target_keys:
         item = deepcopy(raw)
         item["id"] = f"{rule_id}:{target}"
-        item["intent"] = {target: deepcopy(intent[target])}
-        expanded.append(_RawRuleDef(raw=item, file=raw_def.file, line=raw_def.line))
+        item_intent = {target: deepcopy(intent[target])}
+        if "suppress" in intent:
+            item_intent["suppress"] = deepcopy(intent["suppress"])
+        if not expanded and "select" in intent:
+            item_intent["select"] = deepcopy(intent["select"])
+        item["intent"] = item_intent
+        if expanded:
+            item.pop("effect", None)
+        expanded.append(_RawRuleDef(
+            raw=item,
+            file=raw_def.file,
+            line=raw_def.line,
+            authored_rule_id=rule_id if isinstance(rule_id, str) else None,
+        ))
     return expanded
 
 

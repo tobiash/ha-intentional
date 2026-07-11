@@ -41,6 +41,7 @@ class Rule:
 
     id: str
     when: str
+    authored_rule_id: str = ""
     for_ms: int = 0
     for_entity: str | None = None
     for_entity_unit: str = "s"

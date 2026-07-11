@@ -7,28 +7,47 @@ by Reconciliation to decide whether to skip a redundant call or promote drift.
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any
 
-from ..registry import ALARM_STATE_SERVICES
+from ..registry import ALARM_STATE_SERVICES, HA_SERVICE_FIELD_STATE_ATTRIBUTES
 from . import ServicePlanSignature
+
+_MISSING = object()
+
+
+class ServicePlanMatch(Enum):
+    """How conclusively actual HA state agrees with a service plan."""
+
+    MATCH = "match"
+    MISMATCH = "mismatch"
+    UNKNOWN = "unknown"
 
 
 def service_plan_matches_state(plan: ServicePlanSignature, state: Any) -> bool:
     """Return True if an HA state object is consistent with a cached plan."""
+    return service_plan_match(plan, state) is ServicePlanMatch.MATCH
+
+
+def service_plan_match(plan: ServicePlanSignature, state: Any) -> ServicePlanMatch:
+    """Compare a plan with state without treating unreported fields as conflicts."""
+    unknown = False
     for domain, service, data_items in plan:
         data = dict(data_items)
         if data.get("entity_id") != state.entity_id:
-            return False
+            return ServicePlanMatch.MISMATCH
         expected_states = _expected_states_for_service(domain, service)
         if expected_states is not None and str(state.state) not in expected_states:
-            return False
+            return ServicePlanMatch.MISMATCH
         for field, expected in data.items():
             if field in {"entity_id", "transition"}:
                 continue
             actual = _state_field_value(state, field)
-            if actual is not None and not _values_match(actual, expected, field=field):
-                return False
-    return True
+            if actual is _MISSING or actual is None:
+                unknown = True
+            elif not _values_match(actual, expected, field=field):
+                return ServicePlanMatch.MISMATCH
+    return ServicePlanMatch.UNKNOWN if unknown else ServicePlanMatch.MATCH
 
 
 def _expected_states_for_service(domain: str, service: str) -> set[str] | None:
@@ -148,20 +167,12 @@ def _state_field_value(state: Any, field: str) -> Any:
     attributes = getattr(state, "attributes", {})
     if field in attributes:
         return attributes[field]
-    if field == "brightness_pct" and "brightness" in attributes:
-        return round(float(attributes["brightness"]) * 100 / 255)
-    if field == "color_temp_kelvin" and "color_temp_k" in attributes:
-        return attributes["color_temp_k"]
-    if field == "color_temp" and "color_temp_mired" in attributes:
-        return attributes["color_temp_mired"]
-    if field == "position" and "current_position" in attributes:
-        return attributes["current_position"]
-    if field == "position" and field in attributes:
-        return attributes[field]
-    if field == "tilt_position" and "current_tilt_position" in attributes:
-        return attributes["current_tilt_position"]
-    if field == "tilt_position" and field in attributes:
-        return attributes[field]
+    for attribute in HA_SERVICE_FIELD_STATE_ATTRIBUTES.get(field, ()):
+        if attribute in attributes:
+            actual = attributes[attribute]
+            if field == "brightness_pct":
+                return round(float(actual) * 100 / 255)
+            return actual
     if field == "hvac_mode":
         return state.state
     if field in {"option", "value"}:
@@ -172,25 +183,13 @@ def _state_field_value(state: Any, field: str) -> Any:
         return attributes[field]
     if field == "duration" and field in attributes:
         return attributes[field]
-    if field == "humidity" and "target_humidity" in attributes:
-        return attributes["target_humidity"]
     if field == "operation_mode":
         return attributes.get("operation_mode", state.state)
-    if field == "temperature":
-        if "target_temperature" in attributes:
-            return attributes["target_temperature"]
-        if field in attributes:
-            return attributes[field]
     if field == "away_mode" and field in attributes:
         return attributes[field]
     if field == "fan_speed" and field in attributes:
         return attributes[field]
-    if field == "activity":
-        if "current_activity" in attributes:
-            return attributes["current_activity"]
-        if field in attributes:
-            return attributes[field]
-    return None
+    return _MISSING
 
 
 def _values_match(actual: Any, expected: Any, *, field: str | None = None) -> bool:

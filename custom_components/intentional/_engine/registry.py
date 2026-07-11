@@ -32,3 +32,16 @@ ALARM_STATE_SERVICES: dict[str, str] = {
     "disarmed": "alarm_disarm",
     "disarm": "alarm_disarm",
 }
+
+# Service fields whose resulting value is reported under a different HA state
+# attribute. Fields not listed here may still be reported under their own name.
+HA_SERVICE_FIELD_STATE_ATTRIBUTES: dict[str, tuple[str, ...]] = {
+    "activity": ("current_activity",),
+    "brightness_pct": ("brightness",),
+    "color_temp": ("color_temp_mired",),
+    "color_temp_kelvin": ("color_temp_k",),
+    "humidity": ("target_humidity",),
+    "position": ("current_position",),
+    "temperature": ("target_temperature",),
+    "tilt_position": ("current_tilt_position",),
+}

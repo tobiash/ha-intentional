@@ -350,6 +350,143 @@ rules:
         assert engine.resolve("light.floor_lamp").value == {"state": "off"}
         assert engine.resolve("light.table_lamp").value == {"state": "off"}
 
+    def test_active_intent_selector_refreshes_changed_targets(self) -> None:
+        from intentional.yaml_loader import load_rules_from_string
+
+        selected = ["light.floor_lamp"]
+        engine = Engine(
+            clock_fn=lambda: 1000,
+            selector_resolver=lambda _selector: list(selected),
+        )
+        engine.load_rules(load_rules_from_string('''
+- id: living-room-off
+  intent:
+    select:
+      - domain: light
+        state: off
+'''))
+        engine.evaluate_all()
+        selected[:] = ["light.table_lamp"]
+
+        engine.evaluate_all()
+
+        assert engine.resolve("light.floor_lamp") is None
+        assert engine.resolve("light.table_lamp").value == {"state": "off"}
+
+    def test_overlapping_intent_selectors_spawn_one_intent_per_target(self) -> None:
+        from intentional.yaml_loader import load_rules_from_string
+
+        now = 1_000
+        engine = Engine(
+            clock_fn=lambda: now,
+            selector_resolver=lambda _selector: ["light.floor_lamp"],
+        )
+        engine.load_rules(load_rules_from_string('''
+- id: base-brightness
+  intent:
+    light.floor_lamp:
+      brightness_pct: 100
+- id: overlapping-dimmers
+  intent:
+    select:
+      - domain: light
+        area: living_room
+        brightness_pct: {offset: 10, multiply: 0.5}
+        ttl: 10s
+      - domain: light
+        label: dimmable
+        brightness_pct: {offset: 10, multiply: 0.5}
+        ttl: 10s
+'''))
+
+        engine.evaluate_all()
+
+        intents = [
+            intent
+            for intent in engine.list_active_intents("light.floor_lamp")
+            if intent.selector_generated
+        ]
+        assert len(intents) == 1
+        assert intents[0].selector_generated is True
+        assert intents[0].created_at_ms == now
+        assert intents[0].offset == {"brightness_pct": 10}
+        assert intents[0].multiply == {"brightness_pct": 0.5}
+        assert engine.resolve("light.floor_lamp").value["brightness_pct"] == 55
+
+        now = 2_000
+        engine.evaluate_all()
+
+        refreshed = [
+            intent
+            for intent in engine.list_active_intents("light.floor_lamp")
+            if intent.selector_generated
+        ]
+        assert len(refreshed) == 1
+        assert refreshed[0].created_at_ms == 1_000
+        records = engine.export_lifecycle_records()
+        matching_records = [
+            record
+            for record in records["intents"]
+            if record["target"] == "light.floor_lamp" and record["selector_generated"]
+        ]
+        assert len(matching_records) == 1
+        assert matching_records[0]["selector_generated"] is True
+
+    def test_selector_refresh_preserves_explicit_target_intent_and_lifecycle(self) -> None:
+        from intentional.yaml_loader import load_rules_from_string
+
+        selected = ["light.floor_lamp"]
+        now = 1_000
+        engine = Engine(
+            clock_fn=lambda: now,
+            selector_resolver=lambda _selector: list(selected),
+        )
+        engine.load_rules(load_rules_from_string('''
+- id: living-room-off
+  while:
+    input_boolean.active: on
+  intent:
+    select:
+      - domain: light
+        state: off
+        ttl: 10s
+    light.table_lamp:
+      state: off
+      ttl: 10s
+'''))
+        engine.update_state("input_boolean.active", "on")
+        engine.evaluate_all()
+        targets = ("light.table_lamp", "light.floor_lamp", "light.ceiling")
+        original = {
+            intent.target: intent.created_at_ms
+            for target in targets
+            for intent in engine.list_active_intents(target)
+        }
+        selected[:] = ["light.floor_lamp", "light.ceiling"]
+        now = 2_000
+
+        engine.evaluate_all()
+
+        active = {
+            intent.target: intent
+            for target in targets
+            for intent in engine.list_active_intents(target)
+        }
+        assert set(active) == {"light.table_lamp", "light.floor_lamp", "light.ceiling"}
+        assert active["light.table_lamp"].created_at_ms == original["light.table_lamp"]
+        assert active["light.floor_lamp"].created_at_ms == original["light.floor_lamp"]
+        assert active["light.ceiling"].created_at_ms == now
+        records = engine.export_lifecycle_records()
+        generated = {
+            record["target"]: record["selector_generated"]
+            for record in records["intents"]
+        }
+        assert generated == {
+            "light.table_lamp": False,
+            "light.floor_lamp": True,
+            "light.ceiling": True,
+        }
+
     def test_observe_select_any_fires_when_selected_entity_matches(self) -> None:
         from intentional.yaml_loader import load_rules_from_string
 
@@ -1012,6 +1149,49 @@ rules:
         resolved = engine.resolve("light.room")
         assert resolved is not None
         assert resolved.value == {"brightness_pct": 20}
+
+    def test_blocks_authored_id_suppresses_all_expansions_without_prefix_collision(self) -> None:
+        from intentional.yaml_loader import load_rules_from_string
+
+        engine = Engine()
+        engine.load_rules(load_rules_from_string('''
+- id: movie-mode
+  while:
+    input_boolean.active: on
+  intent:
+    suppress:
+      rules: [ambient]
+    light.movie:
+      state: on
+- id: ambient
+  while:
+    input_boolean.active: on
+  intent:
+    light.sofa:
+      state: on
+    light.table:
+      state: on
+- id: ambient-extra
+  while:
+    input_boolean.active: on
+  intent:
+    light.extra:
+      state: on
+- id: ambient:manual
+  while:
+    input_boolean.active: on
+  intent:
+    light.manual:
+      state: on
+'''))
+        engine.update_state("input_boolean.active", "on")
+
+        engine.evaluate_all()
+
+        assert engine.resolve("light.sofa") is None
+        assert engine.resolve("light.table") is None
+        assert engine.resolve("light.extra") is not None
+        assert engine.resolve("light.manual") is not None
 
     def test_blocks_withdraws_previously_active_intent(self) -> None:
         engine = Engine()

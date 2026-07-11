@@ -634,10 +634,62 @@ rules:
             "movie-mode:light.living_room",
             "movie-mode:cover.blinds",
         ]
+        assert [rule.authored_rule_id for rule in rules] == ["movie-mode", "movie-mode"]
         assert [rule.target for rule in rules] == ["light.living_room", "cover.blinds"]
         assert all(rule.when == 'input_boolean.movie_mode == "on"' for rule in rules)
         assert rules[0].set == {"brightness_pct": 15}
         assert rules[1].set == {"state": "closed"}
+
+    def test_multi_target_preserves_suppress_and_emits_effect_and_select_once(self) -> None:
+        rules = load_rules_from_string("""
+- id: movie-mode
+  observe:
+    input_boolean.movie_mode: on
+  intent:
+    suppress:
+      rules: [daylight]
+    select:
+      - domain: light
+        area: living_room
+        brightness_pct: 20
+    light.sofa:
+      state: on
+    cover.blinds:
+      state: closed
+  effect:
+    service: notify.notify
+    data: {message: Movie mode}
+""")
+
+        assert [rule.blocks for rule in rules] == [("daylight",), ("daylight",)]
+        assert [len(rule.effects) for rule in rules] == [1, 0]
+        assert [len(rule.intent_selectors) for rule in rules] == [1, 0]
+
+    @pytest.mark.parametrize("modifier", ["set", "cap", "floor", "offset", "multiply"])
+    def test_emit_modifier_must_be_mapping(self, modifier: str) -> None:
+        with pytest.raises(RuleLoadError, match="modifier must be a mapping"):
+            load_rules_from_string(f"""
+- id: malformed
+  when: "true"
+  emit:
+    target: light.office
+    {modifier}: 42
+""")
+
+    def test_invalid_generator_weight_fails_as_rule_validation(self) -> None:
+        with pytest.raises(RuleLoadError, match="invalid generator.*weights"):
+            load_rules_from_string("""
+- id: malformed-generator
+  when: "true"
+  emit:
+    target: light.office
+    generate:
+      brightness_pct:
+        kind: weighted_sample
+        from: [10, 20]
+        weights: [one, two]
+        every: 1s
+""")
 
     def test_minimal_valid_rule(self) -> None:
         rules = load_rules_from_string("""

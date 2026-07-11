@@ -89,6 +89,7 @@ class ResolvedIntent:
     animation: AnimationSpec | None = None
     ttl_remaining_ms: int | None = None
     all_active_intents: tuple[Intent, ...] = field(default_factory=tuple)
+    diagnostics: tuple[dict[str, Any], ...] = field(default_factory=tuple)
 
 
 def resolve_intents(
@@ -199,15 +200,34 @@ def resolve_intents(
         if field_name in result:
             result[field_name] = _clamp(result[field_name], lo, hi)
 
-    # Re-apply caps and floors once more, in case bounds let values through
-    # that the caps/floors should still catch.
+    # Re-apply floors then caps. Contradictory ceilings win because they are
+    # safety constraints that should never be exceeded.
+    diagnostics: list[dict[str, Any]] = []
+    caps: dict[str, Any] = {}
+    floors: dict[str, Any] = {}
     for intent in active:
-        for field_name, cap_value in intent.cap.items():
-            if field_name in result:
-                result[field_name] = _min_clamp(result[field_name], cap_value)
         for field_name, floor_value in intent.floor.items():
+            floors[field_name] = _max_clamp(floors.get(field_name, floor_value), floor_value)
             if field_name in result:
                 result[field_name] = _max_clamp(result[field_name], floor_value)
+    for intent in active:
+        for field_name, cap_value in intent.cap.items():
+            caps[field_name] = _min_clamp(caps.get(field_name, cap_value), cap_value)
+            if field_name in result:
+                result[field_name] = _min_clamp(result[field_name], cap_value)
+    for field_name in sorted(caps.keys() & floors.keys()):
+        try:
+            contradictory = floors[field_name] > caps[field_name]
+        except TypeError:
+            contradictory = False
+        if contradictory:
+            diagnostics.append({
+                "kind": "contradictory_bounds",
+                "field": field_name,
+                "cap": caps[field_name],
+                "floor": floors[field_name],
+                "policy": "cap_wins",
+            })
 
     # Compute TTL remaining for the winning intent
     ttl_remaining_ms: int | None = None
@@ -225,6 +245,7 @@ def resolve_intents(
         animation=winner.animation,
         ttl_remaining_ms=ttl_remaining_ms,
         all_active_intents=tuple(active),
+        diagnostics=tuple(diagnostics),
     )
 
 

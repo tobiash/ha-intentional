@@ -43,6 +43,11 @@ class ValueGeneratorSpec:
             raise ValueError(f"{self.kind} generator requires a non-empty `from` list")
         if self.kind == "weighted_sample" and self.weights and len(self.weights) != len(self.values):
             raise ValueError("weighted_sample `weights` length must match `from`")
+        if self.kind == "weighted_sample" and self.weights:
+            if any(weight < 0 for weight in self.weights):
+                raise ValueError("weighted_sample `weights` must be non-negative")
+            if not any(self.weights):
+                raise ValueError("weighted_sample `weights` must contain a positive value")
         if self.kind == "noise" and self.minimum is not None and self.maximum is not None and self.maximum < self.minimum:
             raise ValueError("noise `max` must be >= `min`")
         if self.every_min_ms <= 0:
@@ -265,10 +270,16 @@ def _parse_weights(raw: dict[str, Any], values: list[Any]) -> list[float]:
     if explicit is not None:
         if not isinstance(explicit, list):
             raise ValueError("generator `weights` must be a list")
-        return [float(weight) for weight in explicit]
+        try:
+            return [float(weight) for weight in explicit]
+        except (TypeError, ValueError) as e:
+            raise ValueError("generator `weights` must contain only numbers") from e
     from_values = raw.get("from")
     if isinstance(from_values, list) and from_values and all(isinstance(item, dict) for item in from_values):
-        return [float(item.get("weight", 1)) for item in from_values]
+        try:
+            return [float(item.get("weight", 1)) for item in from_values]
+        except (TypeError, ValueError) as e:
+            raise ValueError("generator inline `weight` values must be numbers") from e
     return []
 
 

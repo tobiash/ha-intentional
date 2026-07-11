@@ -399,6 +399,7 @@ def test_register_api_registers_history_before_filename_route() -> None:
 
     registered = []
     hass = SimpleNamespace(
+        data={},
         http=SimpleNamespace(register_view=lambda view: registered.append(view.url))
     )
 
@@ -410,6 +411,70 @@ def test_register_api_registers_history_before_filename_route() -> None:
     assert registered.index("/api/intentional/rules/document") < registered.index(
         "/api/intentional/rules/{filename:.+}"
     )
+
+
+def test_register_api_is_idempotent() -> None:
+    from custom_components.intentional.api import register_api
+
+    registered = []
+    hass = SimpleNamespace(
+        data={},
+        http=SimpleNamespace(register_view=lambda view: registered.append(view.url)),
+    )
+
+    register_api(hass)
+    count = len(registered)
+    register_api(hass)
+
+    assert len(registered) == count
+
+
+@pytest.mark.parametrize(
+    ("view_name", "method_name", "args"),
+    [
+        ("IntentionalRuleDocumentView", "put", ()),
+        ("IntentionalRuleDocumentView", "delete", ()),
+        ("IntentionalRuleView", "put", ("rules.yaml",)),
+        ("IntentionalRuleView", "delete", ("rules.yaml",)),
+        ("IntentionalRuleByIDView", "patch", ("rule-1",)),
+        ("IntentionalRuleRollbackView", "post", ()),
+        ("IntentionalReloadView", "post", ()),
+    ],
+)
+async def test_mutating_endpoints_require_admin(
+    view_name: str,
+    method_name: str,
+    args: tuple[str, ...],
+) -> None:
+    from homeassistant.exceptions import Unauthorized
+
+    from custom_components.intentional import api
+
+    request = {"hass_user": SimpleNamespace(is_admin=False)}
+    method = getattr(getattr(api, view_name)(), method_name)
+
+    with pytest.raises(Unauthorized):
+        await method(request, *args)
+
+
+async def test_json_object_endpoints_reject_non_object_json() -> None:
+    from custom_components.intentional.api import _json_object
+
+    request = SimpleNamespace(json=lambda: None)
+
+    async def json_body() -> list[object]:
+        return []
+
+    request.json = json_body
+    data, response = await _json_object(request)
+
+    assert data is None
+    assert response is not None
+    assert response.status == 400
+    assert json.loads(response.body.decode()) == {
+        "error": "Request body must be a JSON object",
+        "code": "bad_request",
+    }
 
 
 # ── URL pattern coverage ────────────────────────────────────────────

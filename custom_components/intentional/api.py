@@ -72,7 +72,7 @@ from functools import partial
 from typing import Any
 
 from aiohttp import web
-from homeassistant.components.http import HomeAssistantView
+from homeassistant.components.http import HomeAssistantView, require_admin
 from homeassistant.core import HomeAssistant
 
 from ._engine import __version__  # noqa: TID252
@@ -105,6 +105,7 @@ from .rule_store import RULE_STORE_FILENAME, StorageRuleStore, rule_store_key  #
 from .validation import validation_warnings as _validation_warnings  # noqa: TID252
 
 _LOGGER = logging.getLogger(__name__)
+_API_REGISTERED = f"{DOMAIN}_api_registered"
 
 
 def _entry_for_view(hass: HomeAssistant) -> Any:
@@ -171,6 +172,17 @@ def _error(message: str, code: str, status: int = 400) -> web.Response:
         {"error": message, "code": code},
         status=status,
     )
+
+
+async def _json_object(request: web.Request) -> tuple[dict[str, Any] | None, web.Response | None]:
+    """Decode a request body and require a JSON object."""
+    try:
+        data = await request.json()
+    except (ValueError, json.JSONDecodeError) as err:
+        return None, _error(f"Invalid JSON: {err}", "bad_request", 400)
+    if not isinstance(data, dict):
+        return None, _error("Request body must be a JSON object", "bad_request", 400)
+    return data, None
 
 
 async def _rule_file_job(
@@ -259,15 +271,16 @@ class IntentionalRuleDocumentView(HomeAssistantView):
             return _error("Rule document is only available for storage-backed rules", "not_available", 404)
         return web.json_response(_rule_document_response(store))
 
+    @require_admin
     async def put(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
         store = _rule_store_for(hass)
         if store is None:
             return _error("Rule document is only available for storage-backed rules", "not_available", 404)
-        try:
-            data = await request.json()
-        except (ValueError, json.JSONDecodeError) as err:
-            return _error(f"Invalid JSON: {err}", "bad_request", 400)
+        data, error = await _json_object(request)
+        if error is not None:
+            return error
+        assert data is not None
         contents = data.get("contents")
         if not isinstance(contents, str):
             return _error("Request body must include string `contents`", "bad_request", 400)
@@ -280,6 +293,7 @@ class IntentionalRuleDocumentView(HomeAssistantView):
         await hass.services.async_call(DOMAIN, "reload", blocking=True)
         return web.json_response({"status": "saved", **_rule_document_response(store)}, status=200)
 
+    @require_admin
     async def delete(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
         store = _rule_store_for(hass)
@@ -289,6 +303,8 @@ class IntentionalRuleDocumentView(HomeAssistantView):
             data = await request.json()
         except (ValueError, json.JSONDecodeError):
             data = {}
+        if not isinstance(data, dict):
+            return _error("Request body must be a JSON object", "bad_request", 400)
         expected_generation = data.get("expected_generation")
         if expected_generation is not None and expected_generation != store.generation:
             return web.json_response({"error": "generation_mismatch"}, status=409)
@@ -340,6 +356,7 @@ class IntentionalRuleView(HomeAssistantView):
             "size": len(contents),
         })
 
+    @require_admin
     async def put(self, request: web.Request, filename: str) -> web.Response:
         hass = request.app["hass"]
         if not _is_safe_filename(filename):
@@ -348,10 +365,10 @@ class IntentionalRuleView(HomeAssistantView):
             return _error("Filename must end in .yaml or .yml", "invalid_filename", 400)
 
         # Read the JSON body
-        try:
-            data = await request.json()
-        except (ValueError, json.JSONDecodeError) as err:
-            return _error(f"Invalid JSON: {err}", "bad_request", 400)
+        data, error = await _json_object(request)
+        if error is not None:
+            return error
+        assert data is not None
         contents = data.get("contents")
         if not isinstance(contents, str):
             return _error("Request body must be {\"contents\": \"<yaml>\"}", "bad_request", 400)
@@ -383,6 +400,7 @@ class IntentionalRuleView(HomeAssistantView):
             "size": len(contents),
         }, status=200)
 
+    @require_admin
     async def delete(self, request: web.Request, filename: str) -> web.Response:
         hass = request.app["hass"]
         if not _is_safe_filename(filename):
@@ -409,12 +427,13 @@ class IntentionalRuleByIDView(HomeAssistantView):
     name = "api:intentional:rule_by_id"
     requires_auth = True
 
+    @require_admin
     async def patch(self, request: web.Request, rule_id: str) -> web.Response:
         hass = request.app["hass"]
-        try:
-            data = await request.json()
-        except (ValueError, json.JSONDecodeError) as err:
-            return _error(f"Invalid JSON: {err}", "bad_request", 400)
+        data, error = await _json_object(request)
+        if error is not None:
+            return error
+        assert data is not None
         contents = data.get("contents")
         expected_generation = data.get("expected_generation")
         if not isinstance(contents, str) or not isinstance(expected_generation, str):
@@ -491,15 +510,16 @@ class IntentionalRuleRollbackView(HomeAssistantView):
     name = "api:intentional:rule_rollback"
     requires_auth = True
 
+    @require_admin
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
         store = _rule_store_for(hass)
         if store is None:
             return _error("Rule rollback is only available for storage-backed rules", "not_available", 404)
-        try:
-            data = await request.json()
-        except (ValueError, json.JSONDecodeError) as err:
-            return _error(f"Invalid JSON: {err}", "bad_request", 400)
+        data, error = await _json_object(request)
+        if error is not None:
+            return error
+        assert data is not None
         generation = data.get("generation")
         expected_generation = data.get("expected_generation")
         if not isinstance(generation, str) or not isinstance(expected_generation, str):
@@ -535,6 +555,7 @@ class IntentionalReloadView(HomeAssistantView):
     name = "api:intentional:reload"
     requires_auth = True
 
+    @require_admin
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
         try:
@@ -643,10 +664,10 @@ class IntentionalValidateView(HomeAssistantView):
     requires_auth = True
 
     async def post(self, request: web.Request) -> web.Response:
-        try:
-            data = await request.json()
-        except (ValueError, json.JSONDecodeError) as err:
-            return _error(f"Invalid JSON: {err}", "bad_request", 400)
+        data, error = await _json_object(request)
+        if error is not None:
+            return error
+        assert data is not None
         contents = data.get("contents")
         if not isinstance(contents, str):
             return _error("Request body must include string `contents`", "bad_request", 400)
@@ -671,10 +692,10 @@ class IntentionalDryRunView(HomeAssistantView):
     requires_auth = True
 
     async def post(self, request: web.Request) -> web.Response:
-        try:
-            data = await request.json()
-        except (ValueError, json.JSONDecodeError) as err:
-            return _error(f"Invalid JSON: {err}", "bad_request", 400)
+        data, error = await _json_object(request)
+        if error is not None:
+            return error
+        assert data is not None
         contents = data.get("contents")
         if not isinstance(contents, str):
             return _error("Request body must include string `contents`", "bad_request", 400)
@@ -723,10 +744,10 @@ class IntentionalPreviewView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        try:
-            data = await request.json()
-        except (ValueError, json.JSONDecodeError) as err:
-            return _error(f"Invalid JSON: {err}", "bad_request", 400)
+        data, error = await _json_object(request)
+        if error is not None:
+            return error
+        assert data is not None
 
         engine, error = _preview_engine(hass, data)
         if error is not None:
@@ -779,10 +800,10 @@ class IntentionalSimulateView(HomeAssistantView):
     requires_auth = True
 
     async def post(self, request: web.Request) -> web.Response:
-        try:
-            data = await request.json()
-        except (ValueError, json.JSONDecodeError) as err:
-            return _error(f"Invalid JSON: {err}", "bad_request", 400)
+        data, error = await _json_object(request)
+        if error is not None:
+            return error
+        assert data is not None
         contents = data.get("contents")
         if not isinstance(contents, str):
             return _error("Request body must include string `contents`", "bad_request", 400)
@@ -828,10 +849,10 @@ class IntentionalReplayView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        try:
-            data = await request.json()
-        except (ValueError, json.JSONDecodeError) as err:
-            return _error(f"Invalid JSON: {err}", "bad_request", 400)
+        data, error = await _json_object(request)
+        if error is not None:
+            return error
+        assert data is not None
         contents = data.get("contents")
         if not isinstance(contents, str):
             store = _rule_store_for(hass)
@@ -1048,6 +1069,9 @@ def register_api(hass: HomeAssistant) -> None:
     Called from ``async_setup_entry`` after the entry is set up.
     Idempotent: re-registering is a no-op.
     """
+    if hass.data.get(_API_REGISTERED):
+        return
+
     views = [
         IntentionalHealthView,
         IntentionalRulesView,
@@ -1073,4 +1097,5 @@ def register_api(hass: HomeAssistant) -> None:
     ]
     for view_cls in views:
         hass.http.register_view(view_cls())
+    hass.data[_API_REGISTERED] = True
     _LOGGER.info("Registered %d Intentional API views", len(views))

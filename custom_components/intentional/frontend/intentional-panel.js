@@ -45,6 +45,8 @@ class IntentionalPanel extends HTMLElement {
     this._simulation = null;
     this._timelineText = "[{\"states\":{}}]";
     this._validateTimer = null;
+    this._validationRequest = 0;
+    this._visualModeError = "";
   }
 
   set hass(hass) {
@@ -107,6 +109,7 @@ class IntentionalPanel extends HTMLElement {
 
   async _validate({ quiet = false } = {}) {
     clearTimeout(this._validateTimer);
+    const request = ++this._validationRequest;
     this._localErrors = this._validateLocally();
     if (this._localErrors.length) {
       this._validation = { valid: false, errors: this._localErrors };
@@ -115,17 +118,20 @@ class IntentionalPanel extends HTMLElement {
       return false;
     }
     try {
-      const validation = await this._api("POST", "validate", { contents: this._candidateContents() });
+      const contents = this._candidateContents();
+      const validation = await this._api("POST", "validate", { contents });
+      if (request !== this._validationRequest) return false;
       this._validation = validation;
-      this._rules = parseDocumentRuleSummaries(this._candidateContents(), validation.normalized || []);
+      this._rules = parseDocumentRuleSummaries(contents, validation.normalized || []);
       this._error = quiet ? this._error : "";
       return true;
     } catch (err) {
+      if (request !== this._validationRequest) return false;
       this._validation = { valid: false, errors: [err.message || String(err)] };
       if (!quiet) this._error = "Validation failed";
       return false;
     } finally {
-      this._render();
+      if (request === this._validationRequest) this._render();
     }
   }
 
@@ -228,6 +234,7 @@ class IntentionalPanel extends HTMLElement {
     this._selectedRuleForm.reason = "Describe why this rule exists";
     this._selectedRuleContents = stringifyRule(this._selectedRuleForm);
     this._editorMode = "visual";
+    this._visualModeError = "";
     this._dirty = true;
     this._validation = null;
     this._preview = null;
@@ -242,7 +249,8 @@ class IntentionalPanel extends HTMLElement {
     this._selectedRuleId = ruleId;
     this._selectedRuleContents = block;
     this._selectedRuleForm = parseRuleForm(block, apiRule);
-    this._editorMode = "visual";
+    this._visualModeError = visualModeError(block);
+    this._editorMode = this._visualModeError ? "yaml" : "visual";
     this._dirty = false;
     this._validation = null;
     this._preview = null;
@@ -269,9 +277,17 @@ class IntentionalPanel extends HTMLElement {
   }
 
   _showVisualRule() {
+    const error = visualModeError(this._selectedRuleContents);
+    if (error) {
+      this._visualModeError = error;
+      this._error = error;
+      this._render();
+      return;
+    }
     if (this._editorMode === "yaml") {
       this._selectedRuleForm = parseRuleForm(this._selectedRuleContents, this._rules.find((rule) => rule.id === this._selectedRuleId));
     }
+    this._visualModeError = "";
     this._editorMode = "visual";
     this._render();
   }
@@ -478,6 +494,7 @@ class IntentionalPanel extends HTMLElement {
     return `
       <section class="card editor">
         <div class="card-header"><div><h2>Rule YAML</h2><p>Advanced escape hatch for fields the visual editor does not expose yet.</p></div><div class="actions"><button class="secondary small" data-action="show-visual-rule">Visual Editor</button><button class="secondary small" data-action="show-document">Document YAML</button></div></div>
+        ${this._visualModeError ? `<div class="warning-box">${escapeHtml(this._visualModeError)} Edit this rule as YAML to avoid losing unsupported fields.</div>` : ""}
         <textarea class="yaml-editor" spellcheck="false">${escapeHtml(this._selectedRuleContents)}</textarea>
       </section>
     `;
@@ -634,8 +651,10 @@ function parseRuleForm(block, apiRule) {
   form.authority = extractScalar(block, "authority") || "automation";
   form.confidence = extractScalar(block, "confidence") || "1.0";
   form.after = extractScalar(block, "after") || "";
-  form.conditions = parseConditionSection(sectionLines(block, "while"));
-  if (!form.conditions.length) form.conditions = parseConditionSection(sectionLines(block, "observe"));
+  let parsedConditions = parseConditions(sectionLines(block, "while"));
+  if (!parsedConditions.conditions.length) parsedConditions = parseConditions(sectionLines(block, "observe"));
+  form.conditionMode = parsedConditions.mode;
+  form.conditions = parsedConditions.conditions;
   if (!form.conditions.length && apiRule?.when) form.conditions = [{ entity: apiRule.when.split(/\s+/)[0] || "", operator: "is", value: "on" }];
   const holdLines = sectionLines(block, "hold");
   if (holdLines.some((line) => /^\s{4}after:/.test(line))) { form.holdMode = "after"; form.holdAfter = extractIndentedScalar(holdLines, "after"); }
@@ -743,24 +762,54 @@ function writeIntents(lines, intents) {
 function writeEffects(lines, effects) {
   const usable = effects.filter((effect) => effect.service.trim());
   if (!usable.length) return;
-  const effect = usable[0];
-  const [domain, service] = effect.service.trim().split(".");
-  lines.push("  effect:", `    service: ${domain}.${service}`);
-  for (const key of ["target", "data"]) {
-    if (!effect[key].trim()) continue;
-    lines.push(`    ${key}:`);
-    const parsed = JSON.parse(effect[key]);
-    for (const [nestedKey, value] of Object.entries(parsed)) lines.push(`      ${nestedKey}: ${yamlScalar(value)}`);
+  lines.push("  effect:");
+  for (const effect of usable) {
+    const prefix = usable.length > 1 ? "    -" : "   ";
+    lines.push(`${prefix} service: ${yamlScalar(effect.service.trim())}`);
+    for (const key of ["target", "data"]) {
+      if (!effect[key].trim()) continue;
+      const value = JSON.parse(effect[key]);
+      if (!Array.isArray(value) && value !== null && typeof value === "object" && !Object.keys(value).length) continue;
+      lines.push(`${usable.length > 1 ? "      " : "    "}${key}:`);
+      writeYamlValue(lines, value, usable.length > 1 ? 8 : 6);
+    }
   }
 }
 
-function parseConditionSection(lines) {
+function writeYamlValue(lines, value, indent) {
+  const pad = " ".repeat(indent);
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (item !== null && typeof item === "object") {
+        lines.push(`${pad}-`);
+        writeYamlValue(lines, item, indent + 2);
+      } else lines.push(`${pad}- ${yamlScalar(item)}`);
+    }
+    return;
+  }
+  for (const [key, nested] of Object.entries(value || {})) {
+    if (nested !== null && typeof nested === "object") {
+      lines.push(`${pad}${key}:`);
+      writeYamlValue(lines, nested, indent + 2);
+    } else lines.push(`${pad}${key}: ${yamlScalar(nested)}`);
+  }
+}
+
+function parseConditions(lines) {
+  const compound = lines.find((line) => /^\s{4}(all|any|none|not):\s*$/.test(line));
+  const mode = compound ? compound.trim().slice(0, -1) : "all";
+  return { mode, conditions: parseConditionSection(lines, Boolean(compound)) };
+}
+
+function parseConditionSection(lines, compound = false) {
   const conditions = [];
   for (let index = 0; index < lines.length; index += 1) {
-    const scalar = lines[index].match(/^\s{4}([\w.-]+\.[\w.-]+):\s*(.+?)\s*$/);
+    const line = compound ? lines[index].replace(/^\s{6}-\s*/, "    ").replace(/^\s{10}/, "      ") : lines[index];
+    const nextLine = compound ? (lines[index + 1] || "").replace(/^\s{10}/, "      ") : lines[index + 1];
+    const scalar = line.match(/^\s{4}([\w.-]+\.[\w.-]+):\s*(.+?)\s*$/);
     if (scalar) { conditions.push({ entity: scalar[1], operator: "is", value: stripQuotes(scalar[2]) }); continue; }
-    const object = lines[index].match(/^\s{4}([\w.-]+\.[\w.-]+):\s*$/);
-    const op = lines[index + 1]?.match(/^\s{6}(\w+):\s*(.+?)\s*$/);
+    const object = line.match(/^\s{4}([\w.-]+\.[\w.-]+):\s*$/);
+    const op = nextLine?.match(/^\s{6}(\w+):\s*(.+?)\s*$/);
     if (object && op) { conditions.push({ entity: object[1], operator: op[1], value: stripQuotes(op[2]) }); index += 1; }
   }
   return conditions;
@@ -788,6 +837,98 @@ function parseIntentSection(lines, apiRule) {
 
 function parseEffects(_block, apiRule) {
   return (apiRule?.effects || []).map((effect) => ({ service: `${effect.domain}.${effect.service}`, target: JSON.stringify(effect.target || {}, null, 2), data: JSON.stringify(effect.data || {}, null, 2) }));
+}
+
+function visualModeError(block) {
+  const supportedTopLevel = new Set(["id", "enabled", "reason", "labels", "group", "profile", "notes", "authority", "confidence", "while", "observe", "after", "hold", "intent", "effect"]);
+  for (const line of String(block || "").split("\n")) {
+    const key = line.match(/^  ([\w.-]+):/);
+    if (key && !supportedTopLevel.has(key[1])) return `Visual mode cannot safely edit the unsupported '${key[1]}' field.`;
+  }
+  if (/^  labels:\s*(?:#.*)?$/m.test(block)) return "Visual mode is unavailable to prevent data loss: block-style 'labels' are not represented by the visual editor. Edit this rule as YAML.";
+  if (inlineLabelsContainQuotedComma(block)) return "Visual mode is unavailable to prevent data loss: inline 'labels' containing commas cannot be represented by the comma-separated visual editor. Edit this rule as YAML.";
+  const blockScalar = String(block || "").match(/^  ([\w.-]+):\s*[>|](?:[1-9]?[-+]?|[-+]?[1-9]?)?\s*(?:#.*)?$/m);
+  if (blockScalar) return `Visual mode is unavailable to prevent data loss: block scalar '${blockScalar[1]}' metadata is not represented by the visual editor. Edit this rule as YAML.`;
+  if (/[&*][A-Za-z0-9_-]+|(^|\s)<<:\s/m.test(block)) return "Visual mode cannot safely edit YAML anchors, aliases, or merge keys.";
+  if (/^\s{4}for:\s/m.test(block) || /^\s{6}-?\s*(all|any|none|not):\s*$/m.test(block)) return "Visual mode cannot safely edit nested or duration-qualified conditions.";
+  const intentError = unsupportedIntentConstruct(sectionLines(block, "intent"));
+  if (intentError) return `Visual mode is unavailable to prevent data loss: ${intentError} Edit this rule as YAML.`;
+  return "";
+}
+
+function inlineLabelsContainQuotedComma(block) {
+  const match = String(block || "").match(/^  labels:\s*\[([^\n]*)\]\s*(?:#.*)?$/m);
+  if (!match) return false;
+  let quote = "";
+  for (let index = 0; index < match[1].length; index += 1) {
+    const character = match[1][index];
+    if (!quote && (character === "'" || character === '"')) quote = character;
+    else if (character === quote && (quote === "'" || match[1][index - 1] !== "\\")) quote = "";
+    else if (quote && character === ",") return true;
+  }
+  return false;
+}
+
+function unsupportedIntentConstruct(lines) {
+  const directives = new Set(["select", "suppress", "include"]);
+  const unsupportedMetadata = new Set(["linger", "transition", "animation", "animations", "generator", "generators"]);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line.trim() || /^\s*#/.test(line)) continue;
+    const intentKey = line.match(/^\s{4}([\w.-]+):(?:\s.*)?$/);
+    if (intentKey && directives.has(intentKey[1])) return `the nested intent '${intentKey[1]}' construct is not represented by the visual editor.`;
+
+    const targetMetadata = line.match(/^\s{6}([\w.-]+):(?:\s*(.*))?$/);
+    if (targetMetadata && unsupportedMetadata.has(targetMetadata[1])) return `target metadata '${targetMetadata[1]}' is not represented by the visual editor.`;
+    if (targetMetadata && targetMetadata[1] === "apply") {
+      if (targetMetadata[2]) return "inline application metadata is not represented by the visual editor.";
+      const applyError = unsupportedApplyMetadata(lines, index);
+      if (applyError) return applyError;
+    }
+
+    const fieldValue = line.match(/^\s{6}[\w.-]+:\s*(.*)$/);
+    if (fieldValue && /(?:^|[{,]\s*)(animate|animation|generate|generator|generators)\s*:/.test(fieldValue[1])) return `intent ${fieldValue[1].match(/(animate|animation|generate|generator|generators)\s*:/)[1]} values are not represented by the visual editor.`;
+    if (fieldValue?.[1].trim().startsWith("{")) return "nested intent mappings are not represented by the visual editor.";
+    if (fieldValue && !fieldValue[1].trim() && targetMetadata[1] !== "apply") {
+      const valueError = unsupportedBlockIntentValue(lines, index);
+      if (valueError) return valueError;
+    }
+    const nestedOperator = line.match(/^\s{8}(\w+):/);
+    if (nestedOperator && ["animate", "animation", "generate", "generator", "generators"].includes(nestedOperator[1])) return `intent ${nestedOperator[1]} values are not represented by the visual editor.`;
+    if (nestedOperator && !["value", "min", "max", "offset", "multiply", "transition"].includes(nestedOperator[1])) return `nested intent operator '${nestedOperator[1]}' is not represented by the visual editor.`;
+  }
+  return "";
+}
+
+function unsupportedBlockIntentValue(lines, start) {
+  const operators = new Set(["value", "min", "max", "offset", "multiply"]);
+  const children = [];
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line.trim() || /^\s*#/.test(line)) continue;
+    const indent = line.match(/^\s*/)[0].length;
+    if (indent <= 6) break;
+    children.push({ line, indent });
+  }
+  if (children.length !== 1 || children[0].indent !== 8) return "nested intent field values are not represented by the visual editor.";
+  const operator = children[0].line.match(/^\s{8}(\w+):\s*(.+?)\s*$/);
+  if (!operator || !operators.has(operator[1]) || operator[2].startsWith("{")) return "nested intent field values are not represented by the visual editor.";
+  return "";
+}
+
+function unsupportedApplyMetadata(lines, start) {
+  const transitionKeys = new Set(["assert", "change", "withdraw"]);
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line.trim() || /^\s*#/.test(line)) continue;
+    const indent = line.match(/^\s*/)[0].length;
+    if (indent <= 6) break;
+    const key = line.match(/^\s+(\w+):/);
+    if (indent === 8 && key?.[1] !== "transition") return `application metadata '${key?.[1] || line.trim()}' is not represented by the visual editor.`;
+    if (indent === 10 && (!key || !transitionKeys.has(key[1]))) return `transition metadata '${key?.[1] || line.trim()}' is not represented by the visual editor.`;
+    if (indent > 10) return "nested application metadata is not represented by the visual editor.";
+  }
+  return "";
 }
 
 function sectionLines(contents, key) {
