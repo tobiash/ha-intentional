@@ -248,6 +248,16 @@ class Engine:
             for cb in self._state_change_callbacks:
                 cb(entity_id, value)
 
+    def remove_state(self, entity_id: str) -> None:
+        """Remove all cached facts for an entity that no longer exists."""
+        prefix = f"{entity_id}."
+        keys = [key for key in self.state if key.startswith(prefix)]
+        for key in keys:
+            del self.state[key]
+        if keys:
+            for cb in self._state_change_callbacks:
+                cb(entity_id, None)
+
     def on_state_change(self, callback: StateChangeCallback) -> None:
         """Register a callback for state changes. Returns the callback for chaining."""
         self._state_change_callbacks.append(callback)

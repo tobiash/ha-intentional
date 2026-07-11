@@ -199,7 +199,7 @@ async def test_tick_loop_records_failure_and_continues(
     def fail_once(*args, **kwargs):
         nonlocal calls
         calls += 1
-        if calls == 1:
+        if calls == 2:
             raise RuntimeError("synthetic tick failure")
         return original_sync(*args, **kwargs)
 
@@ -213,7 +213,7 @@ async def test_tick_loop_records_failure_and_continues(
         await asyncio.sleep(0.05)
         diagnostics = list_diagnostics(hass)
         if (
-            calls >= 2
+            calls >= 3
             and runtime.failure_count >= 1
             and runtime.success_count >= 1
             and any(event["type"] == "tick_failed" for event in diagnostics)
@@ -221,7 +221,7 @@ async def test_tick_loop_records_failure_and_continues(
             break
 
     diagnostics = list_diagnostics(hass)
-    assert calls >= 2
+    assert calls >= 3
     assert runtime.failure_count == 1
     assert runtime.success_count >= 1
     assert runtime.consecutive_failures == 0

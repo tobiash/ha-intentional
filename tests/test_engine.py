@@ -58,6 +58,19 @@ class TestStateManagement:
         engine.update_state("sensor.x", "on")
         assert events == [("sensor.x", "on")]
 
+    def test_remove_state_removes_all_entity_fields(self) -> None:
+        engine = Engine()
+        events: list[tuple[str, Any]] = []
+        engine.on_state_change(lambda entity, value: events.append((entity, value)))
+        engine.update_state("sensor.x", "on")
+        engine.update_state("sensor.x", 21, field="temperature")
+        engine.update_state("sensor.xy", "on")
+
+        engine.remove_state("sensor.x")
+
+        assert engine.state == {"sensor.xy.state": "on"}
+        assert events[-1] == ("sensor.x", None)
+
 
 # ── Rule evaluation ──────────────────────────────────────────────────
 
