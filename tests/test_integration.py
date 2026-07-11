@@ -475,7 +475,7 @@ async def test_deleted_entity_state_is_removed_from_engine(
     assert engine.state["input_boolean.test.state"] == "on"
 
     hass.states.async_remove("input_boolean.test")
-    await asyncio.sleep(0)
+    await hass.async_block_till_done()
 
     assert not any(
         key.startswith("input_boolean.test.") for key in engine.state

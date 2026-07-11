@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.37] - 2026-07-11
+
+### Fixed
+- **Entity-removal integration coverage** now waits for Home Assistant to finish asynchronous state-change dispatch before verifying cached facts.
+
 ## [0.7.36] - 2026-07-11
 
 ### Fixed
