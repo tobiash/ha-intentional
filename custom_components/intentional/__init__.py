@@ -337,6 +337,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     engine.load_rules(initial_rules)
     if isinstance(lifecycle_records, dict):
         engine.import_lifecycle_records(lifecycle_records)
+    _sync_state_into_engine(hass, engine)
     _LOGGER.info("Loaded %d stored rule(s)", len(initial_rules))
 
     # Set up platforms (sensors)
