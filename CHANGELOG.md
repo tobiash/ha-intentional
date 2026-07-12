@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] - 2026-07-12
+
+### Fixed
+- **Dynamic Home Assistant entities** wait for successful platform registration before publishing or removing state, preventing `NoEntitySpecifiedError` during rapid Rule and room-control changes.
+- **Room-control registry cleanup** removes stale room status and pause entities while preserving current and user-disabled registry entries.
+
 ## [0.10.0] - 2026-07-12
 
 ### Added

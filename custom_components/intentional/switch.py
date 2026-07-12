@@ -15,6 +15,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from ._engine.runtime import TickRuntime, runtime_key
 from .const import CONF_RULE_DIR, DEFAULT_NAME, DEFAULT_RULE_DIR, DOMAIN
+from .entity_lifecycle import RegistrationAwareEntity
 from .lifecycle_writer import mark_lifecycle_mutated
 from .publication import publication_key, publication_signal
 from .room_controls import area_for_target, room_controls_for_engine, slugify_area_id
@@ -79,7 +80,18 @@ async def async_setup_entry(
             lambda target: area_for_target(hass, target),
         )
     }
+    _cleanup_stale_room_switches(hass, entry, set(room_entities))
     entities.extend(room_entities.values())
+    for rule_id, entity in rule_entities.items():
+        entity.set_removal_callback(
+            lambda rule_id=rule_id, entity=entity: rule_entities.pop(rule_id, None)
+            if rule_entities.get(rule_id) is entity else None
+        )
+    for area_id, entity in room_entities.items():
+        entity.set_removal_callback(
+            lambda area_id=area_id, entity=entity: room_entities.pop(area_id, None)
+            if room_entities.get(area_id) is entity else None
+        )
     async_add_entities(entities)
 
     async def _on_publication(changed: frozenset[str]) -> None:
@@ -87,7 +99,7 @@ async def async_setup_entry(
         if isinstance(runtime, TickRuntime) and runtime.unloading:
             return
         if "global" in changed:
-            entities[0].async_write_ha_state()
+            entities[0].async_write_if_registered()
         new_entities = []
         if any(key.startswith("rule:") for key in changed):
             current_infos = (
@@ -102,14 +114,14 @@ async def async_setup_entry(
                 if isinstance(rule_info.get("id"), str)
             }
             for removed_id in set(rule_entities) - current_ids:
-                entity = rule_entities.pop(removed_id)
-                await entity.async_remove()
+                await rule_entities[removed_id].async_mark_removed()
             for rule_info in current_infos:
                 rule_id = str(rule_info["id"])
                 if rule_id in rule_entities:
+                    rule_entities[rule_id].mark_desired()
                     rule_entities[rule_id].update_rule_info(rule_info)
                     if f"rule:{rule_id}" in changed:
-                        rule_entities[rule_id].async_write_ha_state()
+                        rule_entities[rule_id].async_write_if_registered()
                     continue
                 entity = IntentionalRuleSwitch(
                     hass,
@@ -120,21 +132,30 @@ async def async_setup_entry(
                     engine,
                 )
                 rule_entities[rule_id] = entity
+                entity.set_removal_callback(
+                    lambda rule_id=rule_id, entity=entity: rule_entities.pop(rule_id, None)
+                    if rule_entities.get(rule_id) is entity else None
+                )
                 new_entities.append(entity)
         current_room_ids = set(room_controls_for_engine(
             engine,
             lambda target: area_for_target(hass, target),
         ))
         for removed_id in set(room_entities) - current_room_ids:
-            entity = room_entities.pop(removed_id)
-            await entity.async_remove()
+            await room_entities[removed_id].async_mark_removed()
+        _cleanup_stale_room_switches(hass, entry, current_room_ids)
         for area_id in current_room_ids - set(room_entities):
             entity = IntentionalRoomPauseSwitch(hass, engine, entry, area_id)
             room_entities[area_id] = entity
+            entity.set_removal_callback(
+                lambda area_id=area_id, entity=entity: room_entities.pop(area_id, None)
+                if room_entities.get(area_id) is entity else None
+            )
             new_entities.append(entity)
         for area_id in current_room_ids & set(room_entities):
+            room_entities[area_id].mark_desired()
             if f"room:{area_id}" in changed:
-                room_entities[area_id].async_write_ha_state()
+                room_entities[area_id].async_write_if_registered()
         if new_entities:
             async_add_entities(new_entities)
 
@@ -166,6 +187,27 @@ def _cleanup_stale_rule_switches(
             registry.async_remove(entity_id)
 
 
+def _cleanup_stale_room_switches(
+    hass: HomeAssistant, entry: ConfigEntry, current_area_ids: set[str]
+) -> None:
+    """Remove registry entries for room controls that no longer exist."""
+    registry = er.async_get(hass)
+    prefix = f"{entry.entry_id}_area_"
+    current_unique_ids = {
+        f"{prefix}{slugify_area_id(area_id)}_paused" for area_id in current_area_ids
+    }
+    for entity_id, registry_entry in list(registry.entities.items()):
+        if registry_entry.platform != DOMAIN or registry_entry.domain != Platform.SWITCH:
+            continue
+        unique_id = registry_entry.unique_id
+        if (
+            unique_id.startswith(prefix)
+            and unique_id.endswith("_paused")
+            and unique_id not in current_unique_ids
+        ):
+            registry.async_remove(entity_id)
+
+
 def _device_info(entry: ConfigEntry) -> dict[str, Any]:
     return {
         "identifiers": {(DOMAIN, entry.entry_id)},
@@ -175,7 +217,7 @@ def _device_info(entry: ConfigEntry) -> dict[str, Any]:
     }
 
 
-class IntentionalGlobalSwitch(SwitchEntity):
+class IntentionalGlobalSwitch(RegistrationAwareEntity, SwitchEntity):
     """Global switch that enables/disables all Intentional automation."""
 
     _attr_has_entity_name = True
@@ -185,6 +227,7 @@ class IntentionalGlobalSwitch(SwitchEntity):
     _attr_translation_key = "global_enabled"
 
     def __init__(self, hass: HomeAssistant, engine, entry: ConfigEntry) -> None:
+        super().__init__()
         self.hass = hass
         self._engine = engine
         self._entry = entry
@@ -217,7 +260,7 @@ class IntentionalGlobalSwitch(SwitchEntity):
         self._engine.set_enabled(enabled)
 
 
-class IntentionalRuleSwitch(SwitchEntity):
+class IntentionalRuleSwitch(RegistrationAwareEntity, SwitchEntity):
     """Switch that persists one rule's top-level enabled flag."""
 
     _attr_has_entity_name = True
@@ -234,6 +277,7 @@ class IntentionalRuleSwitch(SwitchEntity):
         rule_store: StorageRuleStore | None = None,
         engine=None,
     ) -> None:
+        super().__init__()
         self.hass = hass
         self._entry = entry
         self._rule_dir = rule_dir
@@ -311,7 +355,7 @@ class IntentionalRuleSwitch(SwitchEntity):
             await self.hass.services.async_call(DOMAIN, "reload", blocking=True)
 
 
-class IntentionalRoomPauseSwitch(SwitchEntity):
+class IntentionalRoomPauseSwitch(RegistrationAwareEntity, SwitchEntity):
     """Switch that pauses all rules targeting one Home Assistant area."""
 
     _attr_has_entity_name = True
@@ -325,6 +369,7 @@ class IntentionalRoomPauseSwitch(SwitchEntity):
         entry: ConfigEntry,
         area_id: str,
     ) -> None:
+        super().__init__()
         self.hass = hass
         self._engine = engine
         self._entry = entry

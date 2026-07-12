@@ -37,6 +37,7 @@ from .const import (
     DEFAULT_NAME,
     DOMAIN,
 )
+from .entity_lifecycle import RegistrationAwareEntity
 from .publication import publication_signal
 from .room_controls import area_for_target, room_controls_for_engine, slugify_area_id
 
@@ -60,6 +61,12 @@ async def async_setup_entry(
             lambda target: area_for_target(hass, target),
         )
     }
+    _cleanup_stale_room_sensors(hass, entry, set(room_entities))
+    for area_id, entity in room_entities.items():
+        entity.set_removal_callback(
+            lambda area_id=area_id, entity=entity: room_entities.pop(area_id, None)
+            if room_entities.get(area_id) is entity else None
+        )
     async_add_entities([summary, *room_entities.values()])
 
     _cleanup_legacy_target_sensors(hass, entry)
@@ -69,22 +76,27 @@ async def async_setup_entry(
         if isinstance(runtime, TickRuntime) and runtime.unloading:
             return
         if "summary" in changed:
-            summary.async_write_ha_state()
+            summary.async_write_if_registered()
         current_room_ids = set(room_controls_for_engine(
             engine,
             lambda target: area_for_target(hass, target),
         ))
         for removed_id in set(room_entities) - current_room_ids:
-            entity = room_entities.pop(removed_id)
-            await entity.async_remove()
+            await room_entities[removed_id].async_mark_removed()
+        _cleanup_stale_room_sensors(hass, entry, current_room_ids)
         new_entities = []
         for area_id in current_room_ids - set(room_entities):
             entity = IntentionalRoomStatusSensor(hass, engine, entry, area_id)
             room_entities[area_id] = entity
+            entity.set_removal_callback(
+                lambda area_id=area_id, entity=entity: room_entities.pop(area_id, None)
+                if room_entities.get(area_id) is entity else None
+            )
             new_entities.append(entity)
         for area_id in current_room_ids & set(room_entities):
+            room_entities[area_id].mark_desired()
             if f"room:{area_id}" in changed:
-                room_entities[area_id].async_write_ha_state()
+                room_entities[area_id].async_write_if_registered()
         if new_entities:
             async_add_entities(new_entities)
 
@@ -104,6 +116,27 @@ def _cleanup_legacy_target_sensors(hass: HomeAssistant, entry: ConfigEntry) -> N
             continue
         unique_id = registry_entry.unique_id
         if unique_id.startswith(prefix) and not unique_id.startswith(f"{prefix}area_"):
+            registry.async_remove(entity_id)
+
+
+def _cleanup_stale_room_sensors(
+    hass: HomeAssistant, entry: ConfigEntry, current_area_ids: set[str]
+) -> None:
+    """Remove registry entries for room controls that no longer exist."""
+    registry = er.async_get(hass)
+    prefix = f"{entry.entry_id}_area_"
+    current_unique_ids = {
+        f"{prefix}{slugify_area_id(area_id)}_status" for area_id in current_area_ids
+    }
+    for entity_id, registry_entry in list(registry.entities.items()):
+        if registry_entry.platform != DOMAIN or registry_entry.domain != Platform.SENSOR:
+            continue
+        unique_id = registry_entry.unique_id
+        if (
+            unique_id.startswith(prefix)
+            and unique_id.endswith("_status")
+            and unique_id not in current_unique_ids
+        ):
             registry.async_remove(entity_id)
 
 
@@ -182,7 +215,7 @@ class IntentionalTargetSensor(SensorEntity):
         pass
 
 
-class IntentionalSummarySensor(SensorEntity):
+class IntentionalSummarySensor(RegistrationAwareEntity, SensorEntity):
     """A summary sensor: total active intents across all targets."""
 
     _attr_has_entity_name = True
@@ -193,6 +226,7 @@ class IntentionalSummarySensor(SensorEntity):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, hass: HomeAssistant, engine, entry: ConfigEntry) -> None:
+        super().__init__()
         self.hass = hass
         self._engine = engine
         self._entry = entry
@@ -222,7 +256,7 @@ class IntentionalSummarySensor(SensorEntity):
         }
 
 
-class IntentionalRoomStatusSensor(SensorEntity):
+class IntentionalRoomStatusSensor(RegistrationAwareEntity, SensorEntity):
     """A sensor summarizing rules and overrides for one Home Assistant area."""
 
     _attr_has_entity_name = True
@@ -236,6 +270,7 @@ class IntentionalRoomStatusSensor(SensorEntity):
         entry: ConfigEntry,
         area_id: str,
     ) -> None:
+        super().__init__()
         self.hass = hass
         self._engine = engine
         self._entry = entry

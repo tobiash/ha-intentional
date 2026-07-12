@@ -34,7 +34,7 @@ import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -316,6 +316,172 @@ async def test_sensor_entities_created(hass: HomeAssistant, config_entry: MockCo
     assert registry_entry.platform == DOMAIN
     assert registry_entry.config_entry_id == config_entry.entry_id
     assert registry_entry.unique_id == "intentional_summary"
+
+
+@pytest.mark.parametrize("entity_kind", ["room_sensor", "room_switch", "rule_switch"])
+async def test_dynamic_entity_removed_during_pending_add_cleans_up_after_registration(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    entity_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rapid publication must not operate on an entity before platform assignment."""
+    from custom_components.intentional._engine import Engine
+    from custom_components.intentional.sensor import IntentionalRoomStatusSensor
+    from custom_components.intentional.switch import (
+        IntentionalRoomPauseSwitch,
+        IntentionalRuleSwitch,
+    )
+
+    engine = Engine()
+    if entity_kind == "room_sensor":
+        entity = IntentionalRoomStatusSensor(hass, engine, config_entry, "office")
+        entity_id = "sensor.office_status"
+    elif entity_kind == "room_switch":
+        entity = IntentionalRoomPauseSwitch(hass, engine, config_entry, "office")
+        entity_id = "switch.pause_office_rules"
+    else:
+        entity = IntentionalRuleSwitch(
+            hass,
+            config_entry,
+            "/rules",
+            {"id": "office", "filename": "office.yaml", "enabled": True},
+            engine=engine,
+        )
+        entity_id = "switch.rule_office"
+
+    removed = False
+
+    def nonlocal_set_removed() -> None:
+        nonlocal removed
+        removed = True
+
+    entity.set_removal_callback(nonlocal_set_removed)
+
+    # async_add_entities has returned, but HA has not assigned entity_id yet.
+    entity.async_write_if_registered()
+    await entity.async_mark_removed()
+    assert entity.entity_id is None
+    assert removed
+
+    async_remove = AsyncMock()
+    monkeypatch.setattr(entity, "async_remove", async_remove)
+    entity.hass = hass
+    entity.entity_id = entity_id
+    await entity.async_added_to_hass()
+    await hass.async_block_till_done()
+
+    async_remove.assert_awaited_once_with()
+
+
+async def test_assigned_entity_id_without_successful_add_never_writes_or_removes(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An assigned ID is not proof that HA completed platform addition."""
+    from custom_components.intentional._engine import Engine
+    from custom_components.intentional.sensor import IntentionalRoomStatusSensor
+
+    entity = IntentionalRoomStatusSensor(hass, Engine(), config_entry, "office")
+    entity.entity_id = "sensor.office_status"
+    write = Mock()
+    remove = AsyncMock()
+    monkeypatch.setattr(entity, "async_write_ha_state", write)
+    monkeypatch.setattr(entity, "async_remove", remove)
+
+    entity.async_write_if_registered()
+    await entity.async_mark_removed()
+
+    write.assert_not_called()
+    remove.assert_not_awaited()
+
+
+async def test_registration_state_resets_when_entity_is_removed(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from custom_components.intentional._engine import Engine
+    from custom_components.intentional.sensor import IntentionalRoomStatusSensor
+
+    entity = IntentionalRoomStatusSensor(hass, Engine(), config_entry, "office")
+    entity.entity_id = "sensor.office_status"
+    await entity.async_added_to_hass()
+    await entity.async_will_remove_from_hass()
+    write = Mock()
+    monkeypatch.setattr(entity, "async_write_ha_state", write)
+
+    entity.async_write_if_registered()
+
+    write.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("domain", "suffix", "cleanup_name"),
+    [
+        ("sensor", "status", "_cleanup_stale_room_sensors"),
+        ("switch", "paused", "_cleanup_stale_room_switches"),
+    ],
+)
+async def test_room_registry_cleanup_removes_only_stale_entries(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    domain: str,
+    suffix: str,
+    cleanup_name: str,
+) -> None:
+    """Current room entries, including disabled ones, must survive cleanup."""
+    from homeassistant.helpers import entity_registry as er
+
+    module = __import__(
+        f"custom_components.intentional.{domain}", fromlist=[cleanup_name]
+    )
+    cleanup = getattr(module, cleanup_name)
+    registry = er.async_get(hass)
+    prefix = f"{config_entry.entry_id}_area_"
+    current = registry.async_get_or_create(
+        domain,
+        DOMAIN,
+        f"{prefix}office_{suffix}",
+        config_entry=config_entry,
+        disabled_by=er.RegistryEntryDisabler.USER,
+    )
+    stale = registry.async_get_or_create(
+        domain,
+        DOMAIN,
+        f"{prefix}kitchen_{suffix}",
+        config_entry=config_entry,
+    )
+
+    cleanup(hass, config_entry, {"office"})
+
+    assert registry.async_get(current.entity_id) is current
+    assert registry.async_get(current.entity_id).disabled_by is er.RegistryEntryDisabler.USER
+    assert registry.async_get(stale.entity_id) is None
+
+
+async def test_pending_dynamic_entity_removal_can_be_cancelled_before_registration(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Desired-set oscillation reuses one queued entity instead of removing it."""
+    from custom_components.intentional._engine import Engine
+    from custom_components.intentional.sensor import IntentionalRoomStatusSensor
+
+    entity = IntentionalRoomStatusSensor(hass, Engine(), config_entry, "office")
+    await entity.async_mark_removed()
+    entity.mark_desired()
+
+    async_remove = AsyncMock()
+    monkeypatch.setattr(entity, "async_remove", async_remove)
+    entity.hass = hass
+    entity.entity_id = "sensor.office_status"
+    await entity.async_added_to_hass()
+    await hass.async_block_till_done()
+
+    async_remove.assert_not_awaited()
 
 
 async def test_stable_ticks_do_not_publish_or_write_entity_state(
