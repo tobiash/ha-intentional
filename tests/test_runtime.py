@@ -36,6 +36,9 @@ def test_tick_runtime_reports_stale_liveness_as_degraded() -> None:
     from intentional.runtime import TickRuntime
 
     runtime = TickRuntime(tick_interval_ms=100, stale_after_ms=1_000)
+
+    assert runtime.unloading is False
+    assert runtime.tick_idle.is_set()
     runtime.mark_success(now_ms=1_000)
 
     assert runtime.health(now_ms=1_500)["status"] == "ok"

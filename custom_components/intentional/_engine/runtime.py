@@ -18,6 +18,12 @@ def runtime_key(entry_id: str) -> str:
     return f"{entry_id}:runtime"
 
 
+def _set_event() -> asyncio.Event:
+    event = asyncio.Event()
+    event.set()
+    return event
+
+
 @dataclass(frozen=True)
 class PulseDrain:
     """Snapshot of pulses that are eligible to clear after one tick."""
@@ -92,6 +98,8 @@ class TickRuntime:
     tick_task: asyncio.Task[None] | None = None
     registry_task: asyncio.Task[None] | None = None
     registry_pending: bool = False
+    unloading: bool = False
+    tick_idle: asyncio.Event = field(default_factory=_set_event)
     lifecycle_snapshot: dict[str, Any] | None = None
     _last_failure_report_ms: int | None = None
 

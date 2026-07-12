@@ -65,7 +65,10 @@ def test_health_view_has_correct_url() -> None:
     assert IntentionalHealthView.name == "api:intentional:health"
 
 
-async def test_health_view_includes_tick_runtime_liveness() -> None:
+async def test_health_view_includes_tick_runtime_liveness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import custom_components.intentional.api as api
     from custom_components.intentional._engine import Engine
     from custom_components.intentional._engine.runtime import TickRuntime, runtime_key
     from custom_components.intentional.api import IntentionalHealthView
@@ -80,6 +83,7 @@ async def test_health_view_includes_tick_runtime_liveness() -> None:
         data={DOMAIN: {"entry-1": engine, runtime_key("entry-1"): runtime}},
     )
     request = SimpleNamespace(app={"hass": hass})
+    monkeypatch.setattr(api, "_persistence_health", lambda _hass: {"status": "ok"})
 
     response = await IntentionalHealthView().get(request)
     body = json.loads(response.body.decode())
@@ -201,6 +205,7 @@ async def test_explain_view_reports_rule_firing_status() -> None:
     hass = SimpleNamespace(
         config_entries=SimpleNamespace(async_entries=lambda domain: [entry]),
         data={DOMAIN: {"entry-1": engine}},
+        states=SimpleNamespace(get=lambda _target: None),
     )
     request = SimpleNamespace(app={"hass": hass})
 

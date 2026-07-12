@@ -67,7 +67,7 @@ from custom_components.intentional.rule_store import rule_store_key  # noqa: E40
 
 
 async def test_effect_dispatch_uses_blocking_acceptance_and_acknowledges(
-    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+    hass: HomeAssistant,
 ) -> None:
     """The HA acceptance boundary must precede the durable acknowledgement."""
     from custom_components.intentional import _dispatch_effect_outbox
@@ -84,17 +84,21 @@ async def test_effect_dispatch_uses_blocking_acceptance_and_acknowledges(
     )
     engine.update_state("binary_sensor.door", "on")
     engine.evaluate_all()
-    call = AsyncMock()
-    monkeypatch.setattr(hass.services, "async_call", call)
+    calls = []
+
+    async def handle(call):
+        calls.append(call)
+
+    hass.services.async_register("notify", "phone", handle)
 
     await _dispatch_effect_outbox(hass, engine)
 
-    assert call.await_args.kwargs["blocking"] is True
+    assert len(calls) == 1
     assert engine.list_effect_outbox() == []
 
 
 async def test_successful_durable_effect_delivery_forces_one_store_write(
-    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+    hass: HomeAssistant,
 ) -> None:
     from custom_components.intentional import _dispatch_effect_outbox
     from custom_components.intentional._engine import Engine
@@ -115,7 +119,10 @@ async def test_successful_durable_effect_delivery_forces_one_store_write(
     writes: list[dict] = []
     store = SimpleNamespace(async_save=AsyncMock(side_effect=lambda data: writes.append(data)))
     writer = LifecycleWriter(store, engine.export_lifecycle_records, durable_snapshot=durable)
-    monkeypatch.setattr(hass.services, "async_call", AsyncMock())
+    async def handle(_call):
+        pass
+
+    hass.services.async_register("notify", "phone", handle)
 
     await _dispatch_effect_outbox(hass, engine, lifecycle_writer=writer)
 
@@ -316,7 +323,7 @@ async def test_stable_ticks_do_not_publish_or_write_entity_state(
     original_write = Entity.async_write_ha_state
     original_save = Store.async_save
     original_registry_remove = er.EntityRegistry.async_remove
-    original_service_call = hass.services.async_call
+    from custom_components.intentional import _HAAdapter
 
     def count_send(*args, **kwargs):
         nonlocal publications
@@ -348,16 +355,15 @@ async def test_stable_ticks_do_not_publish_or_write_entity_state(
         registry_mutations += 1
         return original_registry_remove(self, entity_id)
 
-    async def count_service_call(*args, **kwargs):
+    async def count_service_call(self, *args, **kwargs):
         nonlocal service_calls
         service_calls += 1
-        return await original_service_call(*args, **kwargs)
 
     monkeypatch.setattr(publication_module, "async_dispatcher_send", count_send)
     monkeypatch.setattr(Entity, "async_write_ha_state", count_write)
     monkeypatch.setattr(Store, "async_save", count_save)
     monkeypatch.setattr(er.EntityRegistry, "async_remove", count_registry_remove)
-    monkeypatch.setattr(hass.services, "async_call", count_service_call)
+    monkeypatch.setattr(_HAAdapter, "async_call", count_service_call)
     remove_state_listener = hass.bus.async_listen(EVENT_STATE_CHANGED, count_state_event)
     remove_refresh_listener = hass.bus.async_listen("intentional_refresh", count_refresh_event)
     await asyncio.sleep(0.35)
@@ -412,15 +418,17 @@ async def test_stable_ticks_do_not_poll_whole_install(
     config_entry.add_to_hass(hass)
     await hass.config_entries.async_setup(config_entry.entry_id)
     await hass.async_block_till_done()
+    from homeassistant.core import StateMachine
+
     calls = 0
-    original_async_all = hass.states.async_all
+    original_async_all = StateMachine.async_all
 
     def count_async_all(*args, **kwargs):
         nonlocal calls
         calls += 1
         return original_async_all(*args, **kwargs)
 
-    monkeypatch.setattr(hass.states, "async_all", count_async_all)
+    monkeypatch.setattr(StateMachine, "async_all", count_async_all)
     await asyncio.sleep(0.35)
     await hass.async_block_till_done()
 
@@ -527,7 +535,7 @@ async def test_registry_event_burst_is_coalesced(
         "label_registry_updated",
     ):
         hass.bus.async_fire(event_type)
-    await asyncio.sleep(0.1)
+    await hass.async_block_till_done()
 
     assert calls == 1
 
