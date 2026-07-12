@@ -465,14 +465,15 @@ async def test_semantic_selector_uses_real_ha_area_membership(
     from homeassistant.helpers import entity_registry as er
 
     area = ar.async_get(hass).async_create("Office")
-    er.async_get(hass).async_get_or_create(
+    entity_registry = er.async_get(hass)
+    entity = entity_registry.async_get_or_create(
         "binary_sensor",
         "test",
         "office_motion",
         suggested_object_id="office_motion",
-        area_id=area.id,
         original_device_class="motion",
     )
+    entity_registry.async_update_entity(entity.entity_id, area_id=area.id)
     hass.states.async_set("binary_sensor.office_motion", "on")
     _write_semantic_rule(
         rule_dir, f"motion: {{detected: {{area: {area.id}}}}}"
@@ -493,20 +494,22 @@ async def test_semantic_selector_prefers_entity_area_and_filters_device(
     areas = ar.async_get(hass)
     device_area = areas.async_create("Device Area")
     entity_area = areas.async_create("Entity Area")
-    device = dr.async_get(hass).async_get_or_create(
+    device_registry = dr.async_get(hass)
+    device = device_registry.async_get_or_create(
         config_entry_id=config_entry.entry_id,
         identifiers={("test", "motion-device")},
-        area_id=device_area.id,
     )
-    entity = er.async_get(hass).async_get_or_create(
+    device_registry.async_update_device(device.id, area_id=device_area.id)
+    entity_registry = er.async_get(hass)
+    entity = entity_registry.async_get_or_create(
         "binary_sensor",
         "test",
         "device_motion",
         suggested_object_id="device_motion",
         device_id=device.id,
-        area_id=entity_area.id,
         original_device_class="motion",
     )
+    entity_registry.async_update_entity(entity.entity_id, area_id=entity_area.id)
     hass.states.async_set(entity.entity_id, "on")
     _write_semantic_rule(
         rule_dir,
@@ -548,15 +551,27 @@ async def test_registered_state_device_class_change_removal_and_recreation(
     assert engine.resolve("light.semantic_result") is None
 
     hass.states.async_set(entity.entity_id, "on", {"device_class": "motion"})
-    await hass.async_block_till_done()
+    for _ in range(20):
+        await hass.async_block_till_done()
+        if engine.resolve("light.semantic_result") is not None:
+            break
+        await asyncio.sleep(0.05)
     assert engine.resolve("light.semantic_result") is not None
 
     hass.states.async_remove(entity.entity_id)
-    await hass.async_block_till_done()
+    for _ in range(20):
+        await hass.async_block_till_done()
+        if engine.resolve("light.semantic_result") is None:
+            break
+        await asyncio.sleep(0.05)
     assert engine.resolve("light.semantic_result") is None
 
     hass.states.async_set(entity.entity_id, "on", {"device_class": "motion"})
-    await hass.async_block_till_done()
+    for _ in range(20):
+        await hass.async_block_till_done()
+        if engine.resolve("light.semantic_result") is not None:
+            break
+        await asyncio.sleep(0.05)
     assert engine.resolve("light.semantic_result") is not None
 
 
