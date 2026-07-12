@@ -24,7 +24,7 @@ import voluptuous as vol
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, ServiceCall, State
+from homeassistant.core import HomeAssistant, ServiceCall, State, callback
 from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
@@ -673,6 +673,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         finally:
             _runtime.registry_task = None
 
+    @callback
     def _registry_changed(_event) -> None:
         if _runtime.unloading:
             return

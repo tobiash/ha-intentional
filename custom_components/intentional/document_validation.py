@@ -172,7 +172,7 @@ def load_and_preflight_document(contents: str) -> tuple[list[Any], dict[str, lis
     rules, findings = validate_document(contents)
     if findings["errors"]:
         messages = "; ".join(finding["message"] for finding in findings["errors"])
-        raise RuleLoadError(messages)
+        raise RuleLoadError(f"Document preflight failed: {messages}")
     return rules, findings
 
 

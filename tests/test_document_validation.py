@@ -137,7 +137,7 @@ async def test_validate_api_warns_for_legacy_dangerous_target() -> None:
 
         async def json(self) -> dict[str, str]:
             return {
-                "contents": "- id: secure\n  when: true\n  emit: {target: lock.front, set: {state: locked}}\n"
+                "contents": "- id: secure\n  when: 'true'\n  emit: {target: lock.front, set: {state: locked}}\n"
             }
 
     response = await IntentionalValidateView().post(Request())
@@ -151,7 +151,7 @@ async def test_validate_api_warns_for_legacy_dangerous_target() -> None:
     ("fragment", "expected_message"),
     [
         ("when: sensor.room ==\n  emit: {target: light.room, set: {state: on}}", "validation"),
-        ("when: true\n  emit: {target: light.room, set: {brightness: '{{ broken'}}}", "validation"),
+        ("when: 'true'\n  emit: {target: light.room, set: {brightness: '{{ broken'}}}", "validation"),
     ],
 )
 async def test_validate_api_rejects_invalid_expressions_and_templates(

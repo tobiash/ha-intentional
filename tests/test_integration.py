@@ -316,6 +316,11 @@ async def test_stable_ticks_do_not_publish_or_write_entity_state(
 
     assert hass.states.get("sensor.intentional_intent_engine_summary") is not None
 
+    # Entity registry persistence is deferred beyond async_block_till_done().
+    # Let setup's write settle before measuring stable Tick runtime behavior.
+    await asyncio.sleep(0.35)
+    await hass.async_block_till_done()
+
     publications = writes = state_events = refresh_events = 0
     store_writes = registry_mutations = service_calls = 0
     diagnostics_before = len(list_diagnostics(hass))
@@ -528,13 +533,13 @@ async def test_registry_event_burst_is_coalesced(
         return original(*args, **kwargs)
 
     monkeypatch.setattr(intentional, "_apply_membership_change", count_apply)
-    for event_type in (
-        "entity_registry_updated",
-        "device_registry_updated",
-        "area_registry_updated",
-        "label_registry_updated",
+    for event_type, data in (
+        ("entity_registry_updated", {"action": "update", "entity_id": "light.test", "changes": {}}),
+        ("device_registry_updated", {"action": "update", "device_id": "test", "changes": {}}),
+        ("area_registry_updated", {"action": "update", "area_id": "test"}),
+        ("label_registry_updated", {"action": "update", "label_id": "test"}),
     ):
-        hass.bus.async_fire(event_type)
+        hass.bus.async_fire(event_type, data)
     await hass.async_block_till_done()
 
     assert calls == 1

@@ -131,7 +131,7 @@ async def test_storage_rule_store_rejects_document_preflight_errors_atomically(
 
     error = await store.async_write(
         RULE_STORE_FILENAME,
-        "- id: press\n  when: true\n  emit: {target: button.restart, set: {state: on}}\n",
+        "- id: press\n  when: 'true'\n  emit: {target: button.restart, set: {state: on}}\n",
     )
 
     assert "Document preflight failed" in error
@@ -142,7 +142,7 @@ async def test_storage_rule_store_rejects_document_preflight_errors_atomically(
     "invalid_fragment",
     [
         "  when: sensor.room ==\n  emit: {target: light.room, set: {state: on}}\n",
-        "  when: true\n  emit: {target: light.room, set: {brightness: '{{ broken'}}}\n",
+        "  when: 'true'\n  emit: {target: light.room, set: {brightness: '{{ broken'}}}\n",
     ],
 )
 async def test_storage_rule_store_rejects_invalid_expressions_and_templates_atomically(
@@ -187,7 +187,7 @@ async def test_mutation_reload_failure_restores_content_generation_and_history(
         _coordinator(store, hass),
         lambda: store.async_write(
             RULE_STORE_FILENAME,
-            "- id: next\n  when: true\n  emit: {target: light.next, set: {state: on}}\n",
+            "- id: next\n  when: 'true'\n  emit: {target: light.next, set: {state: on}}\n",
         ),
         expected_generation=store.generation,
     )
@@ -213,7 +213,7 @@ async def test_manual_reload_waits_for_mutation_prepare_commit_boundary(
     store = StorageRuleStore(fake_hass, "entry-1")
     await store.async_load_or_import("/missing")
     original = store.contents
-    replacement = "- id: next\n  when: true\n  emit: {target: light.next, set: {state: on}}\n"
+    replacement = "- id: next\n  when: 'true'\n  emit: {target: light.next, set: {state: on}}\n"
     mutation_written = asyncio.Event()
     release_mutation = asyncio.Event()
     committed: list[str] = []
@@ -260,12 +260,12 @@ async def test_mutation_save_failure_restores_exact_snapshot_and_allows_retry(
     await store.async_load_or_import("/missing")
     original = (
         "- id: original\n"
-        "  when: true\n"
+        "  when: 'true'\n"
         "  emit: {target: light.original, set: {state: on}}\n"
     )
     replacement = (
         "- id: original\n"
-        "  when: false\n"
+        "  when: 'false'\n"
         "  emit: {target: light.original, set: {state: off}}\n"
     )
     await store.async_write(RULE_STORE_FILENAME, original)
@@ -334,7 +334,7 @@ async def test_mutation_recovery_save_failure_keeps_original_error_and_memory_sn
     hass = SimpleNamespace(services=SimpleNamespace(async_call=async_call))
     contents = (
         "- id: next\n"
-        "  when: true\n"
+        "  when: 'true'\n"
         "  emit: {target: light.next, set: {state: on}}\n"
     )
     def mutation():
