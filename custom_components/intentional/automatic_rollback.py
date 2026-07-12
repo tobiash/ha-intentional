@@ -98,6 +98,8 @@ class AutomaticRollback:
         stable_seconds = (_utc_now() - armed_at).total_seconds() if armed_at else 0
         if self._journal["success_ticks"] >= SUCCESS_TICK_LIMIT or stable_seconds >= STABLE_SECONDS:
             self._journal.update({"state": "disarmed", "reason": "stable"})
+            self._journal.pop("current_generation", None)
+            self._journal.pop("previous_generation", None)
             self._record("automatic_rollback_disarmed", reason="stable")
         await self._save()
 
