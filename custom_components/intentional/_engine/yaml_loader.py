@@ -54,7 +54,7 @@ from .capabilities import vnext_intent_policy_error
 from .durations import parse_duration
 from .generation import ValueGeneratorSpec, parse_generator_spec
 from .intent import Authority
-from .records import Effect, IntentSelector, ObserveSelector
+from .records import Effect, IntentSelector, ObservationGroup, ObserveSelector
 from .rule_model import Rule, RuleDirFingerprint, RuleLoadError
 from .target_policy import TargetPolicy
 
@@ -133,6 +133,19 @@ def _validate_rule(
             file=file, line=line,
         )
 
+    observation_groups = _parse_semantic_groups(
+        raw.get("while", raw.get("observe")),
+        clause_path="while",
+        file=file,
+        line=line,
+    )
+    hold_raw = raw.get("hold") if isinstance(raw.get("hold"), dict) else {}
+    hold_observation_groups = _parse_semantic_groups(
+        hold_raw.get("while"), clause_path="hold.while", file=file, line=line, allow_for=False
+    )
+    hold_until_observation_groups = _parse_semantic_groups(
+        hold_raw.get("until"), clause_path="hold.until", file=file, line=line, allow_for=False
+    )
     raw = _normalize_vnext_rule(raw, file=file, line=line)
 
     # id
@@ -338,6 +351,9 @@ def _validate_rule(
         intent_selectors=intent_selectors,
         observe_selectors=observe_selectors,
         observe_selector_mode=observe_selector_mode,
+        observation_groups=observation_groups,
+        hold_observation_groups=hold_observation_groups,
+        hold_until_observation_groups=hold_until_observation_groups,
         edge_created=bool(raw.get("edge_created", False)),
         enabled=enabled,
         labels=tuple(labels_raw),
@@ -404,6 +420,11 @@ def _normalize_vnext_rule(
         observe_for = normalized["observe"].get("for", normalized["observe"].get("stable_for"))
         if observe_for is not None:
             normalized["for"] = observe_for
+        semantic_for = _semantic_for(normalized["observe"], file=file, line=line)
+        if semantic_for is not None:
+            if observe_for is not None:
+                raise RuleLoadError("Use only one observation dwell", file=file, line=line)
+            normalized["for"] = semantic_for
     if "for" not in normalized and "after" in normalized:
         normalized["for"] = normalized["after"]
     if "for" not in normalized and "stable_for" in normalized:
@@ -539,6 +560,13 @@ def _observe_contains_edge(observe: Any) -> bool:
         return False
     if "changed" in observe or "happened" in observe:
         return True
+    if any(
+        isinstance(clause, dict)
+        and any(isinstance(spec, dict) and spec.get("changed") is True for spec in clause.values())
+        for purpose, clause in observe.items()
+        if purpose in _SEMANTIC_PURPOSES
+    ):
+        return True
     for key in ("all", "any", "none"):
         items = observe.get(key)
         if isinstance(items, list) and any(_observe_contains_edge(item) for item in items):
@@ -555,6 +583,13 @@ def _observe_to_when(
     """Convert a compact level observation to the current when expression."""
     if not isinstance(observe, dict):
         raise RuleLoadError("`observe` must be a mapping", file=file, line=line)
+    if _parse_semantic_groups(observe, clause_path="while", file=file, line=line):
+        ordinary = {
+            key: value
+            for key, value in observe.items()
+            if key not in _SEMANTIC_PURPOSES and key not in {"for", "stable_for"}
+        }
+        return _observe_to_when(ordinary, file=file, line=line) if ordinary else "true"
     if set(observe) == {"any"}:
         return _observe_group_to_when("any", observe["any"], file=file, line=line)
     if set(observe) == {"all"}:
@@ -1216,6 +1251,166 @@ def _observe_selector_expected_value(value: Any) -> Any:
     if value is False:
         return "off"
     return value
+
+
+_SEMANTIC_PURPOSES = {
+    "motion": ("binary_sensor", "motion"),
+    "occupancy": ("binary_sensor", "occupancy"),
+    "door": ("binary_sensor", "door"),
+    "window": ("binary_sensor", "window"),
+    "moisture": ("binary_sensor", "moisture"),
+    "temperature": ("sensor", "temperature"),
+    "illuminance": ("sensor", "illuminance"),
+}
+_BINARY_COMPARISONS = {
+    "motion": {"detected": "on", "clear": "off"},
+    "occupancy": {"occupied": "on", "clear": "off"},
+    "door": {"open": "on", "closed": "off"},
+    "window": {"open": "on", "closed": "off"},
+    "moisture": {"wet": "on", "dry": "off"},
+}
+_SEMANTIC_FILTERS = {"area", "entity", "device", "behavior", "exclude", "for"}
+_SEMANTIC_OPERATORS = {
+    "above": "gt", "below": "lt", "is": "is", "is_not": "is_not",
+    "lt": "lt", "lte": "lte", "gt": "gt", "gte": "gte",
+}
+
+
+def _semantic_for(observe: dict[str, Any], *, file: Path | None, line: int | None) -> Any:
+    values = []
+    for purpose, clause in observe.items():
+        if purpose not in _SEMANTIC_PURPOSES or not isinstance(clause, dict):
+            continue
+        for spec in clause.values():
+            if isinstance(spec, dict) and "for" in spec:
+                values.append(spec["for"])
+    if len(values) > 1:
+        raise RuleLoadError("Semantic clauses cannot declare multiple independent `for` values", file=file, line=line)
+    return values[0] if values else None
+
+
+def _parse_semantic_groups(
+    observe: Any,
+    *,
+    clause_path: str,
+    file: Path | None,
+    line: int | None,
+    allow_for: bool = True,
+) -> tuple[ObservationGroup, ...]:
+    """Parse purpose-first observations into independently aggregated groups."""
+    if not isinstance(observe, dict):
+        return ()
+    _reject_nested_semantic_purposes(
+        observe, clause_path=clause_path, file=file, line=line
+    )
+    groups: list[ObservationGroup] = []
+    for purpose, raw_clause in observe.items():
+        if purpose in {"for", "stable_for"}:
+            continue
+        if purpose not in _SEMANTIC_PURPOSES:
+            continue
+        if not isinstance(raw_clause, dict) or len(raw_clause) != 1:
+            raise RuleLoadError(f"Semantic `{purpose}` must contain exactly one comparison", file=file, line=line)
+        comparison, spec = next(iter(raw_clause.items()))
+        if spec is None:
+            spec = {}
+        if not isinstance(spec, dict):
+            if comparison not in _SEMANTIC_OPERATORS:
+                raise RuleLoadError(f"Semantic `{purpose}.{comparison}` must be a mapping", file=file, line=line)
+            spec = {"value": spec}
+        unknown = set(spec) - _SEMANTIC_FILTERS - {"value", "changed"}
+        if unknown:
+            raise RuleLoadError(f"Semantic `{purpose}` has unknown fields {sorted(unknown)}", file=file, line=line)
+        behavior = spec.get("behavior", "any")
+        if behavior not in {"any", "all", "none"}:
+            raise RuleLoadError("Semantic `behavior` must be any, all, or none", file=file, line=line)
+        domain, _device_class = _SEMANTIC_PURPOSES[purpose]
+        for filter_name in ("area", "device", "entity"):
+            filter_value = spec.get(filter_name)
+            if filter_value is not None and (
+                not isinstance(filter_value, str) or not filter_value
+            ):
+                raise RuleLoadError(
+                    f"Semantic `{filter_name}` must be a non-empty string",
+                    file=file,
+                    line=line,
+                )
+        if "for" in spec and not allow_for:
+            raise RuleLoadError(
+                "Semantic `for` is not supported inside `hold` clauses",
+                file=file,
+                line=line,
+            )
+        if purpose in {"temperature", "illuminance"}:
+            operator = _SEMANTIC_OPERATORS.get(comparison)
+            if operator is None or "value" not in spec:
+                raise RuleLoadError(f"Semantic `{purpose}` requires above/below/is/is_not/lt/lte/gt/gte with a numeric value", file=file, line=line)
+            expected = spec["value"]
+            if not isinstance(expected, (int, float)) or isinstance(expected, bool):
+                raise RuleLoadError(f"Semantic `{purpose}` comparison must be numeric", file=file, line=line)
+        else:
+            expected = _BINARY_COMPARISONS[purpose].get(comparison)
+            if expected is None:
+                vocabulary = "/".join(_BINARY_COMPARISONS[purpose])
+                raise RuleLoadError(
+                    f"Semantic `{purpose}` requires {vocabulary}", file=file, line=line
+                )
+            operator = "is"
+        exclude = spec.get("exclude", [])
+        if not isinstance(exclude, list) or not all(isinstance(item, str) for item in exclude):
+            raise RuleLoadError("Semantic `exclude` must be a list of entity IDs", file=file, line=line)
+        edge = spec.get("changed", False)
+        if edge not in {False, True}:
+            raise RuleLoadError("Semantic `changed` must be a boolean", file=file, line=line)
+        if edge and "for" in spec:
+            raise RuleLoadError(
+                "Semantic `changed` cannot be combined with `for`",
+                file=file,
+                line=line,
+            )
+        if edge and purpose in {"temperature", "illuminance"}:
+            raise RuleLoadError(
+                "Semantic `changed` is only supported for binary observations",
+                file=file,
+                line=line,
+            )
+        groups.append(ObservationGroup(ObserveSelector(
+            domain=domain, area=spec.get("area"), device=spec.get("device"),
+            entity=spec.get("entity"), purpose=purpose, exclude=tuple(exclude),
+            field="state", operator=operator, value=expected, edge=bool(edge),
+        ), behavior=behavior))
+    return tuple(groups)
+
+
+def _reject_nested_semantic_purposes(
+    observe: dict[str, Any],
+    *,
+    clause_path: str,
+    file: Path | None,
+    line: int | None,
+) -> None:
+    """Reject semantic clauses where ordinary boolean aggregation would erase them."""
+    for operator in ("any", "all", "none", "not"):
+        if operator not in observe:
+            continue
+        pending = [observe[operator]]
+        while pending:
+            value = pending.pop()
+            if isinstance(value, list):
+                pending.extend(value)
+                continue
+            if not isinstance(value, dict):
+                continue
+            purpose = next((key for key in value if key in _SEMANTIC_PURPOSES), None)
+            if purpose is not None:
+                raise RuleLoadError(
+                    f"Semantic purpose `{purpose}` cannot be nested inside ordinary "
+                    f"`{operator}` in `{clause_path}`; put it at the top level and use "
+                    "semantic `behavior`",
+                    file=file,
+                    line=line,
+                )
+            pending.extend(value.values())
 
 
 def _parse_intent_selector(

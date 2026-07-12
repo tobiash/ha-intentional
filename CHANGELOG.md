@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-07-12
+
+### Added
+- **Purpose-specific semantic observations** describe motion, occupancy, doors, windows, moisture, temperature, and illuminance by area, device, or entity instead of binding Rules to one sensor.
+- **Semantic aggregation** supports `any`, `all`, and `none`, binary active/clear vocabulary, numeric comparisons, Rule dwell, retention conditions, and false-to-true State-change pulses.
+- **Semantic simulation and replay** accept deterministic entity metadata, derive and drain State-change pulses, and preserve behavior across restart checkpoints.
+- **Semantic explanations and schema** expose purpose, scope, aggregation, membership, match counts, edge status, and retention phase.
+
+### Changed
+- **Selector membership** resolves effective Home Assistant device classes from entity overrides, original classes, and live state metadata while reacting to area, device, registry, and metadata lifecycle changes.
+- **Home Assistant CI** now validates against Home Assistant 2026.7.2 and includes live semantic membership, area precedence, device filtering, state-only entities, and cache invalidation coverage.
+
+### Fixed
+- Mixed semantic, ordinary, and legacy selector observations compose without dropping authored conditions.
+- Unsupported nested semantic Boolean clauses, edge dwell, hold-local dwell, numeric edge ambiguity, invalid target filters, and purpose-inappropriate vocabulary fail validation instead of silently changing behavior.
+
 ## [0.8.5] - 2026-07-12
 
 ### Fixed

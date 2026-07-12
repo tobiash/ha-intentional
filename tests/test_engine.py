@@ -718,6 +718,7 @@ rules:
         assert diagnostics == [
             {
                 "rule_id": "selected-motion",
+                "phase": "while",
                 "mode": "any",
                 "selector": {
                     "domain": "binary_sensor",
@@ -741,6 +742,66 @@ rules:
                 ],
             }
         ]
+
+    def test_world_model_labels_semantic_hold_selector_phases(self) -> None:
+        from intentional.yaml_loader import load_rules_from_string
+
+        engine = Engine(selector_resolver=lambda selector: [f"binary_sensor.{selector.purpose}"])
+        engine.load_rules(load_rules_from_string("""
+- id: held-light
+  while: {motion: {detected: {area: office}}}
+  hold:
+    while: {occupancy: {occupied: {area: office}}}
+    until: {door: {open: {area: office}}}
+  intent: {light.office: {state: on}}
+"""))
+
+        diagnostics = engine.world_model()["selector_diagnostics"]
+
+        assert [(item["selector"]["purpose"], item["phase"]) for item in diagnostics] == [
+            ("motion", "while"),
+            ("occupancy", "hold.while"),
+            ("door", "hold.until"),
+        ]
+
+    def test_semantic_and_legacy_observation_selectors_are_anded(self) -> None:
+        from intentional.records import ObservationGroup, ObserveSelector
+        from intentional.rule_model import Rule
+        from intentional.selectors import observe_selectors_fire
+
+        semantic = ObserveSelector(purpose="motion", value="on")
+        legacy = ObserveSelector(label="doors", value="on")
+        state = {
+            "binary_sensor.motion.state": "on",
+            "binary_sensor.door_a.state": "off",
+            "binary_sensor.door_b.state": "off",
+        }
+        memberships = {
+            "motion": ["binary_sensor.motion"],
+            "doors": ["binary_sensor.door_a", "binary_sensor.door_b"],
+        }
+        def resolver(selected):
+            return memberships[selected.purpose or selected.label]
+
+        for mode, expected in (("any", False), ("all", False), ("none", True)):
+            authored = Rule(
+                id=f"mixed-{mode}",
+                when="true",
+                observe_selectors=(legacy,),
+                observe_selector_mode=mode,
+                observation_groups=(ObservationGroup(semantic),),
+            )
+            assert observe_selectors_fire(authored, state, resolver) is expected
+
+        state["binary_sensor.motion.state"] = "off"
+        none_rule = Rule(
+            id="mixed-none",
+            when="true",
+            observe_selectors=(legacy,),
+            observe_selector_mode="none",
+            observation_groups=(ObservationGroup(semantic),),
+        )
+        assert not observe_selectors_fire(none_rule, state, resolver)
 
     def test_level_intent_lingers_after_observation_stops(self) -> None:
         from intentional.yaml_loader import load_rules_from_string
@@ -1938,3 +1999,60 @@ def _make_pulse_anim(repeat: int = 1) -> Any:
         duration_ms=2000,
         repeat=repeat,
     )
+def test_semantic_groups_are_independent_and_support_edges() -> None:
+    from intentional.engine import Engine
+    from intentional.yaml_loader import load_rules_from_string
+
+    rules = load_rules_from_string("""
+- id: safe-motion
+  while:
+    motion: {detected: {area: office, changed: true}}
+    door: {closed: {area: office, behavior: all}}
+  emit: {target: light.office, set: {state: on}}
+""")
+    memberships = {"motion": ["binary_sensor.motion"], "door": ["binary_sensor.door"]}
+    engine = Engine(clock_fn=lambda: 0, selector_resolver=lambda selector: memberships[selector.purpose])
+    engine.load_rules(rules)
+    engine.update_state("binary_sensor.motion", "on")
+    engine.update_state("binary_sensor.motion", True, field="changed")
+    engine.update_state("binary_sensor.door", "off")
+    engine.evaluate_all()
+
+    assert engine.resolve("light.office") is not None
+
+
+def test_semantic_and_ordinary_observations_must_both_match() -> None:
+    from intentional.yaml_loader import load_rules_from_string
+
+    rules = load_rules_from_string("""
+- id: guarded-motion
+  while:
+    motion: {detected: {area: office}}
+    input_boolean.enabled: {is: on}
+  emit: {target: light.office, set: {state: on}}
+""")
+    engine = Engine(
+        clock_fn=lambda: 0,
+        selector_resolver=lambda _selector: ["binary_sensor.motion"],
+    )
+    engine.load_rules(rules)
+    engine.update_state("binary_sensor.motion", "on")
+    engine.update_state("input_boolean.enabled", "off")
+    engine.evaluate_all()
+    assert engine.resolve("light.office") is None
+
+    engine.update_state("input_boolean.enabled", "on")
+    engine.evaluate_all()
+    assert engine.resolve("light.office") is not None
+
+
+def test_unavailable_only_forces_semantic_selector_nonmatch() -> None:
+    from intentional.records import ObserveSelector
+    from intentional.selectors import observe_selector_target_matches
+
+    state = {"sensor.temperature.state": "unavailable"}
+    legacy = ObserveSelector(operator="is_not", value="on")
+    semantic = ObserveSelector(purpose="temperature", operator="is_not", value=21)
+
+    assert observe_selector_target_matches(state, "sensor.temperature", legacy)
+    assert not observe_selector_target_matches(state, "sensor.temperature", semantic)

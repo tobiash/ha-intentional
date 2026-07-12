@@ -36,6 +36,43 @@ def dsl_schema() -> dict[str, Any]:
             "hold.after", "hold.after_when_stops",
         ],
         "simulation_endpoint": "/api/intentional/simulate",
+        "replay_endpoint": "/api/intentional/replay",
+        "simulation_endpoints": ["/api/intentional/simulate", "/api/intentional/replay"],
         "effect_service_policy": "any_home_assistant_domain_service",
         "selector_filters": ["domain", "area", "label", "exclude"],
+        "semantic_observations": {
+            "purposes": {
+                "motion": ["binary_sensor", "motion"],
+                "occupancy": ["binary_sensor", "occupancy"],
+                "door": ["binary_sensor", "door"],
+                "window": ["binary_sensor", "window"],
+                "moisture": ["binary_sensor", "moisture"],
+                "temperature": ["sensor", "temperature"],
+                "illuminance": ["sensor", "illuminance"],
+            },
+            "authored_filters": ["area", "entity", "device", "exclude"],
+            "behavior": ["any", "all", "none"],
+            "binary_states": {
+                "motion": ["detected", "clear"],
+                "occupancy": ["occupied", "clear"],
+                "door": ["open", "closed"],
+                "window": ["open", "closed"],
+                "moisture": ["wet", "dry"],
+            },
+            "numeric_comparisons": ["above", "below", "is", "is_not", "lt", "lte", "gt", "gte"],
+            "edge_field": "changed",
+        },
+        "simulation_selector_membership": {
+            "field": "selectors",
+            "selector_filters": ["domain", "area", "label", "device", "entity", "purpose"],
+            "target_field": "targets",
+        },
+        "simulation_semantic_metadata": {
+            "field": "semantic_metadata",
+            "record_fields": [
+                "entity_id", "area", "device", "device_class", "original_device_class",
+            ],
+            "required_fields": ["entity_id"],
+            "device_class_precedence": ["device_class", "original_device_class"],
+        },
     }

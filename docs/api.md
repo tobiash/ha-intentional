@@ -355,6 +355,17 @@ and/or `label` filters to deterministic simulated Target IDs. Missing or
 duplicate memberships are rejected; an empty `targets` list explicitly models
 no matches. Membership is retained across simulated restarts.
 
+For purpose-specific observations, simulations may instead provide
+`semantic_metadata`, a list of `{entity_id, area?, device?, device_class?,
+original_device_class?}` records. The simulator resolves semantic memberships
+from these records and retains them across simulated restarts. State changes in
+the timeline derive one-cycle `changed` pulses automatically.
+
+`/api/intentional/replay` accepts the same top-level `selectors` and
+`semantic_metadata` fields and uses the same membership validation and semantic
+resolution rules. A replay containing selector-backed Rules is rejected when
+the required membership or semantic metadata is missing.
+
 Each timeline step may include:
 
 - `advance_ms`: non-negative integer clock advance before evaluation.

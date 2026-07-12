@@ -166,6 +166,36 @@ def test_high_leverage_views_have_correct_urls() -> None:
     assert hasattr(IntentionalReplayView, "post")
 
 
+async def test_replay_resolves_semantic_metadata_like_simulation() -> None:
+    from custom_components.intentional.api import IntentionalReplayView
+
+    class Request(dict):
+        app = {"hass": SimpleNamespace()}
+
+        async def json(self):
+            return {
+                "contents": """
+- id: motion
+  while: {motion: {detected: {area: office}}}
+  intent: {light.office: {state: on}}
+""",
+                "timeline": [{"states": {"binary_sensor.motion.state": "on"}}],
+                "semantic_metadata": [{
+                    "entity_id": "binary_sensor.motion",
+                    "area": "office",
+                    "original_device_class": "motion",
+                }],
+            }
+
+    response = await IntentionalReplayView().post(
+        Request(hass_user=SimpleNamespace(is_admin=True))
+    )
+    body = json.loads(response.body.decode())
+
+    assert response.status == 200
+    assert body["steps"][0]["active_targets"] == ["light.office"]
+
+
 def test_state_view_exposes_state() -> None:
     from custom_components.intentional.api import IntentionalStateView
 

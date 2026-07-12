@@ -54,7 +54,11 @@ from intentional.lifecycle import (
 )
 from intentional.records import EffectOutboxRecord, IntentSelector
 from intentional.rule_lifecycle import dominant_phase, min_optional, rule_phase
-from intentional.selectors import observe_selectors_fire, selector_diagnostics
+from intentional.selectors import (
+    observation_groups_fire,
+    observe_selectors_fire,
+    selector_diagnostics,
+)
 from intentional.target_policy import TargetPolicy
 from intentional.templates import TemplateRenderer
 from intentional.when_parser import TimeOfDay, WhenAST, evaluate_when, parse_when
@@ -522,7 +526,7 @@ class Engine:
                     self._rule_held_since.setdefault(intent.rule_id, now)
                     new_active.append(intent)
                     continue
-                if parsed.hold_when_ast is not None and self._eval_when(parsed.hold_when_ast):
+                if parsed.hold_when_ast is not None and self._eval_when(parsed.hold_when_ast) and observation_groups_fire(rule.hold_observation_groups, self.state, self._selector_resolver):
                     self._hold_until_true_since.pop(intent.rule_id, None)
                     self._rule_held_since.setdefault(intent.rule_id, now)
                     new_active.append(intent)
@@ -770,7 +774,7 @@ class Engine:
         if parsed.hold_until_ast is None:
             return True
         rule_id = parsed.rule.id
-        if not self._eval_when(parsed.hold_until_ast):
+        if not self._eval_when(parsed.hold_until_ast) or not observation_groups_fire(parsed.rule.hold_until_observation_groups, self.state, self._selector_resolver):
             self._hold_until_true_since.pop(rule_id, None)
             return False
         since = self._hold_until_true_since.get(rule_id)

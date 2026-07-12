@@ -371,14 +371,17 @@ Selectors let a rule observe groups discovered from Home Assistant metadata:
 ```yaml
 observe:
   select:
-    any:
-      domain: binary_sensor
-      area: living_room
-      label: motion
-      is: on
+    mode: any
+    entities:
+      - domain: binary_sensor
+        area: living_room
+        label: motion
+        state: on
 ```
 
-Supported selector modes are `any`, `all`, and `none`. Supported filters are `domain`, `area`, `label`, `exclude`, and `field`; `field` defaults to `state`.
+Supported selector modes are `any`, `all`, and `none`. Each `entities` entry
+accepts `domain`, `area`, `label`, and `exclude`; one additional key is the
+state or attribute field to compare and defaults to `state: on` when omitted.
 
 ## Intents
 
@@ -731,3 +734,34 @@ targets:
 `allowed_fields` is an allowlist for resolved fields. `forbidden_automatic_states` blocks the listed `state` values unless their winning provider has `user` Authority. `user_authority.fields` and `user_authority.states` impose the same Authority requirement selectively. `unavailable: skip` prevents calls while the Target is missing, `unknown`, or `unavailable`; `allow` preserves legacy dispatch. `max_retries` limits retries after the initial failed Service plan (`0` disables retries).
 
 Policy denials are reported as `service_denied_target_policy` Reconciliation events and are included in Target explanations, previews, and simulation steps.
+# Semantic observations
+
+Purpose-specific observations select entities by Home Assistant metadata, never
+by entity names. The fixed purposes are `motion`, `occupancy`, `door`, `window`,
+`moisture`, `temperature`, and `illuminance`:
+
+```yaml
+while:
+  motion:
+    detected: {area: office, behavior: any, for: 2s}
+```
+
+Selectors accept registry IDs in `area`, `device`, and `entity`, plus
+`behavior: any|all|none` and `exclude`. Binary purposes use a fixed vocabulary:
+motion `detected`/`clear`, occupancy `occupied`/`clear`, door `open`/`closed`,
+window `open`/`closed`, and moisture `wet`/`dry`. Numeric purposes use `above`, `below`,
+`is`, `is_not`, `lt`, `lte`, `gt`, or `gte`; use a mapping with `value` when
+also supplying filters: `temperature: {above: {value: 21, area: office}}`.
+
+Set `changed: true` on a matching binary observation for a false-to-true edge.
+It consumes the same one-cycle `.changed` pulse as expression observations.
+Each semantic clause is an independent selector group, so two clauses do not
+pool their members. Semantic observations are also accepted by `hold.while`
+and `hold.until`. Unavailable members remain selected but never match.
+Semantic purpose clauses must be top-level in those locations. They cannot be
+nested inside ordinary `any`, `all`, `none`, or `not`; use the purpose clause's
+`behavior` field to aggregate selected members.
+
+Membership uses domain and effective device class: registry override, registry
+original device class, then the state's `device_class` attribute. State-only
+entities participate when that metadata is sufficient.

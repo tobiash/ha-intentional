@@ -336,6 +336,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         lambda: entity_registry.entities.values(),
         area_for_entry=_entry_area,
         state_entity_ids=lambda: (state.entity_id for state in hass.states.async_all()),
+        state_metadata=lambda entity_id: (
+            dict(state.attributes) if (state := hass.states.get(entity_id)) is not None else None
+        ),
     )
     engine = Engine(selector_resolver=selector_planner.resolve)
     domain_data[entry.entry_id] = engine

@@ -61,7 +61,19 @@ class ObserveSelector:
     domain: str | None = None
     area: str | None = None
     label: str | None = None
+    device: str | None = None
+    entity: str | None = None
+    purpose: str | None = None
     exclude: tuple[str, ...] = field(default_factory=tuple)
     field: str = "state"
     operator: str = "is"
     value: Any = None
+    edge: bool = False
+
+
+@dataclass(frozen=True)
+class ObservationGroup:
+    """One independently aggregated selector observation."""
+
+    selector: ObserveSelector
+    behavior: str = "any"

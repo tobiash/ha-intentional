@@ -9,7 +9,7 @@ from typing import Any
 from .animation import AnimationSpec
 from .generation import ValueGeneratorSpec
 from .intent import Authority
-from .records import Effect, IntentSelector, ObserveSelector
+from .records import Effect, IntentSelector, ObservationGroup, ObserveSelector
 
 RuleDirFingerprint = tuple[tuple[str, int, int], ...]
 
@@ -73,6 +73,9 @@ class Rule:
     intent_selectors: tuple[IntentSelector, ...] = field(default_factory=tuple)
     observe_selectors: tuple[ObserveSelector, ...] = field(default_factory=tuple)
     observe_selector_mode: str = "any"
+    observation_groups: tuple[ObservationGroup, ...] = field(default_factory=tuple)
+    hold_observation_groups: tuple[ObservationGroup, ...] = field(default_factory=tuple)
+    hold_until_observation_groups: tuple[ObservationGroup, ...] = field(default_factory=tuple)
     edge_created: bool = False
     enabled: bool = True
     labels: tuple[str, ...] = field(default_factory=tuple)

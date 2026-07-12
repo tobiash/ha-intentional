@@ -207,6 +207,24 @@ def config_entry(rule_dir: Path) -> MockConfigEntry:
     )
 
 
+def _write_semantic_rule(rule_dir: Path, observation: str) -> None:
+    (rule_dir / "01-test.yaml").write_text(
+        "- id: semantic-test\n"
+        f"  while: {{{observation}}}\n"
+        "  intent: {light.semantic_result: {state: on}}\n"
+    )
+
+
+async def _setup_and_wait(
+    hass: HomeAssistant, config_entry: MockConfigEntry
+) -> object:
+    config_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await asyncio.sleep(0.15)
+    await hass.async_block_till_done()
+    return hass.data[DOMAIN][config_entry.entry_id]
+
+
 # ── Tests ──────────────────────────────────────────────────────────
 
 
@@ -438,6 +456,145 @@ async def test_stable_ticks_do_not_poll_whole_install(
     await hass.async_block_till_done()
 
     assert calls == 0
+
+
+async def test_semantic_selector_uses_real_ha_area_membership(
+    hass: HomeAssistant, config_entry: MockConfigEntry, rule_dir: Path
+) -> None:
+    from homeassistant.helpers import area_registry as ar
+    from homeassistant.helpers import entity_registry as er
+
+    area = ar.async_get(hass).async_create("Office")
+    er.async_get(hass).async_get_or_create(
+        "binary_sensor",
+        "test",
+        "office_motion",
+        suggested_object_id="office_motion",
+        area_id=area.id,
+        original_device_class="motion",
+    )
+    hass.states.async_set("binary_sensor.office_motion", "on")
+    _write_semantic_rule(
+        rule_dir, f"motion: {{detected: {{area: {area.id}}}}}"
+    )
+
+    engine = await _setup_and_wait(hass, config_entry)
+
+    assert engine.resolve("light.semantic_result") is not None
+
+
+async def test_semantic_selector_prefers_entity_area_and_filters_device(
+    hass: HomeAssistant, config_entry: MockConfigEntry, rule_dir: Path
+) -> None:
+    from homeassistant.helpers import area_registry as ar
+    from homeassistant.helpers import device_registry as dr
+    from homeassistant.helpers import entity_registry as er
+
+    areas = ar.async_get(hass)
+    device_area = areas.async_create("Device Area")
+    entity_area = areas.async_create("Entity Area")
+    device = dr.async_get(hass).async_get_or_create(
+        config_entry_id=config_entry.entry_id,
+        identifiers={("test", "motion-device")},
+        area_id=device_area.id,
+    )
+    entity = er.async_get(hass).async_get_or_create(
+        "binary_sensor",
+        "test",
+        "device_motion",
+        suggested_object_id="device_motion",
+        device_id=device.id,
+        area_id=entity_area.id,
+        original_device_class="motion",
+    )
+    hass.states.async_set(entity.entity_id, "on")
+    _write_semantic_rule(
+        rule_dir,
+        f"motion: {{detected: {{area: {entity_area.id}, device: {device.id}}}}}",
+    )
+
+    engine = await _setup_and_wait(hass, config_entry)
+
+    assert engine.resolve("light.semantic_result") is not None
+
+
+async def test_semantic_selector_uses_state_only_entity_device_class(
+    hass: HomeAssistant, config_entry: MockConfigEntry, rule_dir: Path
+) -> None:
+    hass.states.async_set(
+        "binary_sensor.state_only_motion", "on", {"device_class": "motion"}
+    )
+    _write_semantic_rule(rule_dir, "motion: {detected: {}}")
+
+    engine = await _setup_and_wait(hass, config_entry)
+
+    assert engine.resolve("light.semantic_result") is not None
+
+
+async def test_registered_state_device_class_change_removal_and_recreation(
+    hass: HomeAssistant, config_entry: MockConfigEntry, rule_dir: Path
+) -> None:
+    from homeassistant.helpers import entity_registry as er
+
+    entity = er.async_get(hass).async_get_or_create(
+        "binary_sensor",
+        "test",
+        "dynamic_class",
+        suggested_object_id="dynamic_class",
+    )
+    hass.states.async_set(entity.entity_id, "on", {"device_class": "door"})
+    _write_semantic_rule(rule_dir, "motion: {detected: {}}")
+    engine = await _setup_and_wait(hass, config_entry)
+    assert engine.resolve("light.semantic_result") is None
+
+    hass.states.async_set(entity.entity_id, "on", {"device_class": "motion"})
+    await hass.async_block_till_done()
+    assert engine.resolve("light.semantic_result") is not None
+
+    hass.states.async_remove(entity.entity_id)
+    await hass.async_block_till_done()
+    assert engine.resolve("light.semantic_result") is None
+
+    hass.states.async_set(entity.entity_id, "on", {"device_class": "motion"})
+    await hass.async_block_till_done()
+    assert engine.resolve("light.semantic_result") is not None
+
+
+async def test_semantic_selector_ordinary_state_changes_keep_cached_membership(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    rule_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from homeassistant.helpers import entity_registry as er
+
+    import custom_components.intentional.selector_ingest as selector_ingest
+
+    entity = er.async_get(hass).async_get_or_create(
+        "binary_sensor",
+        "test",
+        "cached_motion",
+        suggested_object_id="cached_motion",
+        original_device_class="motion",
+    )
+    hass.states.async_set(entity.entity_id, "off")
+    _write_semantic_rule(rule_dir, "motion: {detected: {}}")
+    await _setup_and_wait(hass, config_entry)
+
+    scans = 0
+    original = selector_ingest._entry_matches
+
+    def count_scan(*args, **kwargs):
+        nonlocal scans
+        scans += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(selector_ingest, "_entry_matches", count_scan)
+    hass.states.async_set(entity.entity_id, "on")
+    await asyncio.sleep(0.15)
+    await hass.async_block_till_done()
+
+    assert scans == 0
 
 
 async def test_mutation_publishes_entity_updates_without_refresh_event(

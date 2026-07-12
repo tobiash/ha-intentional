@@ -329,3 +329,64 @@ def test_simulation_bounds_selector_expansion() -> None:
 
     with pytest.raises(ValueError, match="expand to at most"):
         validate_simulation_input([], {}, selector_memberships=memberships)
+
+
+@pytest.mark.asyncio
+async def test_simulation_derives_semantic_edge_pulse_and_keeps_metadata_on_restart() -> None:
+    from intentional.yaml_loader import load_rules_from_string
+
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string("""
+- id: motion-edge
+  while: {motion: {detected: {area: office, changed: true}}}
+  intent: {light.office: {state: on, ttl: 5s}}
+"""))
+    steps = await simulate_timeline(
+        engine,
+        [
+            {"states": {"binary_sensor.motion.state": "off"}},
+            {"states": {"binary_sensor.motion.state": "on"}},
+            {"restart": True},
+        ],
+        semantic_metadata=[{
+            "entity_id": "binary_sensor.motion", "area": "office",
+            "original_device_class": "motion",
+        }],
+    )
+
+    assert steps[0]["active_targets"] == []
+    assert steps[1]["active_targets"] == ["light.office"]
+    assert steps[2]["active_targets"] == ["light.office"]
+
+
+def test_schema_describes_semantic_simulation_and_replay_inputs() -> None:
+    from intentional.schema import dsl_schema
+
+    schema = dsl_schema()
+
+    assert schema["simulation_endpoints"] == [
+        "/api/intentional/simulate",
+        "/api/intentional/replay",
+    ]
+    assert schema["semantic_observations"]["authored_filters"] == [
+        "area", "entity", "device", "exclude",
+    ]
+    assert schema["semantic_observations"]["binary_states"] == {
+        "motion": ["detected", "clear"],
+        "occupancy": ["occupied", "clear"],
+        "door": ["open", "closed"],
+        "window": ["open", "closed"],
+        "moisture": ["wet", "dry"],
+    }
+    assert "purpose" in schema["simulation_selector_membership"]["selector_filters"]
+    assert schema["simulation_semantic_metadata"]["required_fields"] == ["entity_id"]
+
+
+def test_simulation_rejects_duplicate_semantic_metadata_entities() -> None:
+    metadata = [
+        {"entity_id": "binary_sensor.motion", "device_class": "motion"},
+        {"entity_id": "binary_sensor.motion", "device_class": "motion"},
+    ]
+
+    with pytest.raises(ValueError, match="duplicates an entity ID"):
+        validate_simulation_input([], {}, semantic_metadata=metadata)

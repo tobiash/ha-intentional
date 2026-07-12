@@ -1287,3 +1287,117 @@ class TestFileLoading:
 
     def test_rule_dir_fingerprint_missing_directory_is_empty(self, tmp_path: Path) -> None:
         assert rule_dir_fingerprint(tmp_path / "missing") == ()
+def test_semantic_observation_loads_target_first_group_and_dwell() -> None:
+    from intentional.yaml_loader import load_rules_from_string
+
+    rule = load_rules_from_string("""
+- id: office-motion
+  while: {motion: {detected: {area: office, behavior: any, for: 2s}}}
+  emit: {target: light.office, set: {state: on}}
+""")[0]
+
+    assert rule.when == "true"
+    assert rule.for_ms == 2000
+    group = rule.observation_groups[0]
+    assert (group.selector.purpose, group.selector.domain, group.selector.area) == ("motion", "binary_sensor", "office")
+
+
+def test_semantic_observation_composes_with_ordinary_observation() -> None:
+    rule = load_rules_from_string("""
+- id: guarded-motion
+  while:
+    motion: {detected: {area: office}}
+    input_boolean.enabled: {is: on}
+  emit: {target: light.office, set: {state: on}}
+""")[0]
+
+    assert rule.when == 'input_boolean.enabled == "on"'
+    assert len(rule.observation_groups) == 1
+
+
+@pytest.mark.parametrize(
+    "observation, message",
+    [
+        ("motion: {detected: {changed: true, for: 2s}}", "cannot be combined"),
+        ("temperature: {above: {value: 21, changed: true}}", "only supported for binary"),
+        ("motion: {detected: {area: []}}", "area.*non-empty string"),
+        ("motion: {detected: {device: ''}}", "device.*non-empty string"),
+        ("motion: {detected: {entity: 7}}", "entity.*non-empty string"),
+    ],
+)
+def test_semantic_observation_rejects_unsafe_shapes(observation: str, message: str) -> None:
+    with pytest.raises(RuleLoadError, match=message):
+        load_rules_from_string(f"""
+- id: invalid-semantic
+  while: {{{observation}}}
+  emit: {{target: light.office, set: {{state: on}}}}
+""")
+
+
+@pytest.mark.parametrize("hold_key", ["while", "until"])
+def test_semantic_hold_rejects_clause_dwell(hold_key: str) -> None:
+    with pytest.raises(RuleLoadError, match="not supported inside `hold`"):
+        load_rules_from_string(f"""
+- id: invalid-hold-dwell
+  while: {{motion: {{detected: {{}}}}}}
+  hold:
+    {hold_key}: {{occupancy: {{occupied: {{for: 5s}}}}}}
+  emit: {{target: light.office, set: {{state: on}}}}
+""")
+
+
+@pytest.mark.parametrize(
+    ("location", "operator"),
+    [
+        ("while", "any"),
+        ("while", "all"),
+        ("while", "none"),
+        ("while", "not"),
+        ("hold.while", "any"),
+        ("hold.until", "not"),
+    ],
+)
+def test_semantic_purpose_rejects_ordinary_boolean_nesting(
+    location: str, operator: str
+) -> None:
+    nested = (
+        f"{{{operator}: {{motion: {{detected: {{}}}}}}}}"
+        if operator == "not"
+        else f"{{{operator}: [{{motion: {{detected: {{}}}}}}]}}"
+    )
+    if location == "while":
+        main = nested
+        hold = ""
+    else:
+        main = "{motion: {detected: {}}}"
+        hold_key = location.partition(".")[2]
+        hold = f"  hold:\n    {hold_key}: {nested}\n"
+
+    with pytest.raises(
+        RuleLoadError,
+        match=rf"Semantic purpose `motion` cannot be nested inside ordinary `{operator}` in `{location}`",
+    ):
+        load_rules_from_string(
+            f"- id: nested-semantic\n  while: {main}\n{hold}"
+            "  emit: {target: light.office, set: {state: on}}\n"
+        )
+
+
+@pytest.mark.parametrize(
+    ("purpose", "comparison"),
+    [
+        ("motion", "active"),
+        ("occupancy", "vacant"),
+        ("door", "clear"),
+        ("window", "detected"),
+        ("moisture", "clear"),
+    ],
+)
+def test_semantic_binary_vocabulary_is_purpose_specific(
+    purpose: str, comparison: str
+) -> None:
+    with pytest.raises(RuleLoadError, match=rf"Semantic `{purpose}` requires"):
+        load_rules_from_string(
+            f"- id: invalid-vocabulary\n  while: {{{purpose}: {{{comparison}: {{}}}}}}\n"
+            "  emit: {target: light.office, set: {state: on}}\n"
+        )

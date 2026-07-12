@@ -79,6 +79,7 @@ def validate_simulation_input(
     *,
     projected_rule_targets: int = 0,
     selector_memberships: Any = None,
+    semantic_metadata: Any = None,
 ) -> None:
     """Strictly validate and bound an API simulation request."""
     if not isinstance(timeline, list):
@@ -102,6 +103,7 @@ def validate_simulation_input(
     if projected_rule_targets > MAX_PROJECTED_TARGETS:
         raise ValueError(f"simulation may project at most {MAX_PROJECTED_TARGETS} Targets")
     _validate_selector_memberships(selector_memberships)
+    _validate_semantic_metadata(semantic_metadata)
     total = 0
     allowed = {
         "advance_ms",
@@ -175,17 +177,19 @@ async def simulate_timeline(
     *,
     reconciliation_options: dict[str, Any] | None = None,
     selector_memberships: list[dict[str, Any]] | None = None,
+    semantic_metadata: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Evaluate Rules and Reconciliation over a deterministic timeline."""
     options = reconciliation_options or {}
-    resolver = _simulation_selector_resolver(engine, selector_memberships)
+    resolver = _simulation_selector_resolver(engine, selector_memberships, semantic_metadata)
     engine.set_selector_resolver(resolver)
-    validate_simulation_input(timeline, options, projected_rule_targets=len(engine.list_active_targets()), selector_memberships=selector_memberships)
+    validate_simulation_input(timeline, options, projected_rule_targets=len(engine.list_active_targets()), selector_memberships=selector_memberships, semantic_metadata=semantic_metadata)
     adapter = FakeAdapter()
     tracker = _NoOwnership()
     reconciler = _new_reconciler(options)
     steps = []
     for index, step in enumerate(timeline):
+        pulses: set[str] = set()
         if step.get("advance_ms"):
             engine.advance_clock(step["advance_ms"])
         if "enabled" in step:
@@ -218,6 +222,10 @@ async def simulate_timeline(
         for key, value in step.get("states", {}).items():
             entity_id, separator, field = key.rpartition(".")
             if separator:
+                old_key = f"{entity_id}.{field}"
+                if field == "state" and old_key in engine.state and engine.state[old_key] != value:
+                    engine.update_state(entity_id, True, field="changed")
+                    pulses.add(entity_id)
                 engine.update_state(entity_id, value, field=field)
         engine.evaluate_all()
         events = []
@@ -262,6 +270,8 @@ async def simulate_timeline(
         )
         adapter.calls.clear()
         steps.append(record)
+        for entity_id in pulses:
+            engine.update_state(entity_id, False, field="changed")
         if index % 10 == 9:
             await asyncio.sleep(0)
     return steps
@@ -293,8 +303,8 @@ def _json_details(details: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in details.items() if key != "state"}
 
 
-def _selector_key(selector: Any) -> tuple[str | None, str | None, str | None]:
-    return (selector.domain, selector.area, selector.label)
+def _selector_key(selector: Any) -> tuple[Any, ...]:
+    return (selector.domain, selector.area, selector.label, getattr(selector, "device", None), getattr(selector, "entity", None), getattr(selector, "purpose", None))
 
 
 def _validate_selector_memberships(value: Any) -> None:
@@ -308,8 +318,8 @@ def _validate_selector_memberships(value: Any) -> None:
         if not isinstance(item, dict) or set(item) != {"selector", "targets"}:
             raise ValueError(f"selectors[{index}] must contain exactly `selector` and `targets`")
         selector = item["selector"]
-        if not isinstance(selector, dict) or set(selector) - {"domain", "area", "label"} or not selector:
-            raise ValueError(f"selectors[{index}].selector must contain domain, area, and/or label")
+        if not isinstance(selector, dict) or set(selector) - {"domain", "area", "label", "device", "entity", "purpose"} or not selector:
+            raise ValueError(f"selectors[{index}].selector contains unsupported filters")
         if not all(isinstance(entry, str) and entry for entry in selector.values()):
             raise ValueError(f"selectors[{index}].selector values must be non-empty strings")
         targets = item["targets"]
@@ -317,7 +327,7 @@ def _validate_selector_memberships(value: Any) -> None:
             isinstance(target, str) and "." in target for target in targets
         ):
             raise ValueError(f"selectors[{index}].targets must be a list of Target IDs")
-        key = (selector.get("domain"), selector.get("area"), selector.get("label"))
+        key = tuple(selector.get(name) for name in ("domain", "area", "label", "device", "entity", "purpose"))
         if key in seen:
             raise ValueError(f"selectors[{index}] duplicates a selector membership")
         seen.add(key)
@@ -326,20 +336,42 @@ def _validate_selector_memberships(value: Any) -> None:
         raise ValueError(f"selector memberships may expand to at most {MAX_PROJECTED_TARGETS} Targets")
 
 
-def _simulation_selector_resolver(engine: Any, memberships: Any):
+def _validate_semantic_metadata(value: Any) -> None:
+    if value is None:
+        return
+    allowed = {"entity_id", "area", "device", "device_class", "original_device_class"}
+    if not isinstance(value, list) or len(value) > MAX_PROJECTED_TARGETS:
+        raise ValueError("`semantic_metadata` must be a bounded list")
+    seen_entity_ids: set[str] = set()
+    for index, item in enumerate(value):
+        if not isinstance(item, dict) or set(item) - allowed or not isinstance(item.get("entity_id"), str):
+            raise ValueError(f"semantic_metadata[{index}] is invalid")
+        entity_id = item["entity_id"]
+        if entity_id in seen_entity_ids:
+            raise ValueError(f"semantic_metadata[{index}] duplicates an entity ID")
+        seen_entity_ids.add(entity_id)
+
+
+def _simulation_selector_resolver(engine: Any, memberships: Any, semantic_metadata: Any = None):
     _validate_selector_memberships(memberships)
     required = {
         _selector_key(selector)
         for rule in engine.loaded_rules()
-        for selector in (*rule.intent_selectors, *rule.observe_selectors)
+        for selector in (*rule.intent_selectors, *rule.observe_selectors, *(group.selector for group in getattr(rule, "observation_groups", ())), *(group.selector for group in getattr(rule, "hold_observation_groups", ())), *(group.selector for group in getattr(rule, "hold_until_observation_groups", ())))
     }
     registry = {
-        (item["selector"].get("domain"), item["selector"].get("area"), item["selector"].get("label")): tuple(sorted(set(item["targets"])))
+        tuple(item["selector"].get(name) for name in ("domain", "area", "label", "device", "entity", "purpose")): tuple(sorted(set(item["targets"])))
         for item in memberships or []
     }
+    purpose_classes = {"motion": ("binary_sensor", "motion"), "occupancy": ("binary_sensor", "occupancy"), "door": ("binary_sensor", "door"), "window": ("binary_sensor", "window"), "moisture": ("binary_sensor", "moisture"), "temperature": ("sensor", "temperature"), "illuminance": ("sensor", "illuminance")}
+    for key in required - set(registry):
+        domain, area, label, device, entity, purpose = key
+        if purpose and semantic_metadata is not None and label is None:
+            expected_domain, expected_class = purpose_classes[purpose]
+            registry[key] = tuple(sorted(item["entity_id"] for item in semantic_metadata if item["entity_id"].partition(".")[0] == expected_domain and (item.get("device_class") or item.get("original_device_class")) == expected_class and (area is None or item.get("area") == area) and (device is None or item.get("device") == device) and (entity is None or item["entity_id"] == entity)))
     missing = required - set(registry)
     if missing:
-        formatted = [dict(zip(("domain", "area", "label"), key, strict=True)) for key in sorted(missing, key=repr)]
+        formatted = [dict(zip(("domain", "area", "label", "device", "entity", "purpose"), key, strict=True)) for key in sorted(missing, key=repr)]
         formatted = [{name: value for name, value in item.items() if value is not None} for item in formatted]
         raise ValueError(f"Missing simulated selector memberships: {formatted}")
 

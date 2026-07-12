@@ -93,7 +93,11 @@ from ._engine.reconciliation import (  # noqa: TID252
 )
 from ._engine.runtime import TickRuntime, runtime_key  # noqa: TID252
 from ._engine.schema import dsl_schema  # noqa: TID252
-from ._engine.simulation import simulate_timeline, validate_simulation_input  # noqa: TID252
+from ._engine.simulation import (  # noqa: TID252
+    _simulation_selector_resolver,
+    simulate_timeline,
+    validate_simulation_input,
+)
 from ._engine.yaml_loader import RuleLoadError  # noqa: TID252
 from .const import CONF_RULE_DIR, DEFAULT_RULE_DIR, DOMAIN  # noqa: TID252
 from .diagnostics import list_diagnostics  # noqa: TID252
@@ -1023,18 +1027,21 @@ class IntentionalSimulateView(HomeAssistantView):
         engine.load_rules(rules)
         options = data.get("reconciliation", {})
         selectors = data.get("selectors")
+        semantic_metadata = data.get("semantic_metadata")
         try:
             validate_simulation_input(
                 timeline,
                 options,
                 projected_rule_targets=len({rule.target for rule in rules if rule.target}),
                 selector_memberships=selectors,
+                semantic_metadata=semantic_metadata,
             )
             steps = await simulate_timeline(
                 engine,
                 timeline,
                 reconciliation_options=options,
                 selector_memberships=selectors,
+                semantic_metadata=semantic_metadata,
             )
         except (TypeError, ValueError) as err:
             return _error(str(err), "bad_request", 400)
@@ -1081,18 +1088,29 @@ class IntentionalReplayView(HomeAssistantView):
         except RuleLoadError as err:
             return web.json_response({"valid": False, "errors": [str(err)]}, status=400)
         try:
+            selectors = data.get("selectors")
+            semantic_metadata = data.get("semantic_metadata")
             validate_simulation_input(
                 timeline,
                 {},
                 projected_rule_targets=len({rule.target for rule in rules if rule.target}),
+                selector_memberships=selectors,
+                semantic_metadata=semantic_metadata,
             )
-        except ValueError as err:
+        except (TypeError, ValueError) as err:
             return _error(str(err), "bad_request", 400)
 
         engine = Engine(clock_fn=lambda: 0, selector_resolver=lambda _selector: [])
         engine.load_rules(rules)
+        try:
+            engine.set_selector_resolver(
+                _simulation_selector_resolver(engine, selectors, semantic_metadata)
+            )
+        except (TypeError, ValueError) as err:
+            return _error(str(err), "bad_request", 400)
         steps = []
         for index, step in enumerate(timeline):
+            pulses: set[str] = set()
             if not isinstance(step, dict):
                 return _error(f"timeline[{index}] must be a mapping", "bad_request", 400)
             advance_ms = step.get("advance_ms", 0)
@@ -1105,9 +1123,15 @@ class IntentionalReplayView(HomeAssistantView):
                 if not isinstance(key, str) or "." not in key:
                     continue
                 entity_id, _sep, field = key.rpartition(".")
+                old_key = f"{entity_id}.{field}"
+                if field == "state" and old_key in engine.state and engine.state[old_key] != value:
+                    engine.update_state(entity_id, True, field="changed")
+                    pulses.add(entity_id)
                 engine.update_state(entity_id, value, field=field)
             engine.evaluate_all()
             steps.append(simulation_step(engine, index=index))
+            for entity_id in pulses:
+                engine.update_state(entity_id, False, field="changed")
             if index % 10 == 9:
                 await asyncio.sleep(0)
         return web.json_response({"valid": True, "steps": steps, "errors": []})
