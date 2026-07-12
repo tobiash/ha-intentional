@@ -23,7 +23,406 @@ from typing import Any
 from intentional.engine import Engine
 from intentional.intent import Authority
 from intentional.target_policy import TargetPolicy
-from intentional.yaml_loader import Rule
+from intentional.yaml_loader import Rule, load_rules_from_string
+
+_DYNAMIC_HOLD_YAML = """
+- id: adaptive
+  while: {binary_sensor.motion: on}
+  hold:
+    after:
+      tiers:
+        - {active_for: 0s, duration: 30s}
+        - {active_for: 30m, duration: 10m}
+      adjustments:
+        - {from: "22:00", until: "06:00", add: 5m}
+        - {from: "00:00", until: "00:00", add: -1m}
+      max: 15m
+  intent:
+    light.one: {state: on}
+"""
+
+
+def test_dynamic_hold_freezes_tier_adjustment_and_survives_restart_reload() -> None:
+    now = [0]
+    rules = load_rules_from_string(_DYNAMIC_HOLD_YAML)
+    engine = Engine(clock_fn=lambda: now[0])
+    engine.load_rules(rules)
+    engine.set_time_of_day("night", clock="21:59")
+    engine.update_state("binary_sensor.motion", "on")
+    engine.evaluate_all()
+    now[0] = 1_800_000
+    engine.evaluate_all()
+    engine.set_time_of_day("night", clock="22:00")
+    engine.update_state("binary_sensor.motion", "off")
+    engine.evaluate_all()
+    status = engine.list_rule_statuses()["adaptive"]["hold_after"]
+    assert status == {
+        "frozen": True, "active_for_ms": 1_800_000,
+        "tier": {"index": 1, "threshold_ms": 1_800_000, "base_duration_ms": 600_000},
+        "adjustment": {"index": 0, "from": "22:00", "until": "06:00", "add_ms": 300_000},
+        "max_ms": 900_000, "unclamped_duration_ms": 900_000, "duration_ms": 900_000,
+        "started_at_ms": 1_800_000, "expires_at_ms": 2_700_000, "remaining_ms": 900_000,
+    }
+    engine.set_time_of_day("day", clock="12:00")
+    now[0] += 100_000
+    engine.load_rules(rules)
+    engine.evaluate_all()
+    assert engine.list_rule_statuses()["adaptive"]["hold_after"]["expires_at_ms"] == 2_700_000
+    records = engine.export_lifecycle_records()
+    restarted = Engine(clock_fn=lambda: now[0])
+    restarted.load_rules(rules)
+    restarted.import_lifecycle_records(records)
+    assert restarted.list_rule_statuses()["adaptive"]["hold_after"]["remaining_ms"] == 800_000
+
+
+def test_dynamic_hold_boundaries_first_match_and_zero_withdrawal() -> None:
+    yaml = _DYNAMIC_HOLD_YAML.replace("duration: 30s", "duration: 30s").replace("add: 5m", "add: -1m")
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string(yaml))
+    engine.set_time_of_day("night", clock="06:00")
+    engine.update_state("binary_sensor.motion", "on")
+    engine.evaluate_all()
+    engine.update_state("binary_sensor.motion", "off")
+    engine.evaluate_all()
+    assert engine.list_active_intents("light.one") == []
+
+
+def test_dynamic_hold_reactivation_starts_fresh_and_can_freeze_again() -> None:
+    now = [0]
+    engine = Engine(clock_fn=lambda: now[0])
+    engine.load_rules(load_rules_from_string(_DYNAMIC_HOLD_YAML.replace("add: -1m", "add: 1m")))
+    engine.set_time_of_day("day", clock="12:00")
+    engine.update_state("binary_sensor.motion", "on")
+    engine.evaluate_all()
+
+    now[0] = 1_800_000
+    engine.set_time_of_day("night", clock="22:00")
+    engine.update_state("binary_sensor.motion", "off")
+    engine.evaluate_all()
+    lingering = engine.list_active_intents("light.one")[0]
+    assert lingering.ignore_when is True
+    assert lingering.expires_at_ms() == 2_700_000
+
+    now[0] = 1_810_000
+    engine.update_state("binary_sensor.motion", "on")
+    engine.evaluate_all()
+    active = engine.list_active_intents("light.one")[0]
+    assert active.ignore_when is False
+    assert active.ttl_ms is None
+    assert active.created_at_ms == now[0]
+    assert engine.list_rule_statuses()["adaptive"]["hold_after"] is None
+
+    now[0] = 1_820_000
+    engine.set_time_of_day("day", clock="12:00")
+    engine.update_state("binary_sensor.motion", "off")
+    engine.evaluate_all()
+    second = engine.list_rule_statuses()["adaptive"]["hold_after"]
+    assert second["active_for_ms"] == 10_000
+    assert second["tier"]["index"] == 0
+    assert second["adjustment"] == {
+        "index": 1,
+        "from": "00:00",
+        "until": "00:00",
+        "add_ms": 60_000,
+    }
+    assert second["duration_ms"] == 90_000
+    second_intent = engine.list_active_intents("light.one")[0]
+    assert second["expires_at_ms"] == second_intent.expires_at_ms()
+
+
+def test_dynamic_hold_selector_reactivation_refreshes_current_membership_once() -> None:
+    now = [0]
+    selected = ["light.one", "light.two"]
+    engine = Engine(
+        clock_fn=lambda: now[0],
+        selector_resolver=lambda _selector: list(selected),
+    )
+    engine.load_rules(load_rules_from_string("""
+- id: adaptive-selector
+  while: {binary_sensor.motion: on}
+  hold:
+    after:
+      tiers:
+        - {active_for: 0s, duration: 30s}
+      adjustments: []
+      max: 30s
+  intent:
+    select:
+      - domain: light
+        state: on
+"""))
+    engine.update_state("binary_sensor.motion", "on")
+    engine.evaluate_all()
+
+    now[0] = 10_000
+    engine.update_state("binary_sensor.motion", "off")
+    engine.evaluate_all()
+    assert {
+        intent.target
+        for target in selected
+        for intent in engine.list_active_intents(target)
+    } == set(selected)
+
+    selected[:] = ["light.two", "light.three"]
+    now[0] = 20_000
+    engine.update_state("binary_sensor.motion", "on")
+    engine.evaluate_all()
+    engine.evaluate_all()
+
+    records = engine.export_lifecycle_records()["intents"]
+    generated = [record for record in records if record["selector_generated"]]
+    assert [(record["target"], record["created_at_ms"]) for record in generated] == [
+        ("light.two", now[0]),
+        ("light.three", now[0]),
+    ]
+    assert all(record["target"] for record in records)
+    assert engine.resolve("light.one") is None
+    assert engine.resolve("light.two").value == {"state": "on"}
+    assert engine.resolve("light.three").value == {"state": "on"}
+
+
+def test_dynamic_hold_provenance_expiry_matches_intent_expiry() -> None:
+    now = [9_007_199_254_740_000]
+    engine = Engine(clock_fn=lambda: now[0])
+    engine.load_rules(load_rules_from_string(_DYNAMIC_HOLD_YAML))
+    engine.set_time_of_day("night", clock="22:00")
+    engine.update_state("binary_sensor.motion", "on")
+    engine.evaluate_all()
+    engine.update_state("binary_sensor.motion", "off")
+    engine.evaluate_all()
+
+    intent = engine.list_active_intents("light.one")[0]
+    status = engine.list_rule_statuses()["adaptive"]["hold_after"]
+    assert status["expires_at_ms"] == intent.expires_at_ms()
+
+
+def test_unchanged_reload_preserves_held_intent() -> None:
+    rule = Rule(id="held", when="binary_sensor.motion == 'on'",
+                hold_when="input_boolean.keep == 'on'", target="light.one",
+                set={"state": "on"})
+    engine = Engine(clock_fn=lambda: 1_000)
+    engine.load_rules([rule])
+    engine.update_state("binary_sensor.motion", "on")
+    engine.update_state("input_boolean.keep", "on")
+    engine.evaluate_all()
+    engine.update_state("binary_sensor.motion", "off")
+    engine.evaluate_all()
+    held = engine.list_active_intents("light.one")[0]
+
+    engine.load_rules([replace(rule, source_file=Path("moved.yaml"), source_line=4)])
+
+    assert engine.list_active_intents("light.one") == [held]
+
+
+def test_restart_restores_holds_with_false_starting_conditions() -> None:
+    rules = [
+        Rule(id="while-held", when="binary_sensor.motion == 'on'",
+             hold_when="input_boolean.keep == 'on'", target="light.one", set={"state": "on"}),
+        Rule(id="until-held", when="binary_sensor.door == 'on'",
+             hold_until_when="input_boolean.release == 'on'", target="light.two", set={"state": "on"}),
+    ]
+    engine = Engine(clock_fn=lambda: 1_000)
+    engine.load_rules(rules)
+    for entity, value in (("binary_sensor.motion", "on"), ("input_boolean.keep", "on"),
+                          ("binary_sensor.door", "on"), ("input_boolean.release", "off")):
+        engine.update_state(entity, value)
+    engine.evaluate_all()
+    engine.update_state("binary_sensor.motion", "off")
+    engine.update_state("binary_sensor.door", "off")
+    engine.evaluate_all()
+
+    restarted = Engine(clock_fn=lambda: 1_100)
+    restarted.load_rules(rules)
+    for key, value in engine.state.items():
+        entity, _, field = key.rpartition(".")
+        restarted.update_state(entity, value, field=field)
+    restarted.import_lifecycle_records(engine.export_lifecycle_records())
+    restarted.evaluate_all()
+
+    assert {
+        intent.rule_id
+        for target in ("light.one", "light.two")
+        for intent in restarted.list_active_intents(target)
+    } == {"while-held", "until-held"}
+
+
+def test_version_one_static_linger_and_hold_restore_without_fingerprints() -> None:
+    rules = [
+        Rule(id="linger", when="binary_sensor.a == 'on'", target="light.one",
+             set={"state": "on"}, linger_ms=60_000),
+        Rule(id="held", when="binary_sensor.b == 'on'", hold_when="input_boolean.keep == 'on'",
+             target="light.two", set={"state": "on"}),
+    ]
+    source = Engine(clock_fn=lambda: 1_000)
+    source.load_rules(rules)
+    source.update_state("binary_sensor.a", "on")
+    source.update_state("binary_sensor.b", "on")
+    source.update_state("input_boolean.keep", "on")
+    source.evaluate_all()
+    source.update_state("binary_sensor.a", "off")
+    source.update_state("binary_sensor.b", "off")
+    source.evaluate_all()
+    records = source.export_lifecycle_records()
+    records["version"] = 1
+    for intent in records["intents"]:
+        intent.pop("rule_fingerprint", None)
+
+    restored = Engine(clock_fn=lambda: 2_000)
+    restored.load_rules(rules)
+    restored.import_lifecycle_records(records)
+
+    assert restored.resolve("light.one") is not None
+    assert restored.resolve("light.two") is not None
+
+
+def test_version_two_changed_static_rule_is_not_restored() -> None:
+    rule = Rule(id="linger", when="binary_sensor.a == 'on'", target="light.one",
+                set={"state": "on"}, linger_ms=60_000)
+    source = Engine(clock_fn=lambda: 1_000)
+    source.load_rules([rule])
+    source.update_state("binary_sensor.a", "on")
+    source.evaluate_all()
+    source.update_state("binary_sensor.a", "off")
+    source.evaluate_all()
+
+    restored = Engine(clock_fn=lambda: 2_000)
+    restored.load_rules([replace(rule, set={"state": "off"})])
+    restored.import_lifecycle_records(source.export_lifecycle_records())
+
+    assert restored.resolve("light.one") is None
+
+
+def test_lifecycle_restore_rejects_unsupported_or_malformed_version() -> None:
+    for version in (None, True, "2", 0, 3):
+        restored = Engine(clock_fn=lambda: 1_000)
+        restored.import_lifecycle_records({"version": version, "enabled": False})
+        assert restored.is_enabled() is True
+
+
+def test_disable_and_pause_immediately_end_dynamic_hold_lifecycle() -> None:
+    for stop in (
+        lambda engine: engine.set_enabled(False),
+        lambda engine: engine.set_rule_paused("adaptive", True),
+        lambda engine: engine.set_label_paused("room", True),
+    ):
+        rule = replace(load_rules_from_string(_DYNAMIC_HOLD_YAML)[0], labels=("room",))
+        engine = Engine(clock_fn=lambda: 1_000)
+        engine.load_rules([rule])
+        engine.update_state("binary_sensor.motion", "on")
+        engine.evaluate_all()
+        stop(engine)
+
+        assert engine._rule_active_since == {}
+        assert engine._frozen_hold_after == {}
+
+
+def test_disabled_restore_does_not_resurrect_dynamic_hold_activation() -> None:
+    rules = load_rules_from_string(_DYNAMIC_HOLD_YAML)
+    source = Engine(clock_fn=lambda: 1_000)
+    source.load_rules(rules)
+    source.update_state("binary_sensor.motion", "on")
+    source.evaluate_all()
+    records = source.export_lifecycle_records()
+    records["enabled"] = False
+
+    restored = Engine(clock_fn=lambda: 2_000)
+    restored.load_rules(rules)
+    restored.import_lifecycle_records(records)
+
+    assert restored.is_enabled() is False
+    assert restored._rule_active_since == {}
+    assert restored._frozen_hold_after == {}
+
+
+def test_restart_rejects_retained_intent_and_frozen_provenance_for_changed_rule() -> None:
+    rules = load_rules_from_string(_DYNAMIC_HOLD_YAML)
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(rules)
+    engine.set_time_of_day("night", clock="22:00")
+    engine.update_state("binary_sensor.motion", "on")
+    engine.evaluate_all()
+    engine.update_state("binary_sensor.motion", "off")
+    engine.evaluate_all()
+    records = engine.export_lifecycle_records()
+
+    restarted = Engine(clock_fn=lambda: 0)
+    restarted.load_rules([replace(rules[0], set={"state": "off"})])
+    restarted.import_lifecycle_records(records)
+
+    assert restarted.list_active_intents("light.one") == []
+    assert restarted.list_rule_statuses()["adaptive"]["hold_after"] is None
+
+
+def test_rule_activation_restore_rejects_malformed_records() -> None:
+    rules = load_rules_from_string(_DYNAMIC_HOLD_YAML)
+    source = Engine(clock_fn=lambda: 1_000)
+    source.load_rules(rules)
+    source.update_state("binary_sensor.motion", "on")
+    source.evaluate_all()
+    valid = source.export_lifecycle_records()["rule_activations"][0]
+
+    for activations in (None, {}, "bad", [None], [{**valid, "active_since_ms": True}]):
+        restored = Engine(clock_fn=lambda: 1_000)
+        restored.load_rules(rules)
+        restored.import_lifecycle_records({"version": 2, "rule_activations": activations})
+        assert restored._rule_active_since == {}
+
+    source._freeze_dynamic_hold("adaptive", rules[0], 1_000)
+    frozen_record = source.export_lifecycle_records()["rule_activations"][0]
+    for corruption in (
+        {"duration_ms": -1}, {"tier_threshold_ms": 1, "active_for_ms": 0},
+        {"expires_at_ms": 999}, {"adjustment_index": 0, "adjustment_from": "bad"},
+        {"adjustment_index": None, "adjustment_from": "22:00"},
+        {"unclamped_duration_ms": 123},
+    ):
+        raw = dict(frozen_record)
+        raw["frozen_hold_after"] = {**raw["frozen_hold_after"], **corruption}
+        restored = Engine(clock_fn=lambda: 1_000)
+        restored.load_rules(rules)
+        restored.import_lifecycle_records({"version": 2, "rule_activations": [raw]})
+        assert restored._frozen_hold_after == {}
+
+
+def test_backward_wall_clock_clamps_elapsed_and_preserves_timestamp() -> None:
+    now = [1_000]
+    rules = load_rules_from_string(_DYNAMIC_HOLD_YAML)
+    engine = Engine(clock_fn=lambda: now[0])
+    engine.load_rules(rules)
+    engine.update_state("binary_sensor.motion", "on")
+    engine.evaluate_all()
+    records = engine.export_lifecycle_records()
+
+    now[0] = 500
+    restarted = Engine(clock_fn=lambda: now[0])
+    restarted.load_rules(rules)
+    restarted.import_lifecycle_records(records)
+    restarted.update_state("binary_sensor.motion", "off")
+    restarted.evaluate_all()
+
+    assert restarted._rule_active_since["adaptive"] == 1_000
+    assert restarted.list_rule_statuses()["adaptive"]["hold_after"]["active_for_ms"] == 0
+
+
+def test_active_dynamic_lifetime_survives_restart_before_condition_stops() -> None:
+    now = [0]
+    rules = load_rules_from_string(_DYNAMIC_HOLD_YAML)
+    engine = Engine(clock_fn=lambda: now[0])
+    engine.load_rules(rules)
+    engine.update_state("binary_sensor.motion", "on")
+    engine.evaluate_all()
+    now[0] = 1_800_000
+
+    restarted = Engine(clock_fn=lambda: now[0])
+    restarted.load_rules(rules)
+    restarted.update_state("binary_sensor.motion", "on")
+    restarted.import_lifecycle_records(engine.export_lifecycle_records())
+    restarted.evaluate_all()
+    restarted.update_state("binary_sensor.motion", "off")
+    restarted.evaluate_all()
+
+    status = restarted.list_rule_statuses()["adaptive"]["hold_after"]
+    assert status["active_for_ms"] == 1_800_000
+    assert status["tier"]["index"] == 1
 
 
 def test_target_policy_is_replaced_independently_of_rule_lifecycle_identity() -> None:

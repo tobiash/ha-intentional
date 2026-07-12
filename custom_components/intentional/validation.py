@@ -29,6 +29,7 @@ def _looks_like_presence_light_rule_without_stability(rule: Any) -> bool:
         getattr(rule, "for_ms", 0)
         or getattr(rule, "hold_until_for_ms", 0)
         or getattr(rule, "linger_ms", None) is not None
+        or getattr(rule, "dynamic_hold_after", None) is not None
     ):
         return False
     set_payload = getattr(rule, "set", {}) or {}

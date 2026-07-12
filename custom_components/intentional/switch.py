@@ -32,6 +32,19 @@ _RULE_SWITCH_VOLATILE_STATUS_ATTRS = frozenset(
 )
 
 
+def _without_volatile_remaining(value: Any) -> Any:
+    """Remove countdown values while retaining stable hold decision details."""
+    if isinstance(value, dict):
+        return {
+            key: _without_volatile_remaining(item)
+            for key, item in value.items()
+            if key != "remaining_ms"
+        }
+    if isinstance(value, list):
+        return [_without_volatile_remaining(item) for item in value]
+    return value
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -261,11 +274,12 @@ class IntentionalRuleSwitch(SwitchEntity):
             status = self._engine.list_authored_rule_statuses().get(self._rule_id, {})
         else:
             status = self._engine.list_rule_statuses().get(self._rule_id, {})
-        return {
+        return _without_volatile_remaining({
             key: value
             for key, value in status.items()
             if key != "rule_id" and key not in _RULE_SWITCH_VOLATILE_STATUS_ATTRS
-        }
+        })
+
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         await self._set_enabled(True)

@@ -31,6 +31,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.util import dt as dt_util
 
 from ._engine import Engine, RuleLoadError, __version__
 from ._engine.ha_adapter import (
@@ -409,7 +410,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN][reconciliation_key(entry.entry_id)] = _reconciler
     _reconciler.restore_pending_withdraws(
         lifecycle_records if isinstance(lifecycle_records, dict) else None,
-        linger_rule_ids={rule.id for rule in initial_rules if rule.linger_ms},
+        linger_rule_ids={
+            rule.id for rule in initial_rules
+            if rule.linger_ms or rule.dynamic_hold_after is not None
+        },
         now_ms=engine.now_ms(),
     )
     selector_planner.configure(initial_rules, referenced_entities(initial_rules))
@@ -458,7 +462,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             }
             engine.load_rules(new_rules)
             _apply_membership_change(hass, engine, selector_planner.configure(new_rules, new_referenced))
-            sync_time_context_into_engine(engine)
+            sync_time_context_into_engine(engine, dt_util.now())
             engine.evaluate_all()
             _runtime.active_rule_ids.intersection_update(unchanged_ids)
             _runtime.active_scenes.intersection_update({
@@ -503,7 +507,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     pulse_drain = _runtime.pulses.begin_drain()
                     try:
                         # Drive the engine's evaluation cycle
-                        sync_time_context_into_engine(engine)
+                        sync_time_context_into_engine(engine, dt_util.now())
                         _apply_membership_change(
                             hass,
                             engine,
@@ -668,7 +672,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _apply_membership_change(
                         hass, engine, selector_planner.registry_changed()
                     )
-                    sync_time_context_into_engine(engine)
+                    sync_time_context_into_engine(engine, dt_util.now())
                     engine.evaluate_all()
                     _runtime.advance_revision()
                     lifecycle_writer.mutated()
@@ -926,7 +930,7 @@ def _on_ha_state_change_factory(
             if new_state is None:
                 if old_state is not None:
                     engine.remove_state(old_state.entity_id)
-                    sync_time_context_into_engine(engine)
+                    sync_time_context_into_engine(engine, dt_util.now())
                     engine.evaluate_all()
                 if runtime is not None:
                     runtime.advance_revision()
@@ -951,7 +955,7 @@ def _on_ha_state_change_factory(
                     rate_limiter=diagnostic_rate_limiter,
                 )
             # Re-evaluate immediately for snappy response
-            sync_time_context_into_engine(engine)
+            sync_time_context_into_engine(engine, dt_util.now())
             engine.evaluate_all()
             own_feedback_only = owned_result and bool(events) and all(
                 event.kind == "context_ignored" for event in events

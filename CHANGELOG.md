@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-07-12
+
+### Added
+- **Dynamic timed retention** selects `hold.after` from active-duration tiers, applies the first matching local-time adjustment, clamps to a mandatory maximum, and freezes the result when timed retention begins.
+- **Durable retention provenance** preserves Rule activation timing and frozen tier, adjustment, duration, and expiry across restart and unchanged reload.
+- **Dynamic retention diagnostics** expose the selected tier, time window, clamp, frozen duration, expiry, and remaining time through status, explanation, simulation, and replay surfaces.
+
+### Changed
+- **Lifecycle persistence version 2** adds canonical Rule fingerprints while retaining compatibility with existing version-1 retained Intents.
+- **Home Assistant time context** uses the configured HA timezone for local retention windows, including DST behavior.
+
+### Fixed
+- Dynamic retention no longer produces empty Targets when selector-based Rules reactivate.
+- Disable, pause, reactivation, changed Rules, restart, and clock rollback now terminate or preserve activation lifecycles consistently.
+- Malformed lifecycle storage fails closed instead of preventing integration startup.
+- Visual mode refuses unsupported block and flow dynamic retention mappings without altering raw YAML.
+- Volatile retention countdowns no longer cause periodic entity publication or Recorder writes.
+
 ## [0.9.3] - 2026-07-12
 
 ### Fixed

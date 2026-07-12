@@ -9,7 +9,13 @@ from typing import Any
 from .animation import AnimationSpec
 from .generation import ValueGeneratorSpec
 from .intent import Authority
-from .records import Effect, IntentSelector, ObservationGroup, ObserveSelector
+from .records import (
+    DynamicHoldAfter,
+    Effect,
+    IntentSelector,
+    ObservationGroup,
+    ObserveSelector,
+)
 
 RuleDirFingerprint = tuple[tuple[str, int, int], ...]
 
@@ -60,6 +66,7 @@ class Rule:
     easing: str = "linear"
     ttl_ms: int | None = None
     linger_ms: int | None = None
+    dynamic_hold_after: DynamicHoldAfter | None = None
     hold_when: str | None = None
     hold_until_when: str | None = None
     hold_until_for_ms: int = 0

@@ -987,9 +987,12 @@ class Reconciliation:
         linger_rule_ids: set[str] | None = None,
         now_ms: int | None = None,
     ) -> None:
-        if not records:
+        if not isinstance(records, dict):
             return
-        for raw in records.get("pending_withdraws", []):
+        pending_withdraws = records.get("pending_withdraws", [])
+        if not isinstance(pending_withdraws, list):
+            pending_withdraws = []
+        for raw in pending_withdraws:
             if not isinstance(raw, dict):
                 continue
             restored = _resolved_target_state_from_record(raw, value_key="value")
@@ -998,19 +1001,31 @@ class Reconciliation:
                 self._last_resolved[target] = state
         if linger_rule_ids is None or now_ms is None:
             return
-        for raw in records.get("intents", []):
+        intents = records.get("intents", [])
+        if not isinstance(intents, list):
+            return
+        for raw in intents:
             if not isinstance(raw, dict):
                 continue
-            rule_id = str(raw.get("rule_id") or "")
-            if rule_id not in linger_rule_ids or not raw.get("ignore_when"):
+            rule_id = raw.get("rule_id")
+            if (
+                not isinstance(rule_id, str)
+                or rule_id not in linger_rule_ids
+                or raw.get("ignore_when") is not True
+            ):
                 continue
             ttl_ms = raw.get("ttl_ms")
-            if ttl_ms is None:
+            created_at_ms = raw.get("created_at_ms")
+            if (
+                not isinstance(ttl_ms, int)
+                or isinstance(ttl_ms, bool)
+                or ttl_ms < 0
+                or not isinstance(created_at_ms, int)
+                or isinstance(created_at_ms, bool)
+                or created_at_ms < 0
+            ):
                 continue
-            try:
-                expires_at_ms = int(raw.get("created_at_ms") or 0) + int(ttl_ms)
-            except (TypeError, ValueError):
-                continue
+            expires_at_ms = created_at_ms + ttl_ms
             if expires_at_ms > now_ms:
                 continue
             restored = _resolved_target_state_from_record(raw, value_key="set")

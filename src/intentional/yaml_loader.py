@@ -42,6 +42,7 @@ Duration shorthand (used for transition, ttl, animation timing):
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,7 +55,15 @@ from intentional.capabilities import vnext_intent_policy_error
 from intentional.durations import parse_duration
 from intentional.generation import ValueGeneratorSpec, parse_generator_spec
 from intentional.intent import Authority
-from intentional.records import Effect, IntentSelector, ObservationGroup, ObserveSelector
+from intentional.records import (
+    DynamicHoldAfter,
+    Effect,
+    HoldAfterAdjustment,
+    HoldAfterTier,
+    IntentSelector,
+    ObservationGroup,
+    ObserveSelector,
+)
 from intentional.rule_model import Rule, RuleDirFingerprint, RuleLoadError
 from intentional.target_policy import TargetPolicy
 
@@ -289,6 +298,7 @@ def _validate_rule(
     )
     hold_when = _parse_hold_when(raw.get("hold"), rule_id, file, line)
     hold_until_when, hold_until_for_ms = _parse_hold_until(raw.get("hold"), rule_id, file, line)
+    dynamic_hold_after = _parse_dynamic_hold_after(raw.get("hold"), rule_id, file, line)
     linger_ms = _parse_optional_duration(
         emit.get("linger"),
         f"Rule {rule_id!r}: linger",
@@ -338,6 +348,7 @@ def _validate_rule(
         easing=easing,
         ttl_ms=ttl_ms,
         linger_ms=linger_ms,
+        dynamic_hold_after=dynamic_hold_after,
         hold_when=hold_when,
         hold_until_when=hold_until_when,
         hold_until_for_ms=hold_until_for_ms,
@@ -470,13 +481,103 @@ def _normalize_hold_linger(
             file=file,
             line=line,
         )
+    if "after" in hold and "after_when_stops" in hold:
+        raise RuleLoadError("Use either `hold.after` or `hold.after_when_stops`, not both", file=file, line=line)
+    if "after" in hold and "after_when_stops" in hold:
+        raise RuleLoadError(
+            "Use either `hold.after` or `hold.after_when_stops`, not both",
+            file=file,
+            line=line,
+        )
     hold_after = hold.get("after_when_stops", hold.get("after"))
     emit = raw.get("emit")
     if hold_after is None or not isinstance(emit, dict):
         return
     if "linger" in emit:
         raise RuleLoadError("Use either `hold.after` or target `linger`, not both", file=file, line=line)
-    emit["linger"] = hold_after
+    if not isinstance(hold_after, dict):
+        emit["linger"] = hold_after
+
+
+_CLOCK_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+_MAX_HOLD_MS = 365 * 24 * 60 * 60 * 1_000
+MAX_HOLD_AFTER_TIERS = 64
+MAX_HOLD_AFTER_ADJUSTMENTS = 64
+
+
+def _parse_dynamic_hold_after(
+    hold: Any, rule_id: str, file: Path | None, line: int | None
+) -> DynamicHoldAfter | None:
+    if not isinstance(hold, dict):
+        return None
+    raw = hold.get("after", hold.get("after_when_stops"))
+    if not isinstance(raw, dict):
+        return None
+    if set(raw) != {"tiers", "adjustments", "max"}:
+        raise RuleLoadError(
+            f"Rule {rule_id!r}: dynamic `hold.after` requires exactly `tiers`, `adjustments`, and `max`",
+            file=file, line=line,
+        )
+    tiers_raw = raw["tiers"]
+    adjustments_raw = raw["adjustments"]
+    if not isinstance(tiers_raw, list) or not tiers_raw:
+        raise RuleLoadError(f"Rule {rule_id!r}: `hold.after.tiers` must be a non-empty list", file=file, line=line)
+    if len(tiers_raw) > MAX_HOLD_AFTER_TIERS:
+        raise RuleLoadError(f"Rule {rule_id!r}: `hold.after.tiers` supports at most {MAX_HOLD_AFTER_TIERS} entries", file=file, line=line)
+    if not isinstance(adjustments_raw, list):
+        raise RuleLoadError(f"Rule {rule_id!r}: `hold.after.adjustments` must be a list", file=file, line=line)
+    if len(adjustments_raw) > MAX_HOLD_AFTER_ADJUSTMENTS:
+        raise RuleLoadError(f"Rule {rule_id!r}: `hold.after.adjustments` supports at most {MAX_HOLD_AFTER_ADJUSTMENTS} entries", file=file, line=line)
+    tiers = []
+    previous = -1
+    for index, item in enumerate(tiers_raw):
+        if not isinstance(item, dict) or set(item) != {"active_for", "duration"}:
+            raise RuleLoadError(f"Rule {rule_id!r}: hold.after.tiers[{index}] requires exactly `active_for` and `duration`", file=file, line=line)
+        threshold = _strict_duration(item["active_for"], f"hold.after.tiers[{index}].active_for", rule_id, file, line)
+        duration = _strict_duration(item["duration"], f"hold.after.tiers[{index}].duration", rule_id, file, line)
+        if threshold <= previous or (index == 0 and threshold != 0):
+            raise RuleLoadError(f"Rule {rule_id!r}: hold.after tier thresholds must start at 0 and strictly increase", file=file, line=line)
+        previous = threshold
+        tiers.append(HoldAfterTier(threshold, duration))
+    adjustments = []
+    for index, item in enumerate(adjustments_raw):
+        if not isinstance(item, dict) or set(item) != {"from", "until", "add"}:
+            raise RuleLoadError(f"Rule {rule_id!r}: hold.after.adjustments[{index}] requires exactly `from`, `until`, and `add`", file=file, line=line)
+        start = _strict_clock(item["from"], f"hold.after.adjustments[{index}].from", rule_id, file, line)
+        end = _strict_clock(item["until"], f"hold.after.adjustments[{index}].until", rule_id, file, line)
+        add = _signed_duration(item["add"], f"hold.after.adjustments[{index}].add", rule_id, file, line)
+        adjustments.append(HoldAfterAdjustment(start, end, add, item["from"], item["until"]))
+    maximum = _strict_duration(raw["max"], "hold.after.max", rule_id, file, line)
+    if maximum <= 0:
+        raise RuleLoadError(f"Rule {rule_id!r}: `hold.after.max` must be positive", file=file, line=line)
+    return DynamicHoldAfter(tuple(tiers), tuple(adjustments), maximum)
+
+
+def _strict_duration(value: Any, label: str, rule_id: str, file: Path | None, line: int | None) -> int:
+    if not isinstance(value, str):
+        raise RuleLoadError(f"Rule {rule_id!r}: `{label}` must be a duration string", file=file, line=line)
+    try:
+        result = parse_duration(value)
+    except (OverflowError, ValueError) as exc:
+        raise RuleLoadError(f"Rule {rule_id!r}: invalid `{label}`: {exc}", file=file, line=line) from exc
+    if result > _MAX_HOLD_MS:
+        raise RuleLoadError(f"Rule {rule_id!r}: `{label}` is too large", file=file, line=line)
+    return result
+
+
+def _signed_duration(value: Any, label: str, rule_id: str, file: Path | None, line: int | None) -> int:
+    if not isinstance(value, str):
+        raise RuleLoadError(f"Rule {rule_id!r}: `{label}` must be a signed duration string", file=file, line=line)
+    sign = -1 if value.startswith("-") else 1
+    unsigned = value[1:] if value[:1] in {"+", "-"} else value
+    return sign * _strict_duration(unsigned, label, rule_id, file, line)
+
+
+def _strict_clock(value: Any, label: str, rule_id: str, file: Path | None, line: int | None) -> int:
+    if not isinstance(value, str) or not _CLOCK_RE.fullmatch(value):
+        raise RuleLoadError(f"Rule {rule_id!r}: `{label}` must be strict HH:MM", file=file, line=line)
+    hour, minute = value.split(":")
+    return int(hour) * 60 + int(minute)
 
 
 def _parse_hold_when(

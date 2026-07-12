@@ -88,14 +88,17 @@ def generated_field_state_from_record(raw: Any) -> tuple[tuple[str, str], Genera
     field_name = raw.get("field")
     if not isinstance(rule_id, str) or not isinstance(field_name, str):
         return None
-    try:
-        state = GeneratedFieldState(
-            value=raw.get("value"),
-            next_due_ms=int(raw.get("next_due_ms")),
-            transition_ms=_optional_int(raw.get("transition_ms")),
-        )
-    except (TypeError, ValueError):
+    next_due_ms = raw.get("next_due_ms")
+    transition_ms = raw.get("transition_ms")
+    if not _is_nonnegative_int(next_due_ms):
         return None
+    if transition_ms is not None and not _is_nonnegative_int(transition_ms):
+        return None
+    state = GeneratedFieldState(
+        value=raw.get("value"),
+        next_due_ms=next_due_ms,
+        transition_ms=transition_ms,
+    )
     return (rule_id, field_name), state
 
 
@@ -314,6 +317,10 @@ def _optional_int(value: Any) -> int | None:
     if value is None:
         return None
     return int(value)
+
+
+def _is_nonnegative_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def _optional_float(value: Any) -> float | None:

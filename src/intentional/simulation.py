@@ -114,6 +114,7 @@ def validate_simulation_input(
         "resume_rule_ids",
         "enabled",
         "restart",
+        "time_of_day",
     }
     for index, step in enumerate(timeline):
         if not isinstance(step, dict):
@@ -127,6 +128,17 @@ def validate_simulation_input(
         for name in ("enabled", "restart"):
             if name in step and not isinstance(step[name], bool):
                 raise ValueError(f"timeline[{index}].{name} must be a boolean")
+        time_of_day = step.get("time_of_day")
+        if time_of_day is not None and (
+            not isinstance(time_of_day, str)
+            or len(time_of_day) != 5
+            or time_of_day[2] != ":"
+            or not time_of_day[:2].isdigit()
+            or not time_of_day[3:].isdigit()
+            or int(time_of_day[:2]) > 23
+            or int(time_of_day[3:]) > 59
+        ):
+            raise ValueError(f"timeline[{index}].time_of_day must be strict HH:MM")
         for name in ("pause_rule_ids", "resume_rule_ids"):
             value = step.get(name, [])
             if not isinstance(value, list) or not all(
@@ -206,6 +218,8 @@ async def simulate_timeline(
                 clock_fn=lambda now=previous.now_ms(): now, selector_resolver=resolver
             )
             engine.load_rules(previous.loaded_rules(), target_policies=previous.target_policies())
+            if previous._time_of_day is not None:
+                engine._time_of_day = previous._time_of_day
             for key, value in previous.state.items():
                 if isinstance(key, str) and "." in key:
                     entity_id, _separator, field = key.rpartition(".")
@@ -215,6 +229,8 @@ async def simulate_timeline(
             reconciler.restore_pending_withdraws(
                 {"pending_withdraws": pending}, now_ms=engine.now_ms()
             )
+        if "time_of_day" in step:
+            engine.set_time_of_day("simulation", clock=step["time_of_day"])
         adapter.reject = _rejections(step.get("reject_calls", False))
         changed_actual = []
         for entity_id, value in step.get("actual", {}).items():

@@ -38,10 +38,14 @@ integration layer sets it to the real current time on startup.
 from __future__ import annotations
 
 import hashlib
+import json
+import re
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
+from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from intentional.compositor import ResolvedIntent, resolve_intents
@@ -49,10 +53,11 @@ from intentional.generation import GeneratedFieldState, sample_generated_field
 from intentional.intent import Authority, Intent
 from intentional.lifecycle import (
     export_lifecycle_records,
+    lifecycle_version,
     restore_effect_outbox,
     restore_lifecycle_intents,
 )
-from intentional.records import EffectOutboxRecord, IntentSelector
+from intentional.records import EffectOutboxRecord, FrozenHoldAfter, IntentSelector
 from intentional.rule_lifecycle import dominant_phase, min_optional, rule_phase
 from intentional.selectors import (
     observation_groups_fire,
@@ -88,18 +93,33 @@ class _ParsedRule:
     hold_until_ast: WhenAST | None = None
 
 
-def _rule_fingerprint(rule: Rule) -> tuple[Any, ...]:
-    """Return semantic Rule values, deliberately excluding source location."""
-    return tuple(
-        getattr(rule, field.name)
+def _canonical_value(value: Any) -> Any:
+    """Return a JSON-safe semantic value with deterministic mapping order."""
+    if is_dataclass(value) and not isinstance(value, type):
+        return {field.name: _canonical_value(getattr(value, field.name)) for field in fields(value)}
+    if isinstance(value, dict):
+        return {
+            str(key): _canonical_value(item)
+            for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonical_value(item) for item in value]
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
+def _rule_fingerprint(rule: Rule) -> str:
+    """Return the canonical semantic Rule identity, excluding source location."""
+    semantic = {
+        field.name: _canonical_value(getattr(rule, field.name))
         for field in fields(rule)
         if field.name not in {"source_file", "source_line"}
-    )
-
-
-def _effect_rule_fingerprint(rule: Rule) -> str:
-    """Return a compact stable identity for the definition that activated."""
-    return hashlib.sha256(repr(_rule_fingerprint(rule)).encode("utf-8")).hexdigest()
+    }
+    encoded = json.dumps(semantic, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 class Engine:
@@ -128,6 +148,8 @@ class Engine:
         self._condition_true_since: dict[str, int] = {}  # rule_id → ms
         self._hold_until_true_since: dict[str, int] = {}  # rule_id → ms
         self._rule_held_since: dict[str, int] = {}  # rule_id → ms
+        self._rule_active_since: dict[str, int] = {}
+        self._frozen_hold_after: dict[str, FrozenHoldAfter] = {}
         self._state_change_callbacks: list[StateChangeCallback] = []
         self._log: list[str] = []  # last N log lines for diagnostics
         self._active_effect_rule_ids: set[str] = set()
@@ -147,37 +169,88 @@ class Engine:
             self._active_effect_rule_ids,
             self._generated_fields,
             self._effect_outbox,
+            rule_fingerprints={
+                rule_id: _rule_fingerprint(parsed.rule)
+                for rule_id, parsed in self._rules.items()
+            },
             now_ms=self.now_ms(),
         )
         records["enabled"] = self._enabled
         records["paused_labels"] = sorted(self._paused_labels)
         records["paused_rule_ids"] = sorted(self._paused_rule_ids)
+        records["rule_activations"] = [
+            {
+                "rule_id": rule_id,
+                "rule_fingerprint": _rule_fingerprint(self._rules[rule_id].rule),
+                "active_since_ms": active_since,
+                "frozen_hold_after": _frozen_hold_to_record(self._frozen_hold_after.get(rule_id)),
+            }
+            for rule_id, active_since in sorted(self._rule_active_since.items())
+            if rule_id in self._rules
+        ]
         return records
 
     def import_lifecycle_records(self, records: dict[str, Any] | None) -> None:
         """Restore persisted lifecycle records produced by export_lifecycle_records()."""
+        if lifecycle_version(records) is None:
+            return
         restored, active_effect_rule_ids, generated_fields = restore_lifecycle_intents(
             records,
             now_ms=self.now_ms(),
             known_rule_ids=set(self._rules),
+            rule_fingerprints={
+                rule_id: _rule_fingerprint(parsed.rule)
+                for rule_id, parsed in self._rules.items()
+            },
         )
         self._active_intents.extend(restored)
         self._active_effect_rule_ids = active_effect_rule_ids
         self._generated_fields.update(generated_fields)
         self._effect_outbox = restore_effect_outbox(records)
-        if isinstance(records, dict) and records.get("enabled") is False:
+        assert records is not None
+        paused_labels = records.get("paused_labels")
+        if isinstance(paused_labels, list):
+            self._paused_labels = {
+                label for label in paused_labels if isinstance(label, str) and label
+            }
+        paused_rule_ids = records.get("paused_rule_ids")
+        if isinstance(paused_rule_ids, list):
+            self._paused_rule_ids = {
+                rule_id for rule_id in paused_rule_ids if isinstance(rule_id, str) and rule_id
+            }
+        enabled = records.get("enabled", True)
+        if not isinstance(enabled, bool):
+            enabled = True
+        if enabled is False:
             self.set_enabled(False)
-        if isinstance(records, dict):
-            paused_labels = records.get("paused_labels")
-            if isinstance(paused_labels, list):
-                self._paused_labels = {
-                    label for label in paused_labels if isinstance(label, str) and label
-                }
-            paused_rule_ids = records.get("paused_rule_ids")
-            if isinstance(paused_rule_ids, list):
-                self._paused_rule_ids = {
-                    rule_id for rule_id in paused_rule_ids if isinstance(rule_id, str) and rule_id
-                }
+            return
+        self._restore_rule_activations(records)
+        self._terminate_rule_lifecycle(
+            {rule_id for rule_id in self._rules if self._rule_is_paused(rule_id)}
+        )
+
+    def _restore_rule_activations(self, records: dict[str, Any]) -> None:
+        activations = records.get("rule_activations")
+        if not isinstance(activations, list):
+            return
+        for raw in activations:
+            if not isinstance(raw, dict):
+                continue
+            rule_id = raw.get("rule_id")
+            parsed = self._rules.get(rule_id) if isinstance(rule_id, str) else None
+            if parsed is None or parsed.rule.dynamic_hold_after is None:
+                continue
+            if raw.get("rule_fingerprint") != _rule_fingerprint(parsed.rule):
+                continue
+            active_since = raw.get("active_since_ms")
+            if not _is_nonnegative_int(active_since):
+                continue
+            self._rule_active_since[rule_id] = active_since
+            decision = _frozen_hold_from_record(raw.get("frozen_hold_after"))
+            if decision is not None and _frozen_hold_matches_policy(
+                decision, parsed.rule.dynamic_hold_after, active_since
+            ):
+                self._frozen_hold_after[rule_id] = decision
 
     def is_enabled(self) -> bool:
         """Return whether automation rule evaluation is globally enabled."""
@@ -189,6 +262,7 @@ class Engine:
         if not enabled:
             self._active_intents = []
             self._active_effect_rule_ids.clear()
+            self._terminate_rule_lifecycle(set(self._rules))
 
     def set_label_paused(self, label: str, paused: bool) -> None:
         """Pause or resume all rules carrying a locality label."""
@@ -204,6 +278,9 @@ class Engine:
                 for rule_id in self._active_effect_rule_ids
                 if not self._rule_has_label(rule_id, label)
             }
+            self._terminate_rule_lifecycle(
+                {rule_id for rule_id in self._rules if self._rule_has_label(rule_id, label)}
+            )
             return
         self._paused_labels.discard(label)
 
@@ -222,6 +299,7 @@ class Engine:
                 intent for intent in self._active_intents if intent.rule_id not in rule_ids
             ]
             self._active_effect_rule_ids.difference_update(rule_ids)
+            self._terminate_rule_lifecycle(rule_ids)
             return
         self._paused_rule_ids.difference_update(rule_ids)
 
@@ -229,6 +307,11 @@ class Engine:
         """Pause or resume multiple authored or expanded rule ids."""
         for rule_id in rule_ids:
             self.set_rule_paused(rule_id, paused)
+
+    def _terminate_rule_lifecycle(self, rule_ids: set[str]) -> None:
+        for rule_id in rule_ids:
+            self._rule_active_since.pop(rule_id, None)
+            self._frozen_hold_after.pop(rule_id, None)
 
     def is_rule_paused(self, rule_id: str) -> bool:
         """Return whether an authored or expanded rule id is paused."""
@@ -261,7 +344,51 @@ class Engine:
 
     def set_time_of_day(self, bucket: str, *, clock: str | None = None) -> None:
         """Set the current time helper for `time_of_day` references."""
+        if clock is not None and re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", clock) is None:
+            raise ValueError("time_of_day clock must be strict HH:MM")
         self._time_of_day = TimeOfDay(bucket=bucket, clock=clock)
+
+    def _freeze_dynamic_hold(self, rule_id: str, rule: Rule, now: int) -> FrozenHoldAfter:
+        existing = self._frozen_hold_after.get(rule_id)
+        if existing is not None:
+            return existing
+        policy = rule.dynamic_hold_after
+        assert policy is not None
+        active_for = max(0, now - self._rule_active_since.get(rule_id, now))
+        tier_index = max(index for index, tier in enumerate(policy.tiers) if tier.active_for_ms <= active_for)
+        tier = policy.tiers[tier_index]
+        adjustment_index = None
+        adjustment = None
+        clock = self._time_of_day.clock if isinstance(self._time_of_day, TimeOfDay) else None
+        minute = None
+        if clock is not None:
+            hour, minute_part = clock.split(":")
+            minute = int(hour) * 60 + int(minute_part)
+        for index, candidate in enumerate(policy.adjustments):
+            if minute is not None and _minute_in_window(minute, candidate.from_minute, candidate.until_minute):
+                adjustment_index, adjustment = index, candidate
+                break
+        add_ms = adjustment.add_ms if adjustment is not None else 0
+        unclamped = tier.duration_ms + add_ms
+        duration = max(0, min(unclamped, policy.max_ms))
+        expires = now + duration
+        decision = FrozenHoldAfter(
+            active_for_ms=active_for,
+            tier_index=tier_index,
+            tier_threshold_ms=tier.active_for_ms,
+            base_duration_ms=tier.duration_ms,
+            adjustment_index=adjustment_index,
+            adjustment_from=adjustment.from_time if adjustment else None,
+            adjustment_until=adjustment.until_time if adjustment else None,
+            adjustment_add_ms=add_ms,
+            max_ms=policy.max_ms,
+            unclamped_duration_ms=unclamped,
+            duration_ms=duration,
+            started_at_ms=now,
+            expires_at_ms=expires,
+        )
+        self._frozen_hold_after[rule_id] = decision
+        return decision
 
     # ── State ───────────────────────────────────────────────────────
 
@@ -338,7 +465,11 @@ class Engine:
         self._active_intents = [
             i
             for i in self._active_intents
-            if not i.rule_id or (i.rule_id in unchanged and i.ignore_when)
+            if not i.rule_id
+            or (
+                i.rule_id in unchanged
+                and (i.ignore_when or i.rule_id in self._rule_held_since)
+            )
         ]
         self._condition_true_since = {
             rule_id: since
@@ -355,6 +486,12 @@ class Engine:
             for rule_id, since in self._rule_held_since.items()
             if rule_id in unchanged
         }
+        self._rule_active_since = {
+            rule_id: since for rule_id, since in self._rule_active_since.items() if rule_id in unchanged
+        }
+        self._frozen_hold_after = {
+            rule_id: decision for rule_id, decision in self._frozen_hold_after.items() if rule_id in unchanged
+        }
         self._animation_started_at = {
             rule_id: started
             for rule_id, started in self._animation_started_at.items()
@@ -367,7 +504,7 @@ class Engine:
         }
 
     @staticmethod
-    def rule_fingerprint(rule: Rule) -> tuple[Any, ...]:
+    def rule_fingerprint(rule: Rule) -> str:
         """Expose reload identity semantics to the integration coordinator."""
         return _rule_fingerprint(rule)
 
@@ -505,6 +642,18 @@ class Engine:
             if self._intent_is_paused(intent):
                 continue
             if intent.ignore_when:
+                parsed = self._rules.get(intent.rule_id)
+                if (
+                    intent.rule_id in firing
+                    and parsed is not None
+                    and parsed.rule.dynamic_hold_after is not None
+                ):
+                    if not intent.selector_generated:
+                        new_active.append(self._spawn_intent_from_rule(parsed.rule, now))
+                    self._rule_active_since[intent.rule_id] = now
+                    self._frozen_hold_after.pop(intent.rule_id, None)
+                    self._animation_started_at[intent.rule_id] = now
+                    continue
                 if not intent.is_expired(into_the_future_ms=now):
                     new_active.append(intent)
                 continue
@@ -530,6 +679,11 @@ class Engine:
                     self._hold_until_true_since.pop(intent.rule_id, None)
                     self._rule_held_since.setdefault(intent.rule_id, now)
                     new_active.append(intent)
+                    continue
+                if rule.dynamic_hold_after is not None and not intent.ignore_when:
+                    decision = self._freeze_dynamic_hold(intent.rule_id, rule, now)
+                    if decision.duration_ms > 0:
+                        new_active.append(_linger_intent(intent, decision.duration_ms, now))
                     continue
                 if rule.linger_ms and not intent.ignore_when:
                     new_active.append(_linger_intent(intent, rule.linger_ms, now))
@@ -565,7 +719,7 @@ class Engine:
             parsed = self._rules[rule_id]
             if parsed.rule.effects and rule_id not in self._active_effect_rule_ids:
                 activation_id = str(uuid.uuid4())
-                fingerprint = _effect_rule_fingerprint(parsed.rule)
+                fingerprint = _rule_fingerprint(parsed.rule)
                 for effect_index, effect in enumerate(parsed.rule.effects):
                     rendered = self._template_renderer.render_effect(effect, self.state)
                     self._effect_outbox.append(
@@ -589,9 +743,20 @@ class Engine:
                     continue
                 intent = self._spawn_intent_from_rule(parsed.rule, now)
                 new_active.append(intent)
+                if parsed.rule.dynamic_hold_after is not None:
+                    self._rule_active_since.setdefault(rule_id, now)
                 self._animation_started_at[rule_id] = now
 
         self._active_intents = new_active
+        active_rule_ids = {intent.rule_id for intent in new_active if intent.rule_id}
+        for rule_id in active_rule_ids:
+            parsed = self._rules.get(rule_id)
+            if parsed is not None and parsed.rule.dynamic_hold_after is not None:
+                self._rule_active_since.setdefault(rule_id, now)
+        for rule_id in list(self._rule_active_since):
+            if rule_id not in active_rule_ids:
+                self._rule_active_since.pop(rule_id, None)
+                self._frozen_hold_after.pop(rule_id, None)
         self._active_effect_rule_ids = {
             rule_id for rule_id in firing if self._rules[rule_id].rule.effects
         }
@@ -1095,6 +1260,7 @@ class Engine:
                     "active_for_ms": status.get("active_for_ms"),
                     "condition_active_for_ms": status.get("condition_active_for_ms"),
                     "held_for_ms": status.get("held_for_ms"),
+                    **({"hold_after": status["hold_after"]} if "hold_after" in status else {}),
                     "group": status.get("group", ""),
                     "profile": status.get("profile", ""),
                 }
@@ -1283,7 +1449,7 @@ class Engine:
         if phase == "held" and rule_id in self._rule_held_since:
             held_for_ms = max(0, now - self._rule_held_since[rule_id])
 
-        return {
+        status = {
             "rule_id": rule_id,
             "enabled": rule.enabled,
             "paused": self._rule_is_paused(rule_id),
@@ -1305,6 +1471,29 @@ class Engine:
             "notes": rule.notes,
             "blocked_by": sorted(blocked_by.get(rule_id, [])),
             "for_remaining_ms": for_remaining.get(rule_id),
+        }
+        if rule.dynamic_hold_after is not None:
+            status["hold_after"] = self._hold_after_status(rule_id, now)
+        return status
+
+    def _hold_after_status(self, rule_id: str, now: int) -> dict[str, Any] | None:
+        decision = self._frozen_hold_after.get(rule_id)
+        if decision is None:
+            return None
+        return {
+            "frozen": True,
+            "active_for_ms": decision.active_for_ms,
+            "tier": {"index": decision.tier_index, "threshold_ms": decision.tier_threshold_ms, "base_duration_ms": decision.base_duration_ms},
+            "adjustment": None if decision.adjustment_index is None else {
+                "index": decision.adjustment_index, "from": decision.adjustment_from,
+                "until": decision.adjustment_until, "add_ms": decision.adjustment_add_ms,
+            },
+            "max_ms": decision.max_ms,
+            "unclamped_duration_ms": decision.unclamped_duration_ms,
+            "duration_ms": decision.duration_ms,
+            "started_at_ms": decision.started_at_ms,
+            "expires_at_ms": decision.expires_at_ms,
+            "remaining_ms": max(0, decision.expires_at_ms - now),
         }
 
     def explain(self, target: str) -> str:
@@ -1409,3 +1598,91 @@ def _linger_intent(intent: Intent, linger_ms: int, now: int) -> Intent:
         animation=intent.animation,
         generators=intent.generators,
     )
+
+
+def _minute_in_window(minute: int, start: int, end: int) -> bool:
+    if start == end:
+        return True
+    return start <= minute < end if start < end else minute >= start or minute < end
+
+
+def _frozen_hold_to_record(decision: FrozenHoldAfter | None) -> dict[str, Any] | None:
+    if decision is None:
+        return None
+    return {field.name: getattr(decision, field.name) for field in fields(FrozenHoldAfter)}
+
+
+def _frozen_hold_from_record(raw: Any) -> FrozenHoldAfter | None:
+    if not isinstance(raw, dict):
+        return None
+    try:
+        decision = FrozenHoldAfter(**{field.name: raw[field.name] for field in fields(FrozenHoldAfter)})
+    except (KeyError, TypeError, ValueError):
+        return None
+    integers = (
+        decision.active_for_ms, decision.tier_index, decision.tier_threshold_ms,
+        decision.base_duration_ms, decision.adjustment_add_ms, decision.max_ms,
+        decision.unclamped_duration_ms, decision.duration_ms, decision.started_at_ms,
+        decision.expires_at_ms,
+    )
+    if any(not isinstance(value, int) or isinstance(value, bool) for value in integers):
+        return None
+    nonnegative = (
+        decision.active_for_ms, decision.tier_index, decision.tier_threshold_ms,
+        decision.base_duration_ms, decision.max_ms, decision.duration_ms,
+        decision.started_at_ms, decision.expires_at_ms,
+    )
+    if any(value < 0 for value in nonnegative):
+        return None
+    if decision.tier_threshold_ms > decision.active_for_ms:
+        return None
+    if decision.unclamped_duration_ms != (
+        decision.base_duration_ms + decision.adjustment_add_ms
+    ):
+        return None
+    if decision.duration_ms != max(
+        0, min(decision.unclamped_duration_ms, decision.max_ms)
+    ):
+        return None
+    if decision.expires_at_ms != decision.started_at_ms + decision.duration_ms:
+        return None
+    if decision.adjustment_index is None:
+        if (decision.adjustment_from, decision.adjustment_until, decision.adjustment_add_ms) != (
+            None, None, 0
+        ):
+            return None
+    elif (
+        not _is_nonnegative_int(decision.adjustment_index)
+        or not _is_clock(decision.adjustment_from)
+        or not _is_clock(decision.adjustment_until)
+    ):
+        return None
+    return decision
+
+
+def _frozen_hold_matches_policy(decision: FrozenHoldAfter, policy: Any, active_since: int) -> bool:
+    if decision.active_for_ms != max(0, decision.started_at_ms - active_since):
+        return False
+    if decision.max_ms != policy.max_ms or decision.tier_index >= len(policy.tiers):
+        return False
+    tier = policy.tiers[decision.tier_index]
+    if (decision.tier_threshold_ms, decision.base_duration_ms) != (
+        tier.active_for_ms, tier.duration_ms
+    ):
+        return False
+    if decision.adjustment_index is None:
+        return True
+    if decision.adjustment_index >= len(policy.adjustments):
+        return False
+    adjustment = policy.adjustments[decision.adjustment_index]
+    return (
+        decision.adjustment_from, decision.adjustment_until, decision.adjustment_add_ms
+    ) == (adjustment.from_time, adjustment.until_time, adjustment.add_ms)
+
+
+def _is_nonnegative_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _is_clock(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value) is not None

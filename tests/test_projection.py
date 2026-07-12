@@ -17,7 +17,7 @@ from intentional.projection import (
 from intentional.reconciliation import Reconciliation
 from intentional.simulation import simulate_timeline, validate_simulation_input
 from intentional.target_policy import TargetPolicy
-from intentional.yaml_loader import Rule
+from intentional.yaml_loader import Rule, load_rules_from_string
 
 
 def _engine() -> Engine:
@@ -380,6 +380,11 @@ def test_schema_describes_semantic_simulation_and_replay_inputs() -> None:
     }
     assert "purpose" in schema["simulation_selector_membership"]["selector_filters"]
     assert schema["simulation_semantic_metadata"]["required_fields"] == ["entity_id"]
+    dynamic = schema["dynamic_hold_after"]
+    assert dynamic["aliases"] == ["hold.after", "hold.after_when_stops"]
+    assert dynamic["required_exact_fields"] == ["tiers", "adjustments", "max"]
+    assert dynamic["tiers"]["max_items"] == 64
+    assert dynamic["adjustments"]["selection"].startswith("first matching")
 
 
 def test_simulation_rejects_duplicate_semantic_metadata_entities() -> None:
@@ -390,3 +395,42 @@ def test_simulation_rejects_duplicate_semantic_metadata_entities() -> None:
 
     with pytest.raises(ValueError, match="duplicates an entity ID"):
         validate_simulation_input([], {}, semantic_metadata=metadata)
+def test_simulation_validates_time_of_day() -> None:
+    validate_simulation_input([{"time_of_day": "22:00"}], {})
+    with pytest.raises(ValueError, match="strict HH:MM"):
+        validate_simulation_input([{"time_of_day": "2:00"}], {})
+
+
+@pytest.mark.asyncio
+async def test_simulation_freezes_dynamic_hold_and_preserves_it_on_restart() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string("""
+- id: adaptive
+  while: {binary_sensor.motion: on}
+  hold:
+    after:
+      tiers: [{active_for: 0s, duration: 30s}]
+      adjustments: [{from: "22:00", until: "06:00", add: 5m}]
+      max: 10m
+  intent:
+    light.room: {state: on}
+"""))
+    steps = await simulate_timeline(engine, [
+        {"time_of_day": "22:00", "states": {"binary_sensor.motion.state": "on"}},
+        {"advance_ms": 1_000, "states": {"binary_sensor.motion.state": "off"}},
+        {"advance_ms": 1_000, "time_of_day": "12:00", "restart": True},
+    ])
+    frozen = steps[1]["active_rules"][0]["hold_after"]
+    assert frozen["duration_ms"] == 330_000
+    assert steps[2]["active_rules"][0]["hold_after"]["expires_at_ms"] == frozen["expires_at_ms"]
+
+
+@pytest.mark.asyncio
+async def test_simulation_restart_applies_current_step_time_of_day() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules([Rule(id="noon", when='time_of_day == "12:00"',
+                            target="light.room", set={"state": "on"})])
+
+    steps = await simulate_timeline(engine, [{"restart": True, "time_of_day": "12:00"}])
+
+    assert steps[0]["active_rules"][0]["rule_id"] == "noon"

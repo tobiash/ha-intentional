@@ -126,7 +126,11 @@ class EntityPublication:
 def _freeze(value: Any) -> Any:
     """Convert status payload values to deterministic comparable values."""
     if isinstance(value, dict):
-        return tuple(sorted((key, _freeze(item)) for key, item in value.items()))
+        return tuple(sorted(
+            (key, _freeze(item))
+            for key, item in value.items()
+            if key != "remaining_ms"
+        ))
     if isinstance(value, (set, frozenset)):
         return tuple(sorted(_freeze(item) for item in value))
     if isinstance(value, (list, tuple)):

@@ -291,6 +291,27 @@ rules:
       linger: 1m
 """)
 
+    @pytest.mark.parametrize(
+        "hold",
+        [
+            "after: 5m\n    after_when_stops: 10m",
+            "after_when_stops: 10m\n    after: 5m",
+        ],
+    )
+    def test_lifecycle_rejects_both_hold_after_aliases(self, hold: str) -> None:
+        with pytest.raises(
+            RuleLoadError,
+            match="Use either `hold.after` or `hold.after_when_stops`",
+        ):
+            load_rules_from_string(f"""
+- id: ambiguous-hold-alias
+  while: {{binary_sensor.motion: on}}
+  hold:
+    {hold}
+  intent:
+    light.one: {{state: on}}
+""")
+
     def test_lifecycle_hold_survives_multi_target_expansion(self) -> None:
         rules = load_rules_from_string("""
 - id: living-room-evening
@@ -322,6 +343,64 @@ rules:
             "light.sofa": 300_000,
             "light.table": 300_000,
         }
+
+    def test_dynamic_hold_after_parses_and_expands_immutably(self) -> None:
+        rules = load_rules_from_string("""
+- id: adaptive
+  while: {binary_sensor.motion: on}
+  hold:
+    after:
+      tiers:
+        - {active_for: 0s, duration: 30s}
+        - {active_for: 30m, duration: 10m}
+      adjustments:
+        - {from: "22:00", until: "06:00", add: 5m}
+      max: 15m
+  intent:
+    light.one: {state: on}
+    light.two: {state: on}
+""")
+        assert len(rules) == 2
+        policy = rules[0].dynamic_hold_after
+        assert policy == rules[1].dynamic_hold_after
+        assert [(tier.active_for_ms, tier.duration_ms) for tier in policy.tiers] == [(0, 30_000), (1_800_000, 600_000)]
+        assert policy.adjustments[0].add_ms == 300_000
+        assert policy.max_ms == 900_000
+        assert all(rule.linger_ms is None for rule in rules)
+
+    @pytest.mark.parametrize("replacement", [
+        "tiers: []\n      adjustments: []\n      max: 1m",
+        "tiers: [{active_for: 1s, duration: 1m}]\n      adjustments: []\n      max: 1m",
+        "tiers: [{active_for: 0s, duration: 1m}, {active_for: 0s, duration: 2m}]\n      adjustments: []\n      max: 2m",
+        "tiers: [{active_for: 0s, duration: -1m}]\n      adjustments: []\n      max: 1m",
+        "tiers: [{active_for: 0s, duration: 1m}]\n      adjustments: [{from: '2:00', until: '06:00', add: 1m}]\n      max: 1m",
+        "tiers: [{active_for: 0s, duration: 1m}]\n      adjustments: []\n      max: 0s",
+    ])
+    def test_dynamic_hold_after_rejects_invalid_policy(self, replacement: str) -> None:
+        with pytest.raises(RuleLoadError):
+            load_rules_from_string(f"""
+- id: invalid
+  while: {{binary_sensor.motion: on}}
+  hold:
+    after:
+      {replacement}
+  intent:
+    light.one: {{state: on}}
+""")
+
+    def test_dynamic_hold_after_rejects_duration_over_safe_bound(self) -> None:
+        with pytest.raises(RuleLoadError, match="is too large"):
+            load_rules_from_string("""
+- id: overflow
+  while: {binary_sensor.motion: on}
+  hold:
+    after:
+      tiers: [{active_for: 0s, duration: 8784h}]
+      adjustments: []
+      max: 8784h
+  intent:
+    light.one: {state: on}
+""")
 
     def test_lifecycle_hold_until_normalizes_release_condition(self) -> None:
         rules = load_rules_from_string("""
@@ -1401,3 +1480,23 @@ def test_semantic_binary_vocabulary_is_purpose_specific(
             f"- id: invalid-vocabulary\n  while: {{{purpose}: {{{comparison}: {{}}}}}}\n"
             "  emit: {target: light.office, set: {state: on}}\n"
         )
+
+
+def test_dynamic_hold_after_bounds_collection_sizes() -> None:
+    from intentional.yaml_loader import MAX_HOLD_AFTER_ADJUSTMENTS, MAX_HOLD_AFTER_TIERS
+
+    tiers = "\n".join(
+        f"        - active_for: {index}s\n          duration: 1m"
+        for index in range(MAX_HOLD_AFTER_TIERS + 1)
+    )
+    adjustments = "\n".join(
+        "        - {from: '00:00', until: '00:01', add: 1s}"
+        for _ in range(MAX_HOLD_AFTER_ADJUSTMENTS + 1)
+    )
+    prefix = "- id: bounded\n  while: {binary_sensor.x: on}\n  hold:\n    after:\n"
+    suffix = "\n  intent: {light.x: {state: on}}\n"
+
+    with pytest.raises(RuleLoadError, match="tiers.*at most"):
+        load_rules_from_string(prefix + f"      tiers:\n{tiers}\n      adjustments: []\n      max: 1h" + suffix)
+    with pytest.raises(RuleLoadError, match="adjustments.*at most"):
+        load_rules_from_string(prefix + f"      tiers: [{{active_for: 0s, duration: 1m}}]\n      adjustments:\n{adjustments}\n      max: 1h" + suffix)

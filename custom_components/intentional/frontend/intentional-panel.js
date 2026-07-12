@@ -851,9 +851,45 @@ function visualModeError(block) {
   if (blockScalar) return `Visual mode is unavailable to prevent data loss: block scalar '${blockScalar[1]}' metadata is not represented by the visual editor. Edit this rule as YAML.`;
   if (/[&*][A-Za-z0-9_-]+|(^|\s)<<:\s/m.test(block)) return "Visual mode cannot safely edit YAML anchors, aliases, or merge keys.";
   if (/^\s{4}for:\s/m.test(block) || /^\s{6}-?\s*(all|any|none|not):\s*$/m.test(block)) return "Visual mode cannot safely edit nested or duration-qualified conditions.";
+  if (hasDynamicHoldMapping(sectionLines(block, "hold"))) return "Visual mode is unavailable to prevent data loss: dynamic hold mappings are not represented by the visual editor. Edit this rule as YAML.";
   const intentError = unsupportedIntentConstruct(sectionLines(block, "intent"));
   if (intentError) return `Visual mode is unavailable to prevent data loss: ${intentError} Edit this rule as YAML.`;
   return "";
+}
+
+function hasDynamicHoldMapping(lines) {
+  for (const line of lines) {
+    const match = line.match(/^\s{4}(?:after|after_when_stops):\s*(.*)$/);
+    if (!match) continue;
+    const value = match[1].trim();
+    if (!value || value.startsWith("#")) return true;
+    if (isFlowMapping(value)) return true;
+  }
+  return false;
+}
+
+function isFlowMapping(value) {
+  if (!value.startsWith("{")) return false;
+  let quote = "";
+  let escaped = false;
+  let depth = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (quote) {
+      if (quote === '"' && character === "\\" && !escaped) { escaped = true; continue; }
+      if (character === quote && !escaped) quote = "";
+      escaped = false;
+      continue;
+    }
+    if (character === "'" || character === '"') { quote = character; continue; }
+    if (character === "{") depth += 1;
+    if (character === "}") {
+      depth -= 1;
+      if (depth === 0) return /^(?:\s*#.*)?$/.test(value.slice(index + 1));
+      if (depth < 0) return false;
+    }
+  }
+  return false;
 }
 
 function inlineLabelsContainQuotedComma(block) {

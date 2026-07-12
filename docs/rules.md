@@ -238,6 +238,48 @@ This means:
 `hold.after` and `hold.after_when_stops` are equivalent. Target-level `linger` is
 the lower-level spelling for `hold.after`.
 
+`hold.after` may instead be a dynamic policy. The duration is selected once,
+when timed retention begins, and is then frozen through clock changes, Rule
+reloads, and restarts:
+
+```yaml
+hold:
+  after:
+    tiers:
+      - active_for: 0s
+        duration: 30s
+      - active_for: 30m
+        duration: 10m
+    adjustments:
+      - from: "22:00"
+        until: "06:00"
+        add: 5m
+    max: 15m
+```
+
+The selected tier is the greatest `active_for` threshold not exceeding the
+Rule activation lifetime. That lifetime begins when its Intent first activates
+and includes time retained by `hold.while` or `hold.until`. Adjustments use the
+integration-supplied local `HH:MM`; the first matching window applies, with
+`from` inclusive and `until` exclusive. Overnight windows are supported and an
+equal `from`/`until` matches the full day. The frozen duration is
+`max(0, min(base + add, max))`; zero withdraws immediately.
+
+Activation lifetime uses a persisted wall-clock timestamp so it spans Home
+Assistant restarts. If the wall clock moves backward, elapsed lifetime is
+clamped to zero while the original activation timestamp is retained; elapsed
+time starts increasing again only after the clock catches up.
+
+The first tier must start at `0s`, thresholds must strictly increase,
+durations must be nonnegative, and `max` must be positive. `tiers`,
+`adjustments`, and `max` are all required exact keys; no other keys are
+accepted. `tiers` and `adjustments` each allow at most 64 entries. An empty
+`adjustments: []` is valid. All duration values, including zero, must be YAML
+strings such as `0s`, `30m`, or `-5m` (`add` alone may be signed); clock values
+must be quoted strict `"HH:MM"` strings. Dynamic
+`hold.after`, like scalar `hold.after`, cannot be combined with target
+`linger`.
+
 Use `hold.until` when release should wait for a stable off/absence condition:
 
 ```yaml

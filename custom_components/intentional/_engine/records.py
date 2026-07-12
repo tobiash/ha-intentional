@@ -36,6 +36,45 @@ class EffectOutboxRecord:
 
 
 @dataclass(frozen=True)
+class HoldAfterTier:
+    active_for_ms: int
+    duration_ms: int
+
+
+@dataclass(frozen=True)
+class HoldAfterAdjustment:
+    from_minute: int
+    until_minute: int
+    add_ms: int
+    from_time: str
+    until_time: str
+
+
+@dataclass(frozen=True)
+class DynamicHoldAfter:
+    tiers: tuple[HoldAfterTier, ...]
+    adjustments: tuple[HoldAfterAdjustment, ...]
+    max_ms: int
+
+
+@dataclass(frozen=True)
+class FrozenHoldAfter:
+    active_for_ms: int
+    tier_index: int
+    tier_threshold_ms: int
+    base_duration_ms: int
+    adjustment_index: int | None
+    adjustment_from: str | None
+    adjustment_until: str | None
+    adjustment_add_ms: int
+    max_ms: int
+    unclamped_duration_ms: int
+    duration_ms: int
+    started_at_ms: int
+    expires_at_ms: int
+
+
+@dataclass(frozen=True)
 class IntentSelector:
     """A selector that expands to target entity IDs at planning time."""
 

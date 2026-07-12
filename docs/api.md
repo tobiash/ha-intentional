@@ -224,6 +224,11 @@ switch attributes include lifecycle diagnostics:
 - `held_for_ms`: how long the rule has been retained by `hold` after the starting situation stopped.
 - `group` and `profile`: optional author metadata for modes and behavior profiles.
 
+For a Rule in dynamic timed retention, status and explain projections include
+`hold_after`: `frozen`, the `active_for_ms` selection basis, selected tier
+index/threshold/base, matching adjustment index/window/add (or `null`), `max_ms`,
+unclamped and final durations, start/expiry timestamps, and remaining time.
+
 ## Manual Drift Overrides
 
 Intentional treats HA state changes on managed targets as observations first. A
@@ -367,6 +372,9 @@ resolution rules. A replay containing selector-backed Rules is rejected when
 the required membership or semantic metadata is missing.
 
 Each timeline step may include:
+
+- `time_of_day`: strict local `HH:MM` time context. It is retained across a
+  simulated `restart` and is used when freezing dynamic `hold.after`.
 
 - `advance_ms`: non-negative integer clock advance before evaluation.
 - `states`: mapping of `<entity_id>.<field>` to value. Use `.state` for normal entity state.

@@ -147,6 +147,61 @@ def test_unsupported_constructs_block_visual_mode() -> None:
     )
 
 
+def test_dynamic_hold_mapping_refuses_visual_mode_and_preserves_yaml() -> None:
+    result = _run_panel_js(r'''(() => {
+      const yaml = `- id: adaptive\n  while:\n    binary_sensor.office: on\n  hold:\n    after_when_stops:\n      tiers:\n        - active_for: 0s\n          duration: 30s\n      adjustments: []\n      max: 5m\n  intent:\n    light.office:\n      state: on\n`;
+      const panel = new IntentionalPanel();
+      panel._render = () => {};
+      panel._contents = yaml;
+      panel._selectedRuleId = "adaptive";
+      panel._selectedRuleContents = yaml;
+      panel._selectedRuleForm = parseRuleForm(yaml, null);
+      panel._editorMode = "yaml";
+      panel._showVisualRule();
+      return {mode: panel._editorMode, error: panel._visualModeError, unchanged: panel._candidateContents() === yaml};
+    })()''')
+
+    assert result["mode"] == "yaml"
+    assert "dynamic hold mappings" in result["error"]
+    assert "prevent data loss" in result["error"]
+    assert result["unchanged"]
+
+
+def test_flow_dynamic_hold_mappings_refuse_visual_mode_without_modifying_yaml() -> None:
+    result = _run_panel_js(r'''(() => {
+      const values = {
+        after: `{tiers: [{active_for: 0s, duration: 30s}], adjustments: [], max: 5m}`,
+        after_when_stops: `{tiers: [{active_for: "0s", duration: '30s'}], adjustments: [{from: "22:00", multiply: 2}], max: 5m} # adaptive`,
+      };
+      return Object.entries(values).map(([alias, value]) => {
+        const yaml = `- id: adaptive-${alias}\n  while: {binary_sensor.office: on}\n  hold:\n    ${alias}: ${value}\n  intent:\n    light.office: {state: on}\n`;
+        const panel = new IntentionalPanel();
+        panel._render = () => {};
+        panel._contents = yaml;
+        panel._selectedRuleId = `adaptive-${alias}`;
+        panel._selectedRuleContents = yaml;
+        panel._selectedRuleForm = parseRuleForm(yaml, null);
+        panel._editorMode = "yaml";
+        panel._showVisualRule();
+        return {alias, mode: panel._editorMode, error: panel._visualModeError, unchanged: panel._candidateContents() === yaml};
+      });
+    })()''')
+
+    assert {item["alias"] for item in result} == {"after", "after_when_stops"}
+    assert all(item["mode"] == "yaml" for item in result)
+    assert all("dynamic hold mappings" in item["error"] for item in result)
+    assert all(item["unchanged"] for item in result)
+
+
+def test_scalar_hold_durations_are_not_mistaken_for_flow_mappings() -> None:
+    result = _run_panel_js(r'''(() => {
+      const values = ["5m", '"{five minutes}"', "'{five minutes}'"];
+      return values.map((value) => visualModeError(`- id: scalar\n  while:\n    binary_sensor.office: on\n  hold:\n    after_when_stops: ${value}\n  intent:\n    light.office:\n      state: on\n`));
+    })()''')
+
+    assert result == ["", "", ""]
+
+
 def test_block_style_labels_refuse_visual_mode_with_normalized_api_rule() -> None:
     result = _run_panel_js(r'''(() => {
       const yaml = `- id: labelled\n  labels:\n    - lighting\n    - evening\n  while:\n    binary_sensor.office: on\n  intent:\n    light.office:\n      state: on\n`;
