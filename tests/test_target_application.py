@@ -3641,8 +3641,8 @@ async def test_intentional_context_state_change_does_not_emit_manual_override() 
             ),
         }
     )
-    listener(event)
-    listener(event)
+    await listener(event)
+    await listener(event)
 
     assert "light.desk" in reconciler._last_applied
     assert reconciler._drift_candidates == {}

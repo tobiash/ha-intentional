@@ -390,6 +390,10 @@ def _replace_authored_rule_in_yaml(
     if replacement.get("id") != rule_id:
         return {"error": "rule_id_missing"}
 
+    current_rules = _raw_rule_items_from_yaml(contents)
+    if len(current_rules) == 1 and current_rules[0].get("id") == rule_id:
+        return {"contents": replacement_contents}
+
     changed = False
     for doc in docs:
         rule_items = None
