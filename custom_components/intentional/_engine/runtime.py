@@ -79,7 +79,6 @@ class TickRuntime:
     active_scenes: set[str] = field(default_factory=set)
     active_rule_ids: set[str] = field(default_factory=set)
     pulses: StateChangePulseQueue = field(default_factory=StateChangePulseQueue)
-    full_sweep_counter: int = 0
     last_success_ms: int | None = None
     last_failure_ms: int | None = None
     last_failure_error: str | None = None
@@ -88,17 +87,22 @@ class TickRuntime:
     success_count: int = 0
     failure_count: int = 0
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
-    tick_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    mutation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    revision: int = 0
     tick_task: asyncio.Task[None] | None = None
+    registry_task: asyncio.Task[None] | None = None
+    registry_pending: bool = False
     lifecycle_snapshot: dict[str, Any] | None = None
     _last_failure_report_ms: int | None = None
 
-    def should_full_sweep(self, *, every: int) -> bool:
-        self.full_sweep_counter += 1
-        if self.full_sweep_counter >= every:
-            self.full_sweep_counter = 0
-            return True
-        return False
+    def advance_revision(self) -> int:
+        """Record one atomic mutation of engine or reconciliation state."""
+        self.revision += 1
+        return self.revision
+
+    def is_revision(self, revision: int) -> bool:
+        """Return whether no newer mutation has occurred."""
+        return self.revision == revision
 
     def mark_success(self, *, now_ms: int | None = None) -> None:
         self.last_success_ms = monotonic_ms() if now_ms is None else now_ms

@@ -21,10 +21,12 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from ._engine.presentation import intent_sensor_state, value_summary
+from ._engine.runtime import TickRuntime, runtime_key
 from .const import (
     ATTR_ACTIVE_INTENTS,
     ATTR_AUTHORITY,
@@ -35,6 +37,7 @@ from .const import (
     DEFAULT_NAME,
     DOMAIN,
 )
+from .publication import publication_signal
 from .room_controls import area_for_target, room_controls_for_engine, slugify_area_id
 
 _LOGGER = logging.getLogger(__name__)
@@ -61,11 +64,12 @@ async def async_setup_entry(
 
     _cleanup_legacy_target_sensors(hass, entry)
 
-    # Listen for refresh events from __init__.py and call async_write_ha_state
-    async def _on_refresh(event) -> None:
-        if event.data.get("entry_id") != entry.entry_id:
+    async def _on_publication(changed: frozenset[str]) -> None:
+        runtime = hass.data[DOMAIN].get(runtime_key(entry.entry_id))
+        if isinstance(runtime, TickRuntime) and runtime.unloading:
             return
-        summary.async_write_ha_state()
+        if "summary" in changed:
+            summary.async_write_ha_state()
         current_room_ids = set(room_controls_for_engine(
             engine,
             lambda target: area_for_target(hass, target),
@@ -79,12 +83,13 @@ async def async_setup_entry(
             room_entities[area_id] = entity
             new_entities.append(entity)
         for area_id in current_room_ids & set(room_entities):
-            room_entities[area_id].async_write_ha_state()
+            if f"room:{area_id}" in changed:
+                room_entities[area_id].async_write_ha_state()
         if new_entities:
             async_add_entities(new_entities)
 
     entry.async_on_unload(
-        hass.bus.async_listen(f"{DOMAIN}_refresh", _on_refresh)
+        async_dispatcher_connect(hass, publication_signal(entry.entry_id), _on_publication)
     )
 
 

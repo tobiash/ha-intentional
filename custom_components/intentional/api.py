@@ -64,6 +64,7 @@ missing resources, 500 for internal errors).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Callable
@@ -81,17 +82,26 @@ from ._engine.projection import (  # noqa: TID252
     dashboard_cards,
     explain_card,
     preview_targets,
+    redact_sensitive,
     simulation_step,
+    target_projection,
 )
 from ._engine.reconciliation import (  # noqa: TID252
     actual_conditions_for_desired_record,
     actual_snapshot,
+    reconciliation_key,
 )
 from ._engine.runtime import TickRuntime, runtime_key  # noqa: TID252
 from ._engine.schema import dsl_schema  # noqa: TID252
-from ._engine.yaml_loader import RuleLoadError, load_rules_from_string  # noqa: TID252
+from ._engine.simulation import simulate_timeline, validate_simulation_input  # noqa: TID252
+from ._engine.yaml_loader import RuleLoadError  # noqa: TID252
 from .const import CONF_RULE_DIR, DEFAULT_RULE_DIR, DOMAIN  # noqa: TID252
 from .diagnostics import list_diagnostics  # noqa: TID252
+from .document_validation import (  # noqa: TID252
+    load_and_preflight_document,
+    validate_document,
+)
+from .lifecycle_writer import LifecycleWriter, lifecycle_writer_key  # noqa: TID252
 from .room_controls import area_for_target, room_controls_for_engine  # noqa: TID252
 from .rule_files import (  # noqa: TID252
     _delete_rule_file,
@@ -100,6 +110,11 @@ from .rule_files import (  # noqa: TID252
     _patch_rule_by_id,
     _read_rule_file,
     _write_rule_file,
+)
+from .rule_mutation import (  # noqa: TID252
+    RuleMutationCoordinator,
+    mutate_and_reload,
+    mutation_coordinator_key,
 )
 from .rule_store import RULE_STORE_FILENAME, StorageRuleStore, rule_store_key  # noqa: TID252
 from .validation import validation_warnings as _validation_warnings  # noqa: TID252
@@ -128,6 +143,13 @@ def _engine_for(hass: HomeAssistant) -> Any | None:
     return hass.data.get(DOMAIN, {}).get(entry.entry_id)
 
 
+def _reconciliation_for(hass: HomeAssistant) -> Any | None:
+    entry = _entry_for_view(hass)
+    if entry is None:
+        return None
+    return hass.data.get(DOMAIN, {}).get(reconciliation_key(entry.entry_id))
+
+
 def _rule_dir_for(hass: HomeAssistant) -> str:
     """Return the rule directory for the first config entry."""
     entry = _entry_for_view(hass)
@@ -145,6 +167,21 @@ def _rule_store_for(hass: HomeAssistant) -> StorageRuleStore | None:
     return store if isinstance(store, StorageRuleStore) else None
 
 
+def _mutation_coordinator_for(hass: HomeAssistant) -> RuleMutationCoordinator | None:
+    entry = _entry_for_view(hass)
+    if entry is None:
+        return None
+    coordinator = hass.data.get(DOMAIN, {}).get(mutation_coordinator_key(entry.entry_id))
+    return coordinator if isinstance(coordinator, RuleMutationCoordinator) else None
+
+
+def _expected_generation(data: dict[str, Any]) -> tuple[str | None, web.Response | None]:
+    generation = data.get("expected_generation")
+    if not isinstance(generation, str):
+        return None, _error("Request body must include string `expected_generation`", "precondition_required", 428)
+    return generation, None
+
+
 def _runtime_for(hass: HomeAssistant) -> TickRuntime | None:
     """Return tick runtime state for the first config entry, if loaded."""
     entry = _entry_for_view(hass)
@@ -159,6 +196,18 @@ def _runtime_health(hass: HomeAssistant) -> dict[str, Any]:
     if runtime is None:
         return {"status": "degraded", "error": "runtime_not_loaded"}
     return runtime.health()
+
+
+def _persistence_health(hass: HomeAssistant) -> dict[str, Any]:
+    entry = _entry_for_view(hass)
+    writer = (
+        None
+        if entry is None
+        else hass.data.get(DOMAIN, {}).get(lifecycle_writer_key(entry.entry_id))
+    )
+    if not isinstance(writer, LifecycleWriter):
+        return {"status": "degraded", "error": "persistence_not_loaded"}
+    return writer.health()
 
 
 def _overall_status(runtime_health: dict[str, Any]) -> str:
@@ -218,14 +267,20 @@ class IntentionalHealthView(HomeAssistantView):
         if engine is None or entry is None:
             return _error("Integration not configured", "not_configured", 503)
         runtime_health = _runtime_health(hass)
-        return web.json_response({
-            "status": _overall_status(runtime_health),
-            "version": __version__,
-            "rule_dir": entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR),
-            "rule_count": engine.rule_count(),
-            "active_intent_count": engine.active_intent_count(),
-            "runtime": runtime_health,
-        })
+        persistence_health = _persistence_health(hass)
+        return web.json_response(
+            {
+                "status": "ok"
+                if _overall_status(runtime_health) == "ok" and persistence_health["status"] == "ok"
+                else "degraded",
+                "version": __version__,
+                "rule_dir": entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR),
+                "rule_count": engine.rule_count(),
+                "active_intent_count": engine.active_intent_count(),
+                "runtime": runtime_health,
+                "persistence": persistence_health,
+            }
+        )
 
 
 # ── Rules list / read / write / delete ─────────────────────────────
@@ -242,19 +297,23 @@ class IntentionalRulesView(HomeAssistantView):
         hass = request.app["hass"]
         store = _rule_store_for(hass)
         if store is not None:
-            return web.json_response({
-                "rule_dir": "homeassistant_storage",
-                "count": 1,
-                "files": store.list_files(),
-                "source": "storage",
-            })
+            return web.json_response(
+                {
+                    "rule_dir": "homeassistant_storage",
+                    "count": 1,
+                    "files": store.list_files(),
+                    "source": "storage",
+                }
+            )
         rule_dir = _rule_dir_for(hass)
         files = await _rule_file_job(hass, _list_rule_files, rule_dir)
-        return web.json_response({
-            "rule_dir": rule_dir,
-            "count": len(files),
-            "files": files,
-        })
+        return web.json_response(
+            {
+                "rule_dir": rule_dir,
+                "count": len(files),
+                "files": files,
+            }
+        )
 
 
 class IntentionalRuleDocumentView(HomeAssistantView):
@@ -264,11 +323,14 @@ class IntentionalRuleDocumentView(HomeAssistantView):
     name = "api:intentional:rule_document"
     requires_auth = True
 
+    @require_admin
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
         store = _rule_store_for(hass)
         if store is None:
-            return _error("Rule document is only available for storage-backed rules", "not_available", 404)
+            return _error(
+                "Rule document is only available for storage-backed rules", "not_available", 404
+            )
         return web.json_response(_rule_document_response(store))
 
     @require_admin
@@ -276,7 +338,9 @@ class IntentionalRuleDocumentView(HomeAssistantView):
         hass = request.app["hass"]
         store = _rule_store_for(hass)
         if store is None:
-            return _error("Rule document is only available for storage-backed rules", "not_available", 404)
+            return _error(
+                "Rule document is only available for storage-backed rules", "not_available", 404
+            )
         data, error = await _json_object(request)
         if error is not None:
             return error
@@ -285,12 +349,23 @@ class IntentionalRuleDocumentView(HomeAssistantView):
         if not isinstance(contents, str):
             return _error("Request body must include string `contents`", "bad_request", 400)
         expected_generation = data.get("expected_generation")
-        if expected_generation is not None and expected_generation != store.generation:
-            return web.json_response({"error": "generation_mismatch"}, status=409)
-        err = await store.async_write(RULE_STORE_FILENAME, contents)
+        if not isinstance(expected_generation, str):
+            return _error("Request body must include string `expected_generation`", "precondition_required", 428)
+        coordinator = _mutation_coordinator_for(hass)
+        if coordinator is None:
+            return _error("Rule mutation coordinator is not loaded", "not_available", 503)
+        result, reload_error = await mutate_and_reload(
+            coordinator,
+            lambda: store.async_write(RULE_STORE_FILENAME, contents),
+            expected_generation=expected_generation,
+        )
+        if isinstance(result, dict) and result.get("error") == "generation_mismatch":
+            return web.json_response(result, status=409)
+        err = result if isinstance(result, str) else None
         if err:
             return _error(err, "validation_failed", 400)
-        await hass.services.async_call(DOMAIN, "reload", blocking=True)
+        if reload_error is not None:
+            return _error(f"Reload failed: {reload_error}", "reload_failed", 500)
         return web.json_response({"status": "saved", **_rule_document_response(store)}, status=200)
 
     @require_admin
@@ -298,20 +373,33 @@ class IntentionalRuleDocumentView(HomeAssistantView):
         hass = request.app["hass"]
         store = _rule_store_for(hass)
         if store is None:
-            return _error("Rule document is only available for storage-backed rules", "not_available", 404)
+            return _error(
+                "Rule document is only available for storage-backed rules", "not_available", 404
+            )
         try:
             data = await request.json()
         except (ValueError, json.JSONDecodeError):
             data = {}
         if not isinstance(data, dict):
             return _error("Request body must be a JSON object", "bad_request", 400)
-        expected_generation = data.get("expected_generation")
-        if expected_generation is not None and expected_generation != store.generation:
-            return web.json_response({"error": "generation_mismatch"}, status=409)
-        err = await store.async_delete(RULE_STORE_FILENAME)
+        expected_generation, error = _expected_generation(data)
+        if error is not None:
+            return error
+        coordinator = _mutation_coordinator_for(hass)
+        if coordinator is None:
+            return _error("Rule mutation coordinator is not loaded", "not_available", 503)
+        result, reload_error = await mutate_and_reload(
+            coordinator,
+            lambda: store.async_delete(RULE_STORE_FILENAME),
+            expected_generation=expected_generation,
+        )
+        if isinstance(result, dict) and result.get("error") == "generation_mismatch":
+            return web.json_response(result, status=409)
+        err = result if isinstance(result, str) else None
         if err:
             return _error(err, "delete_failed", 500)
-        await hass.services.async_call(DOMAIN, "reload", blocking=True)
+        if reload_error is not None:
+            return _error(f"Reload failed: {reload_error}", "reload_failed", 500)
         return web.json_response({"status": "deleted", **_rule_document_response(store)})
 
 
@@ -330,6 +418,7 @@ class IntentionalRuleView(HomeAssistantView):
     name = "api:intentional:rule"
     requires_auth = True
 
+    @require_admin
     async def get(self, request: web.Request, filename: str) -> web.Response:
         hass = request.app["hass"]
         if not _is_safe_filename(filename):
@@ -339,22 +428,26 @@ class IntentionalRuleView(HomeAssistantView):
             contents = store.read(filename)
             if contents is None:
                 return _error(f"Rule file not found: {filename}", "not_found", 404)
-            return web.json_response({
-                "filename": filename,
-                "contents": contents,
-                "size": len(contents),
-                "generation": store.generation,
-                "source": "storage",
-            })
+            return web.json_response(
+                {
+                    "filename": filename,
+                    "contents": contents,
+                    "size": len(contents),
+                    "generation": store.generation,
+                    "source": "storage",
+                }
+            )
         rule_dir = _rule_dir_for(hass)
         contents = await _rule_file_job(hass, _read_rule_file, rule_dir, filename)
         if contents is None:
             return _error(f"Rule file not found: {filename}", "not_found", 404)
-        return web.json_response({
-            "filename": filename,
-            "contents": contents,
-            "size": len(contents),
-        })
+        return web.json_response(
+            {
+                "filename": filename,
+                "contents": contents,
+                "size": len(contents),
+            }
+        )
 
     @require_admin
     async def put(self, request: web.Request, filename: str) -> web.Response:
@@ -371,22 +464,39 @@ class IntentionalRuleView(HomeAssistantView):
         assert data is not None
         contents = data.get("contents")
         if not isinstance(contents, str):
-            return _error("Request body must be {\"contents\": \"<yaml>\"}", "bad_request", 400)
+            return _error('Request body must be {"contents": "<yaml>"}', "bad_request", 400)
 
         store = _rule_store_for(hass)
         if store is not None:
             filename = RULE_STORE_FILENAME
-            err = await store.async_write(filename, contents)
+            expected_generation, error = _expected_generation(data)
+            if error is not None:
+                return error
+            coordinator = _mutation_coordinator_for(hass)
+            if coordinator is None:
+                return _error("Rule mutation coordinator is not loaded", "not_available", 503)
+            result, reload_error = await mutate_and_reload(
+                coordinator,
+                lambda: store.async_write(filename, contents),
+                expected_generation=expected_generation,
+            )
+            if isinstance(result, dict) and result.get("error") == "generation_mismatch":
+                return web.json_response(result, status=409)
+            err = result if isinstance(result, str) else None
             if err:
                 return _error(err, "validation_failed", 400)
-            await hass.services.async_call(DOMAIN, "reload", blocking=True)
-            return web.json_response({
-                "filename": filename,
-                "status": "saved",
-                "size": len(contents),
-                "generation": store.generation,
-                "source": "storage",
-            }, status=200)
+            if reload_error is not None:
+                return _error(f"Reload failed: {reload_error}", "reload_failed", 500)
+            return web.json_response(
+                {
+                    "filename": filename,
+                    "status": "saved",
+                    "size": len(contents),
+                    "generation": store.generation,
+                    "source": "storage",
+                },
+                status=200,
+            )
 
         rule_dir = _rule_dir_for(hass)
         err = await _rule_file_job(hass, _write_rule_file, rule_dir, filename, contents)
@@ -394,11 +504,14 @@ class IntentionalRuleView(HomeAssistantView):
             return _error(err, "validation_failed", 400)
         # Auto-reload so the new rule takes effect
         await hass.services.async_call(DOMAIN, "reload", blocking=True)
-        return web.json_response({
-            "filename": filename,
-            "status": "saved",
-            "size": len(contents),
-        }, status=200)
+        return web.json_response(
+            {
+                "filename": filename,
+                "status": "saved",
+                "size": len(contents),
+            },
+            status=200,
+        )
 
     @require_admin
     async def delete(self, request: web.Request, filename: str) -> web.Response:
@@ -407,11 +520,33 @@ class IntentionalRuleView(HomeAssistantView):
             return _error(f"Invalid filename: {filename!r}", "invalid_filename", 400)
         store = _rule_store_for(hass)
         if store is not None:
-            err = await store.async_delete(filename)
+            try:
+                data = await request.json()
+            except (ValueError, json.JSONDecodeError):
+                data = {}
+            if not isinstance(data, dict):
+                return _error("Request body must be a JSON object", "bad_request", 400)
+            expected_generation, error = _expected_generation(data)
+            if error is not None:
+                return error
+            coordinator = _mutation_coordinator_for(hass)
+            if coordinator is None:
+                return _error("Rule mutation coordinator is not loaded", "not_available", 503)
+            result, reload_error = await mutate_and_reload(
+                coordinator,
+                lambda: store.async_delete(filename),
+                expected_generation=expected_generation,
+            )
+            if isinstance(result, dict) and result.get("error") == "generation_mismatch":
+                return web.json_response(result, status=409)
+            err = result if isinstance(result, str) else None
             if err:
                 return _error(err, "delete_failed", 500)
-            await hass.services.async_call(DOMAIN, "reload", blocking=True)
-            return web.json_response({"filename": filename, "status": "deleted", "source": "storage"})
+            if reload_error is not None:
+                return _error(f"Reload failed: {reload_error}", "reload_failed", 500)
+            return web.json_response(
+                {"filename": filename, "status": "deleted", "source": "storage"}
+            )
         rule_dir = _rule_dir_for(hass)
         err = await _rule_file_job(hass, _delete_rule_file, rule_dir, filename)
         if err:
@@ -444,12 +579,20 @@ class IntentionalRuleByIDView(HomeAssistantView):
             )
         store = _rule_store_for(hass)
         if store is not None:
-            result = await store.async_patch_rule_by_id(
-                rule_id,
-                contents,
+            coordinator = _mutation_coordinator_for(hass)
+            if coordinator is None:
+                return _error("Rule mutation coordinator is not loaded", "not_available", 503)
+            result, reload_error = await mutate_and_reload(
+                coordinator,
+                lambda: store.async_patch_rule_by_id(
+                    rule_id,
+                    contents,
+                    expected_generation=expected_generation,
+                ),
                 expected_generation=expected_generation,
             )
         else:
+            reload_error = None
             result = await _rule_file_job(
                 hass,
                 _patch_rule_by_id,
@@ -461,7 +604,10 @@ class IntentionalRuleByIDView(HomeAssistantView):
         if "error" in result:
             status = 409 if result["error"] == "generation_mismatch" else 400
             return web.json_response(result, status=status)
-        await hass.services.async_call(DOMAIN, "reload", blocking=True)
+        if store is None:
+            await hass.services.async_call(DOMAIN, "reload", blocking=True)
+        elif reload_error is not None:
+            return _error(f"Reload failed: {reload_error}", "reload_failed", 500)
         return web.json_response({"status": "saved", **result})
 
 
@@ -472,17 +618,22 @@ class IntentionalRuleHistoryView(HomeAssistantView):
     name = "api:intentional:rule_history"
     requires_auth = True
 
+    @require_admin
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
         store = _rule_store_for(hass)
         if store is None:
-            return _error("Rule history is only available for storage-backed rules", "not_available", 404)
+            return _error(
+                "Rule history is only available for storage-backed rules", "not_available", 404
+            )
         history = store.list_history()
-        return web.json_response({
-            "current_generation": store.generation,
-            "count": len(history),
-            "history": history,
-        })
+        return web.json_response(
+            {
+                "current_generation": store.generation,
+                "count": len(history),
+                "history": history,
+            }
+        )
 
 
 class IntentionalRuleHistoryGenerationView(HomeAssistantView):
@@ -492,11 +643,14 @@ class IntentionalRuleHistoryGenerationView(HomeAssistantView):
     name = "api:intentional:rule_history_generation"
     requires_auth = True
 
+    @require_admin
     async def get(self, request: web.Request, generation: str) -> web.Response:
         hass = request.app["hass"]
         store = _rule_store_for(hass)
         if store is None:
-            return _error("Rule history is only available for storage-backed rules", "not_available", 404)
+            return _error(
+                "Rule history is only available for storage-backed rules", "not_available", 404
+            )
         record = store.read_history(generation)
         if record is None:
             return _error(f"Rule history generation not found: {generation}", "not_found", 404)
@@ -515,7 +669,9 @@ class IntentionalRuleRollbackView(HomeAssistantView):
         hass = request.app["hass"]
         store = _rule_store_for(hass)
         if store is None:
-            return _error("Rule rollback is only available for storage-backed rules", "not_available", 404)
+            return _error(
+                "Rule rollback is only available for storage-backed rules", "not_available", 404
+            )
         data, error = await _json_object(request)
         if error is not None:
             return error
@@ -528,8 +684,15 @@ class IntentionalRuleRollbackView(HomeAssistantView):
                 "bad_request",
                 400,
             )
-        result = await store.async_rollback(
-            generation,
+        coordinator = _mutation_coordinator_for(hass)
+        if coordinator is None:
+            return _error("Rule mutation coordinator is not loaded", "not_available", 503)
+        result, reload_error = await mutate_and_reload(
+            coordinator,
+            lambda: store.async_rollback(
+                generation,
+                expected_generation=expected_generation,
+            ),
             expected_generation=expected_generation,
         )
         if "error" in result:
@@ -537,7 +700,8 @@ class IntentionalRuleRollbackView(HomeAssistantView):
             if result["error"] == "history_not_found":
                 status = 404
             return web.json_response(result, status=status)
-        await hass.services.async_call(DOMAIN, "reload", blocking=True)
+        if reload_error is not None:
+            return _error(f"Reload failed: {reload_error}", "reload_failed", 500)
         return web.json_response({"status": "restored", **result})
 
 
@@ -563,10 +727,12 @@ class IntentionalReloadView(HomeAssistantView):
         except Exception as err:  # noqa: BLE001
             return _error(f"Reload failed: {err}", "reload_failed", 500)
         engine = _engine_for(hass)
-        return web.json_response({
-            "status": "reloaded",
-            "rule_count": engine.rule_count() if engine else 0,
-        })
+        return web.json_response(
+            {
+                "status": "reloaded",
+                "rule_count": engine.rule_count() if engine else 0,
+            }
+        )
 
 
 # ── State inspection ──────────────────────────────────────────────
@@ -610,12 +776,16 @@ class IntentionalStateView(HomeAssistantView):
                 # Some targets may not have a resolvable state — skip
                 pass
 
-        return web.json_response({
-            "rule_count": engine.rule_count(),
-            "active_intent_count": engine.active_intent_count(),
-            "by_target": by_target,
-            "resolved": resolved,
-        })
+        return web.json_response(
+            redact_sensitive(
+                {
+                    "rule_count": engine.rule_count(),
+                    "active_intent_count": engine.active_intent_count(),
+                    "by_target": by_target,
+                    "resolved": resolved,
+                }
+            )
+        )
 
 
 class IntentionalExplainView(HomeAssistantView):
@@ -639,7 +809,14 @@ class IntentionalExplainView(HomeAssistantView):
         engine = _engine_for(hass)
         if engine is None:
             return _error("Integration not configured", "not_configured", 503)
-        return web.json_response(engine.explain_target(target))
+        explanation = engine.explain_target(target)
+        explanation["projection"] = target_projection(
+            engine,
+            target,
+            actual_state=hass.states.get(target),
+            reconciliation=_reconciliation_for(hass),
+        )
+        return web.json_response(redact_sensitive(explanation))
 
 
 # ── Agent-optimized VNext endpoints ─────────────────────────────────
@@ -671,17 +848,27 @@ class IntentionalValidateView(HomeAssistantView):
         contents = data.get("contents")
         if not isinstance(contents, str):
             return _error("Request body must include string `contents`", "bad_request", 400)
-        try:
-            rules = load_rules_from_string(contents)
-        except RuleLoadError as err:
-            return web.json_response({"valid": False, "errors": [str(err)]}, status=400)
+        rules, findings = validate_document(contents)
         hass = request.app["hass"]
-        return web.json_response({
-            "valid": True,
-            "rule_count": len(rules),
-            "normalized": [_rule_to_api_dict(rule) for rule in rules],
-            "warnings": _validation_warnings(hass, rules),
-        })
+        return web.json_response(
+            redact_sensitive(
+                {
+                    "valid": not findings["errors"],
+                    "rule_count": len(rules),
+                    "normalized": [_rule_to_api_dict(rule) for rule in rules],
+                    "errors": findings["errors"],
+                    "warnings": [*findings["warnings"], *_validation_warnings(hass, rules)],
+                }
+            ),
+            status=(
+                400
+                if any(
+                    error["code"] in {"rule_load_error", "rule_validation_error"}
+                    for error in findings["errors"]
+                )
+                else 200
+            ),
+        )
 
 
 class IntentionalDryRunView(HomeAssistantView):
@@ -700,7 +887,7 @@ class IntentionalDryRunView(HomeAssistantView):
         if not isinstance(contents, str):
             return _error("Request body must include string `contents`", "bad_request", 400)
         try:
-            rules = load_rules_from_string(contents)
+            rules, _findings = load_and_preflight_document(contents)
         except RuleLoadError as err:
             return web.json_response({"valid": False, "errors": [str(err)]}, status=400)
 
@@ -722,17 +909,27 @@ class IntentionalDryRunView(HomeAssistantView):
             if result is not None:
                 resolved.append({"target": target, "value": dict(result.value)})
         effects = [
-            {"rule_id": rule_id, "domain": effect.domain, "service": effect.service, "target": effect.target, "data": effect.data}
-            for rule_id, effect in engine.drain_pending_effects()
+            {
+                "rule_id": effect.rule_id,
+                "domain": effect.domain,
+                "service": effect.service,
+                "target": effect.target,
+                "data": effect.data,
+            }
+            for effect in engine.due_effects()
         ]
-        return web.json_response({
-            "valid": True,
-            "active_targets": list(engine.list_active_targets()),
-            "resolved_targets": resolved,
-            "preview": preview_targets(engine),
-            "effects": effects,
-            "errors": [],
-        })
+        return web.json_response(
+            redact_sensitive(
+                {
+                    "valid": True,
+                    "active_targets": list(engine.list_active_targets()),
+                    "resolved_targets": resolved,
+                    "preview": preview_targets(engine),
+                    "effects": effects,
+                    "errors": [],
+                }
+            )
+        )
 
 
 class IntentionalPreviewView(HomeAssistantView):
@@ -753,11 +950,15 @@ class IntentionalPreviewView(HomeAssistantView):
         if error is not None:
             return error
         assert engine is not None
-        return web.json_response({
-            "valid": True,
-            "preview": preview_targets(engine, actual_for_target=lambda target: _actual_for_target(hass, target)),
-            "errors": [],
-        })
+        return web.json_response(
+            {
+                "valid": True,
+                "preview": preview_targets(
+                    engine, actual_for_target=lambda target: _actual_for_target(hass, target)
+                ),
+                "errors": [],
+            }
+        )
 
 
 class IntentionalCardView(HomeAssistantView):
@@ -799,6 +1000,7 @@ class IntentionalSimulateView(HomeAssistantView):
     name = "api:intentional:simulate"
     requires_auth = True
 
+    @require_admin
     async def post(self, request: web.Request) -> web.Response:
         data, error = await _json_object(request)
         if error is not None:
@@ -807,36 +1009,35 @@ class IntentionalSimulateView(HomeAssistantView):
         contents = data.get("contents")
         if not isinstance(contents, str):
             return _error("Request body must include string `contents`", "bad_request", 400)
+        if len(contents.encode("utf-8")) > 1_000_000:
+            return _error("`contents` may not exceed 1000000 bytes", "request_too_large", 400)
         timeline = data.get("timeline")
         if not isinstance(timeline, list):
             return _error("Request body must include list `timeline`", "bad_request", 400)
         try:
-            rules = load_rules_from_string(contents)
+            rules, _findings = load_and_preflight_document(contents)
         except RuleLoadError as err:
             return web.json_response({"valid": False, "errors": [str(err)]}, status=400)
 
         engine = Engine(clock_fn=lambda: 0, selector_resolver=lambda _selector: [])
         engine.load_rules(rules)
-        steps = []
-        for index, step in enumerate(timeline):
-            if not isinstance(step, dict):
-                return _error(f"timeline[{index}] must be a mapping", "bad_request", 400)
-            advance_ms = step.get("advance_ms", 0)
-            if not isinstance(advance_ms, int) or advance_ms < 0:
-                return _error(f"timeline[{index}].advance_ms must be a non-negative integer", "bad_request", 400)
-            if advance_ms:
-                engine.advance_clock(advance_ms)
-            states = step.get("states", {})
-            if not isinstance(states, dict):
-                return _error(f"timeline[{index}].states must be a mapping", "bad_request", 400)
-            for key, value in states.items():
-                if not isinstance(key, str) or "." not in key:
-                    continue
-                entity_id, _sep, field = key.rpartition(".")
-                engine.update_state(entity_id, value, field=field)
-            engine.evaluate_all()
-            steps.append(simulation_step(engine, index=index))
-
+        options = data.get("reconciliation", {})
+        selectors = data.get("selectors")
+        try:
+            validate_simulation_input(
+                timeline,
+                options,
+                projected_rule_targets=len({rule.target for rule in rules if rule.target}),
+                selector_memberships=selectors,
+            )
+            steps = await simulate_timeline(
+                engine,
+                timeline,
+                reconciliation_options=options,
+                selector_memberships=selectors,
+            )
+        except (TypeError, ValueError) as err:
+            return _error(str(err), "bad_request", 400)
         return web.json_response({"valid": True, "steps": steps, "errors": []})
 
 
@@ -847,6 +1048,7 @@ class IntentionalReplayView(HomeAssistantView):
     name = "api:intentional:replay"
     requires_auth = True
 
+    @require_admin
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
         data, error = await _json_object(request)
@@ -858,16 +1060,34 @@ class IntentionalReplayView(HomeAssistantView):
             store = _rule_store_for(hass)
             contents = store.contents if store is not None else None
         if not isinstance(contents, str):
-            return _error("Replay requires `contents` when storage-backed rules are unavailable", "bad_request", 400)
+            return _error(
+                "Replay requires `contents` when storage-backed rules are unavailable",
+                "bad_request",
+                400,
+            )
+        if len(contents.encode("utf-8")) > 1_000_000:
+            return _error("`contents` may not exceed 1000000 bytes", "request_too_large", 400)
         timeline = data.get("timeline")
         if timeline is None:
             timeline = _timeline_from_history(data.get("history"))
         if not isinstance(timeline, list):
-            return _error("Request body must include list `timeline` or HA history `history`", "bad_request", 400)
+            return _error(
+                "Request body must include list `timeline` or HA history `history`",
+                "bad_request",
+                400,
+            )
         try:
-            rules = load_rules_from_string(contents)
+            rules, _findings = load_and_preflight_document(contents)
         except RuleLoadError as err:
             return web.json_response({"valid": False, "errors": [str(err)]}, status=400)
+        try:
+            validate_simulation_input(
+                timeline,
+                {},
+                projected_rule_targets=len({rule.target for rule in rules if rule.target}),
+            )
+        except ValueError as err:
+            return _error(str(err), "bad_request", 400)
 
         engine = Engine(clock_fn=lambda: 0, selector_resolver=lambda _selector: [])
         engine.load_rules(rules)
@@ -888,6 +1108,8 @@ class IntentionalReplayView(HomeAssistantView):
                 engine.update_state(entity_id, value, field=field)
             engine.evaluate_all()
             steps.append(simulation_step(engine, index=index))
+            if index % 10 == 9:
+                await asyncio.sleep(0)
         return web.json_response({"valid": True, "steps": steps, "errors": []})
 
 
@@ -917,14 +1139,31 @@ class IntentionalWorldView(HomeAssistantView):
                 record["conditions"].extend(actual_conditions_for_desired_record(record, None))
 
         runtime_health = _runtime_health(hass)
+        persistence_health = _persistence_health(hass)
         world["health"] = {
-            "status": _overall_status(runtime_health),
+            "status": "ok"
+            if _overall_status(runtime_health) == "ok" and persistence_health["status"] == "ok"
+            else "degraded",
             "rule_count": engine.rule_count(),
             "active_intent_count": engine.active_intent_count(),
             "runtime": runtime_health,
+            "persistence": persistence_health,
         }
         world["entities"] = entities
-        return web.json_response(world)
+        reconciler = _reconciliation_for(hass)
+        world["targets"] = [
+            target_projection(
+                engine,
+                target,
+                actual_state=hass.states.get(target),
+                reconciliation=reconciler,
+            )
+            for target in sorted(
+                set(engine.list_active_targets())
+                | (set(reconciler.pending_withdraw_targets()) if reconciler is not None else set())
+            )
+        ]
+        return web.json_response(redact_sensitive(world))
 
 
 class IntentionalDiagnosticsView(HomeAssistantView):
@@ -934,6 +1173,7 @@ class IntentionalDiagnosticsView(HomeAssistantView):
     name = "api:intentional:diagnostics"
     requires_auth = True
 
+    @require_admin
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
         limit_value = request.query.get("limit")
@@ -961,7 +1201,12 @@ def _rule_to_api_dict(rule: Any) -> dict[str, Any]:
         "offset": dict(rule.offset),
         "multiply": dict(rule.multiply),
         "effects": [
-            {"domain": effect.domain, "service": effect.service, "target": effect.target, "data": effect.data}
+            {
+                "domain": effect.domain,
+                "service": effect.service,
+                "target": effect.target,
+                "data": effect.data,
+            }
             for effect in rule.effects
         ],
     }
@@ -977,14 +1222,16 @@ def _rule_document_response(store: StorageRuleStore) -> dict[str, Any]:
     }
 
 
-def _preview_engine(hass: HomeAssistant, data: dict[str, Any]) -> tuple[Any | None, web.Response | None]:
+def _preview_engine(
+    hass: HomeAssistant, data: dict[str, Any]
+) -> tuple[Any | None, web.Response | None]:
     contents = data.get("contents")
     state_overrides = data.get("state_overrides", {})
     if not isinstance(state_overrides, dict):
         return None, _error("`state_overrides` must be a mapping", "bad_request", 400)
     if isinstance(contents, str):
         try:
-            rules = load_rules_from_string(contents)
+            rules, _findings = load_and_preflight_document(contents)
         except RuleLoadError as err:
             return None, web.json_response({"valid": False, "errors": [str(err)]}, status=400)
         source = _engine_for(hass)

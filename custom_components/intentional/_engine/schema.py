@@ -14,7 +14,12 @@ def dsl_schema() -> dict[str, Any]:
             "effect", "authority", "confidence", "reason", "group", "profile",
         ],
         "top_level_document_fields": ["rules", "scenes", "targets"],
-        "target_policy_fields": ["default"],
+        "target_policy_fields": [
+            "default", "ownership", "allowed_fields", "forbidden_automatic_states",
+            "unavailable", "max_retries", "user_authority",
+        ],
+        "target_ownership": ["managed", "opportunistic", "observe_only"],
+        "target_unavailable_policy": ["allow", "skip"],
         "observe_operators": [
             "is", "is_not", "lt", "lte", "gt", "gte", "all", "any",
             "not", "none", "changed", "happened", "for", "stable_for",

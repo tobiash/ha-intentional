@@ -9,12 +9,17 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from ._engine.runtime import TickRuntime, runtime_key
 from .const import CONF_RULE_DIR, DEFAULT_NAME, DEFAULT_RULE_DIR, DOMAIN
+from .lifecycle_writer import mark_lifecycle_mutated
+from .publication import publication_key, publication_signal
 from .room_controls import area_for_target, room_controls_for_engine, slugify_area_id
 from .rule_files import _list_rules, _set_rule_enabled
+from .rule_mutation import mutate_and_reload, mutation_coordinator_key
 from .rule_store import StorageRuleStore, rule_store_key
 
 _RULE_SWITCH_VOLATILE_STATUS_ATTRS = frozenset(
@@ -64,40 +69,45 @@ async def async_setup_entry(
     entities.extend(room_entities.values())
     async_add_entities(entities)
 
-    async def _on_refresh(event) -> None:
-        if event.data.get("entry_id") != entry.entry_id:
+    async def _on_publication(changed: frozenset[str]) -> None:
+        runtime = hass.data[DOMAIN].get(runtime_key(entry.entry_id))
+        if isinstance(runtime, TickRuntime) and runtime.unloading:
             return
-        current_infos = (
-            rule_store.list_rules()
-            if isinstance(rule_store, StorageRuleStore)
-            else await hass.async_add_executor_job(_list_rules, rule_dir)
-        )
-        _cleanup_stale_rule_switches(hass, entry, current_infos)
-        current_ids = {
-            str(rule_info["id"])
-            for rule_info in current_infos
-            if isinstance(rule_info.get("id"), str)
-        }
-        for removed_id in set(rule_entities) - current_ids:
-            entity = rule_entities.pop(removed_id)
-            await entity.async_remove()
+        if "global" in changed:
+            entities[0].async_write_ha_state()
         new_entities = []
-        for rule_info in current_infos:
-            rule_id = str(rule_info["id"])
-            if rule_id in rule_entities:
-                rule_entities[rule_id].update_rule_info(rule_info)
-                rule_entities[rule_id].async_write_ha_state()
-                continue
-            entity = IntentionalRuleSwitch(
-                hass,
-                entry,
-                rule_dir,
-                rule_info,
-                rule_store,
-                engine,
+        if any(key.startswith("rule:") for key in changed):
+            current_infos = (
+                rule_store.list_rules()
+                if isinstance(rule_store, StorageRuleStore)
+                else await hass.async_add_executor_job(_list_rules, rule_dir)
             )
-            rule_entities[rule_id] = entity
-            new_entities.append(entity)
+            _cleanup_stale_rule_switches(hass, entry, current_infos)
+            current_ids = {
+                str(rule_info["id"])
+                for rule_info in current_infos
+                if isinstance(rule_info.get("id"), str)
+            }
+            for removed_id in set(rule_entities) - current_ids:
+                entity = rule_entities.pop(removed_id)
+                await entity.async_remove()
+            for rule_info in current_infos:
+                rule_id = str(rule_info["id"])
+                if rule_id in rule_entities:
+                    rule_entities[rule_id].update_rule_info(rule_info)
+                    if f"rule:{rule_id}" in changed:
+                        rule_entities[rule_id].async_write_ha_state()
+                    continue
+                entity = IntentionalRuleSwitch(
+                    hass,
+                    entry,
+                    rule_dir,
+                    rule_info,
+                    rule_store,
+                    engine,
+                )
+                rule_entities[rule_id] = entity
+                new_entities.append(entity)
         current_room_ids = set(room_controls_for_engine(
             engine,
             lambda target: area_for_target(hass, target),
@@ -110,12 +120,13 @@ async def async_setup_entry(
             room_entities[area_id] = entity
             new_entities.append(entity)
         for area_id in current_room_ids & set(room_entities):
-            room_entities[area_id].async_write_ha_state()
+            if f"room:{area_id}" in changed:
+                room_entities[area_id].async_write_ha_state()
         if new_entities:
             async_add_entities(new_entities)
 
     entry.async_on_unload(
-        hass.bus.async_listen(f"{DOMAIN}_refresh", _on_refresh)
+        async_dispatcher_connect(hass, publication_signal(entry.entry_id), _on_publication)
     )
 
 
@@ -175,14 +186,22 @@ class IntentionalGlobalSwitch(SwitchEntity):
         return self._engine.is_enabled()
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        self._engine.set_enabled(True)
-        self.async_write_ha_state()
-        self.hass.bus.async_fire(f"{DOMAIN}_refresh", {"entry_id": self._entry.entry_id})
+        await self._set_enabled(True)
+        self.hass.data[DOMAIN][publication_key(self._entry.entry_id)].publish_if_changed()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        self._engine.set_enabled(False)
-        self.async_write_ha_state()
-        self.hass.bus.async_fire(f"{DOMAIN}_refresh", {"entry_id": self._entry.entry_id})
+        await self._set_enabled(False)
+        self.hass.data[DOMAIN][publication_key(self._entry.entry_id)].publish_if_changed()
+
+    async def _set_enabled(self, enabled: bool) -> None:
+        runtime = self.hass.data[DOMAIN].get(runtime_key(self._entry.entry_id))
+        if isinstance(runtime, TickRuntime):
+            async with runtime.mutation_lock:
+                self._engine.set_enabled(enabled)
+                runtime.advance_revision()
+                mark_lifecycle_mutated(self.hass, self._entry.entry_id)
+            return
+        self._engine.set_enabled(enabled)
 
 
 class IntentionalRuleSwitch(SwitchEntity):
@@ -256,7 +275,14 @@ class IntentionalRuleSwitch(SwitchEntity):
 
     async def _set_enabled(self, enabled: bool) -> None:
         if self._rule_store is not None:
-            result = await self._rule_store.async_set_rule_enabled(self._rule_id, enabled)
+            coordinator = self.hass.data[DOMAIN][mutation_coordinator_key(self._entry.entry_id)]
+            result, reload_error = await mutate_and_reload(
+                coordinator,
+                lambda: self._rule_store.async_set_rule_enabled(self._rule_id, enabled),
+                expected_generation=self._rule_store.generation,
+            )
+            if reload_error is not None:
+                return
         else:
             result = await self.hass.async_add_executor_job(
                 _set_rule_enabled,
@@ -267,8 +293,8 @@ class IntentionalRuleSwitch(SwitchEntity):
         if "error" in result:
             return
         self._enabled = enabled
-        await self.hass.services.async_call(DOMAIN, "reload", blocking=True)
-        self.async_write_ha_state()
+        if self._rule_store is None:
+            await self.hass.services.async_call(DOMAIN, "reload", blocking=True)
 
 
 class IntentionalRoomPauseSwitch(SwitchEntity):
@@ -324,17 +350,25 @@ class IntentionalRoomPauseSwitch(SwitchEntity):
         control = self._room_control()
         if control is None:
             return
-        self._engine.set_rules_paused(control.rule_ids, True)
-        self.hass.bus.async_fire(f"{DOMAIN}_refresh", {"entry_id": self._entry.entry_id})
-        self.async_write_ha_state()
+        await self._set_paused(control.rule_ids, True)
+        self.hass.data[DOMAIN][publication_key(self._entry.entry_id)].publish_if_changed()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         control = self._room_control()
         if control is None:
             return
-        self._engine.set_rules_paused(control.rule_ids, False)
-        self.hass.bus.async_fire(f"{DOMAIN}_refresh", {"entry_id": self._entry.entry_id})
-        self.async_write_ha_state()
+        await self._set_paused(control.rule_ids, False)
+        self.hass.data[DOMAIN][publication_key(self._entry.entry_id)].publish_if_changed()
+
+    async def _set_paused(self, rule_ids: set[str], paused: bool) -> None:
+        runtime = self.hass.data[DOMAIN].get(runtime_key(self._entry.entry_id))
+        if isinstance(runtime, TickRuntime):
+            async with runtime.mutation_lock:
+                self._engine.set_rules_paused(rule_ids, paused)
+                runtime.advance_revision()
+                mark_lifecycle_mutated(self.hass, self._entry.entry_id)
+            return
+        self._engine.set_rules_paused(rule_ids, paused)
 
     def _room_control(self):
         return room_controls_for_engine(

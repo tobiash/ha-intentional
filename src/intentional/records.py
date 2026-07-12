@@ -17,6 +17,25 @@ class Effect:
 
 
 @dataclass(frozen=True)
+class EffectOutboxRecord:
+    """Durable delivery state for one rendered Effect activation."""
+
+    activation_id: str
+    rule_id: str
+    rule_fingerprint: str
+    effect_index: int
+    domain: str
+    service: str
+    target: dict[str, Any]
+    data: dict[str, Any]
+    attempts: int = 0
+    next_retry_ms: int = 0
+    acknowledged_at_ms: int | None = None
+    dead_lettered_at_ms: int | None = None
+    last_error: str | None = None
+
+
+@dataclass(frozen=True)
 class IntentSelector:
     """A selector that expands to target entity IDs at planning time."""
 

@@ -13,6 +13,7 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import shutil
 from dataclasses import dataclass
@@ -24,8 +25,9 @@ from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, State
-from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
@@ -39,7 +41,7 @@ from ._engine.ha_adapter import (
     sync_state_object_into_engine,
     sync_time_context_into_engine,
 )
-from ._engine.reconciliation import Reconciliation, ReconciliationEvent
+from ._engine.reconciliation import Reconciliation, ReconciliationEvent, reconciliation_key
 from ._engine.runtime import StateChangePulseQueue, TickRuntime, monotonic_ms, runtime_key
 from ._engine.when_parser import referenced_entities
 from ._engine.yaml_loader import Rule
@@ -61,8 +63,13 @@ from .diagnostics import (
     record_diagnostic,
     record_intentional_context_ignored_for_drift,
 )
+from .document_validation import load_and_preflight_document
+from .lifecycle_writer import LifecycleWriter, lifecycle_writer_key
+from .publication import EntityPublication, publication_key
+from .rule_mutation import RuleMutationCoordinator, mutation_coordinator_key
 from .rule_store import StorageRuleStore, rule_store_key
 from .runtime_context import IntentionalContextTracker, new_intentional_context
+from .selector_ingest import MembershipChange, SelectorMembershipPlanner
 from .sensor import IntentionalSummarySensor, IntentionalTargetSensor
 
 _LOGGER = logging.getLogger(__name__)
@@ -88,9 +95,7 @@ class _HAAdapter:
     async def async_call(
         self, domain: str, service: str, data: dict[str, Any], *, context: Any
     ) -> None:
-        await self._hass.services.async_call(
-            domain, service, data, blocking=False, context=context
-        )
+        await self._hass.services.async_call(domain, service, data, blocking=False, context=context)
 
     def new_context(self) -> Any:
         return new_intentional_context(self._context_tracker)
@@ -122,7 +127,9 @@ def _apply_reconciliation_events(
                 reason=event.details["reason"],
             )
             record_diagnostic(
-                hass, "drift_promoted", target=event.target,
+                hass,
+                "drift_promoted",
+                target=event.target,
                 reason=event.details.get("reason", ""),
             )
         elif event.kind == "service_applied":
@@ -130,15 +137,25 @@ def _apply_reconciliation_events(
         elif event.kind == "service_skipped_matching_state":
             record_diagnostic(hass, "service_skipped_matching_state", target=event.target)
         elif event.kind == "service_skipped_pending_transition":
-            record_diagnostic(
-                hass, "service_skipped_pending_transition", target=event.target
-            )
+            record_diagnostic(hass, "service_skipped_pending_transition", target=event.target)
         elif event.kind == "service_failed":
             record_diagnostic(hass, "service_failed", target=event.target, **event.details)
-        elif event.kind == "withdraw_cancelled_user_change":
-            record_diagnostic(
-                hass, "withdraw_cancelled_user_change", target=event.target
+        elif event.kind in {
+            "service_retry_scheduled",
+            "service_retry_recovered",
+            "service_denied_target_policy",
+            "service_target_policy_recovered",
+        }:
+            diagnostic_key = (
+                event.kind,
+                event.target,
+                str(event.details.get("code", "")),
             )
+            if rate_limiter is None or rate_limiter.allow(diagnostic_key, now_ms=now_ms):
+                record_diagnostic(hass, event.kind, target=event.target, **event.details)
+        elif event.kind == "withdraw_cancelled_user_change":
+            record_diagnostic(hass, "withdraw_cancelled_user_change", target=event.target)
+
 
 # Declaring http as a dependency tells HA to ensure API helpers are available.
 # The frontend panel is registered opportunistically when the frontend is loaded;
@@ -158,9 +175,15 @@ FIRE_SERVICE_SCHEMA = vol.Schema(
         vol.Optional("brightness"): vol.All(int, vol.Range(min=0, max=255)),
         vol.Optional("color_temp_k"): vol.All(int, vol.Range(min=1000, max=10000)),
         vol.Optional("color_temp_mired"): vol.All(int, vol.Range(min=50, max=500)),
-        vol.Optional("rgb_color"): vol.All([vol.All(int, vol.Range(min=0, max=255))], vol.Length(min=3, max=3)),
-        vol.Optional("rgbw_color"): vol.All([vol.All(int, vol.Range(min=0, max=255))], vol.Length(min=4, max=4)),
-        vol.Optional("rgbww_color"): vol.All([vol.All(int, vol.Range(min=0, max=255))], vol.Length(min=5, max=5)),
+        vol.Optional("rgb_color"): vol.All(
+            [vol.All(int, vol.Range(min=0, max=255))], vol.Length(min=3, max=3)
+        ),
+        vol.Optional("rgbw_color"): vol.All(
+            [vol.All(int, vol.Range(min=0, max=255))], vol.Length(min=4, max=4)
+        ),
+        vol.Optional("rgbww_color"): vol.All(
+            [vol.All(int, vol.Range(min=0, max=255))], vol.Length(min=5, max=5)
+        ),
         vol.Optional("hs_color"): vol.All([vol.Coerce(float)], vol.Length(min=2, max=2)),
         vol.Optional("xy_color"): vol.All([vol.Coerce(float)], vol.Length(min=2, max=2)),
         vol.Optional("effect"): cv.string,
@@ -291,15 +314,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Intentional from a config entry."""
     domain_data = hass.data.setdefault(DOMAIN, {})
     if any(
-        loaded_entry.entry_id != entry.entry_id
-        and loaded_entry.entry_id in domain_data
+        loaded_entry.entry_id != entry.entry_id and loaded_entry.entry_id in domain_data
         for loaded_entry in hass.config_entries.async_entries(DOMAIN)
     ):
         raise ConfigEntryError("Intentional supports only one config entry")
 
     rule_dir = entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR)
 
-    engine = Engine(selector_resolver=lambda selector: _resolve_intent_selector(hass, selector))
+    entity_registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
+
+    def _entry_area(entry: Any) -> str | None:
+        if entry.area_id is not None:
+            return entry.area_id
+        if entry.device_id is None:
+            return None
+        device = device_registry.async_get(entry.device_id)
+        return device.area_id if device is not None else None
+
+    selector_planner = SelectorMembershipPlanner(
+        lambda: entity_registry.entities.values(),
+        area_for_entry=_entry_area,
+        state_entity_ids=lambda: (state.entity_id for state in hass.states.async_all()),
+    )
+    engine = Engine(selector_resolver=selector_planner.resolve)
     domain_data[entry.entry_id] = engine
     rule_store = StorageRuleStore(hass, entry.entry_id)
     hass.data[DOMAIN][rule_store_key(entry.entry_id)] = rule_store
@@ -333,11 +371,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if lifecycle_records is None:
         legacy_store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
         lifecycle_records = await legacy_store.async_load()
+        if isinstance(lifecycle_records, dict):
+            # Claim the legacy snapshot in the entry-specific store. A later
+            # empty/corrupt entry store must never repeatedly resurrect it.
+            await store.async_save(lifecycle_records)
+        else:
+            # An empty entry-specific record is also a migration marker.
+            lifecycle_records = {}
+            await store.async_save(lifecycle_records)
 
     engine.load_rules(initial_rules)
     if isinstance(lifecycle_records, dict):
         engine.import_lifecycle_records(lifecycle_records)
-    _sync_state_into_engine(hass, engine)
+    publication = EntityPublication(hass, entry.entry_id, engine, rule_store)
+    hass.data[DOMAIN][publication_key(entry.entry_id)] = publication
+    publication.publish_if_changed()
     _LOGGER.info("Loaded %d stored rule(s)", len(initial_rules))
 
     # Set up platforms (sensors)
@@ -355,22 +403,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         drift_confirmation_ms=DRIFT_CONFIRMATION_MS,
         service_failure_backoff_ms=SERVICE_FAILURE_BACKOFF_MS,
     )
+    hass.data[DOMAIN][reconciliation_key(entry.entry_id)] = _reconciler
     _reconciler.restore_pending_withdraws(
         lifecycle_records if isinstance(lifecycle_records, dict) else None,
         linger_rule_ids={rule.id for rule in initial_rules if rule.linger_ms},
         now_ms=engine.now_ms(),
     )
+    selector_planner.configure(initial_rules, referenced_entities(initial_rules))
+    selector_planner.update_owned(
+        set(engine.list_active_targets()) | set(_reconciler.pending_withdraw_targets())
+    )
+    _sync_state_into_engine(hass, engine, entity_ids=set(selector_planner.relevant))
     _runtime = TickRuntime(tick_interval_ms=tick_interval_ms)
     hass.data[DOMAIN][runtime_key(entry.entry_id)] = _runtime
-    # Entities statically referenced by rule expressions, cached per reload.
-    # The tick loop scopes state-sync to these + active targets; a periodic
-    # full sweep covers selector-matched entities. See ADR-0003.
-    _referenced_key = f"{entry.entry_id}:referenced"
-    hass.data[DOMAIN][_referenced_key] = referenced_entities(initial_rules)
     # Event used to signal the tick loop to stop. We use an event rather
     # than ``while True:`` + ``task.cancel()`` because cancellation only
-    # takes effect at the next ``await``; if a slow ``_refresh_entities``
-    # is in progress, cancellation can be delayed indefinitely and
+    # takes effect at the next ``await``; if a slow tick operation is in
+    # progress, cancellation can be delayed indefinitely and
     # ``hass.async_block_till_done()`` would hang waiting for it. An
     # event lets the loop exit cleanly on the next tick.
     stop_event = _runtime.stop_event
@@ -380,11 +429,53 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         snapshot["pending_withdraws"] = _reconciler.export_pending_withdraws(engine)
         return snapshot
 
-    async def _save_lifecycle_if_changed(*, force: bool = False) -> None:
-        snapshot = _lifecycle_snapshot()
-        if force or snapshot != _runtime.lifecycle_snapshot:
-            await store.async_save(snapshot)
-            _runtime.lifecycle_snapshot = snapshot
+    lifecycle_writer = LifecycleWriter(
+        store,
+        _lifecycle_snapshot,
+        durable_snapshot=lifecycle_records if isinstance(lifecycle_records, dict) else None,
+    )
+    hass.data[DOMAIN][lifecycle_writer_key(entry.entry_id)] = lifecycle_writer
+
+    def _prepare_rules(contents: str) -> tuple[list[Rule], set[str]]:
+        try:
+            new_rules, _findings = load_and_preflight_document(contents)
+            engine.validate_rules(new_rules)
+        except Exception as err:
+            raise HomeAssistantError(f"Rule reload failed: {err}") from err
+        return new_rules, referenced_entities(new_rules)
+
+    async def _commit_rules(prepared: tuple[list[Rule], set[str]]) -> None:
+        new_rules, new_referenced = prepared
+        async with _runtime.mutation_lock:
+            old_fingerprints = engine.rule_fingerprints()
+            new_fingerprints = {rule.id: engine.rule_fingerprint(rule) for rule in new_rules}
+            unchanged_ids = {
+                rule_id for rule_id, fingerprint in new_fingerprints.items()
+                if old_fingerprints.get(rule_id) == fingerprint
+            }
+            engine.load_rules(new_rules)
+            _apply_membership_change(hass, engine, selector_planner.configure(new_rules, new_referenced))
+            sync_time_context_into_engine(engine)
+            engine.evaluate_all()
+            _runtime.active_rule_ids.intersection_update(unchanged_ids)
+            _runtime.active_scenes.intersection_update({
+                rule.scene for rule in new_rules
+                if rule.id in unchanged_ids and rule.scene is not None
+            })
+            retained_targets = {
+                rule.target for rule in new_rules if rule.id in unchanged_ids and rule.target
+            }
+            retained_targets.update(
+                target for rule in new_rules if rule.id in unchanged_ids
+                for selector in rule.intent_selectors for target in selector_planner.resolve(selector)
+            )
+            _reconciler.retain_targets(retained_targets)
+            _runtime.advance_revision()
+            lifecycle_writer.mutated()
+        publication.publish_if_changed()
+
+    mutation_coordinator = RuleMutationCoordinator(rule_store, _prepare_rules, _commit_rules)
+    hass.data[DOMAIN][mutation_coordinator_key(entry.entry_id)] = mutation_coordinator
 
     async def _tick_loop() -> None:
         try:
@@ -396,21 +487,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     break
                 except TimeoutError:
                     pass  # normal tick interval
-                async with _runtime.tick_lock:
+                if _runtime.unloading:
+                    continue
+                async with _runtime.mutation_lock:
                     if stop_event.is_set():
+                        _runtime.tick_idle.set()
                         break
+                    if _runtime.unloading:
+                        _runtime.tick_idle.set()
+                        continue
+                    _runtime.tick_idle.clear()
                     pulse_drain = _runtime.pulses.begin_drain()
                     try:
                         # Drive the engine's evaluation cycle
                         sync_time_context_into_engine(engine)
-                        if _runtime.should_full_sweep(every=10):
-                            _sync_state_into_engine(hass, engine)
-                        else:
-                            _referenced = hass.data[DOMAIN].get(_referenced_key, frozenset())
-                            _sync_state_into_engine(
-                                hass, engine,
-                                entity_ids=set(_referenced) | set(engine.list_active_targets()),
-                            )
+                        _apply_membership_change(
+                            hass,
+                            engine,
+                            selector_planner.update_owned(
+                                set(engine.list_active_targets())
+                                | set(_reconciler.pending_withdraw_targets())
+                            ),
+                        )
                         engine.evaluate_all()
                         now_ms = _monotonic_ms()
                         _runtime.active_rule_ids = _record_rule_activity_changes(
@@ -419,37 +517,90 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             _runtime.active_rule_ids,
                         )
                         engine.tick(tick_interval_ms)
-                        events = await _reconciler.tick(
-                            engine, _ha_adapter, _intentional_contexts, now_ms
-                        )
-                        _apply_reconciliation_events(
-                            hass, engine, events, now_ms=now_ms,
-                            rate_limiter=_diagnostic_rate_limiter,
-                        )
-                        # Activate any newly-firing scene rules
-                        _runtime.active_scenes = await _activate_scene_rules(
-                            hass, engine, _runtime.active_scenes, _intentional_contexts
-                        )
-                        await _apply_pending_effects(hass, engine, _intentional_contexts)
-                        pulses_to_clear = _runtime.pulses.current_entity_ids(pulse_drain)
-                        if pulses_to_clear:
-                            clear_state_change_pulses(engine, set(pulses_to_clear))
-                            _runtime.pulses.finish_drain(pulse_drain)
-                            engine.evaluate_all()
-                            _reconciler.drop_inactive_applied(set(engine.list_active_targets()))
-                        # Push resolved values to entities
-                        await _save_lifecycle_if_changed()
-                        await _refresh_entities(hass, entry)
-                        _runtime.mark_success(now_ms=_monotonic_ms())
+                        tick_revision = _runtime.advance_revision()
+                        lifecycle_writer.mutated()
                     except Exception as err:  # noqa: BLE001
                         now_ms = _monotonic_ms()
                         _runtime.mark_failure(err, now_ms=now_ms)
                         if _runtime.should_report_failure(now_ms=now_ms):
                             _LOGGER.exception("Intentional tick failed; continuing")
                             record_diagnostic(hass, "tick_failed", error=str(err))
+                        _runtime.tick_idle.set()
+                        continue
+                # Effect activation is not dispatchable until its outbox
+                # snapshot has crossed the lifecycle storage boundary.
+                await lifecycle_writer.async_flush()
+                if lifecycle_writer.current_error is not None:
+                    _runtime.tick_idle.set()
+                    continue
+                try:
+                    events = await _reconciler.tick(
+                        engine,
+                        _ha_adapter,
+                        _intentional_contexts,
+                        now_ms,
+                        revision_is_current=lambda revision=tick_revision: _runtime.is_revision(
+                            revision
+                        ),
+                    )
+                    async with _runtime.mutation_lock:
+                        if not _runtime.is_revision(tick_revision):
+                            _runtime.tick_idle.set()
+                            continue
+                        _apply_reconciliation_events(
+                            hass,
+                            engine,
+                            events,
+                            now_ms=now_ms,
+                            rate_limiter=_diagnostic_rate_limiter,
+                        )
+                        # Activate any newly-firing scene rules
+                        previous_scenes = set(_runtime.active_scenes)
+                    active_scenes = await _activate_scenes_and_dispatch_effects(
+                        hass,
+                        engine,
+                        _intentional_contexts,
+                        _runtime,
+                        lifecycle_writer,
+                        previous_scenes,
+                        tick_revision,
+                    )
+                    if active_scenes is None:
+                        _runtime.tick_idle.set()
+                        continue
+                    async with _runtime.mutation_lock:
+                        if not _runtime.is_revision(tick_revision):
+                            _runtime.tick_idle.set()
+                            continue
+                        _runtime.active_scenes = active_scenes
+                        pulses_to_clear = _runtime.pulses.current_entity_ids(pulse_drain)
+                        if pulses_to_clear:
+                            clear_state_change_pulses(engine, set(pulses_to_clear))
+                            _runtime.pulses.finish_drain(pulse_drain)
+                            engine.evaluate_all()
+                            _reconciler.drop_inactive_applied(set(engine.list_active_targets()))
+                        _runtime.mark_success(now_ms=_monotonic_ms())
+                        lifecycle_writer.mutated()
+                    publication.publish_if_changed()
+                    _runtime.tick_idle.set()
+                except Exception as err:  # noqa: BLE001
+                    now_ms = _monotonic_ms()
+                    _runtime.mark_failure(err, now_ms=now_ms)
+                    if _runtime.should_report_failure(now_ms=now_ms):
+                        _LOGGER.exception("Intentional tick failed; continuing")
+                        record_diagnostic(hass, "tick_failed", error=str(err))
+                    _runtime.tick_idle.set()
         finally:
+            _runtime.tick_idle.set()
             try:
-                await _save_lifecycle_if_changed(force=True)
+                lifecycle_writer.mutated()
+                await lifecycle_writer.async_flush(force=True)
+                if lifecycle_writer.current_error is not None:
+                    record_diagnostic(
+                        hass,
+                        "lifecycle_save_failed",
+                        error=lifecycle_writer.current_error,
+                    )
             except Exception as err:  # noqa: BLE001
                 _LOGGER.exception("Could not save final Intentional lifecycle state")
                 record_diagnostic(hass, "lifecycle_save_failed", error=str(err))
@@ -460,7 +611,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _runtime.tick_task = hass.async_create_task(_tick_loop(), name=f"{DOMAIN}_tick")
 
     # Set up services
-    await _register_services(hass, engine, rule_store, entry)
+    await _register_services(
+        hass,
+        engine,
+        rule_store,
+        entry,
+        _runtime,
+        _reconciler,
+        lifecycle_writer,
+        selector_planner,
+        mutation_coordinator,
+    )
 
     # Register HTTP API views. Guarded for test environments where the
     # http component may not be loaded (e.g. tests that don't exercise
@@ -471,6 +632,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # still installs and works in headless setups.
     if getattr(hass, "http", None) is not None:
         from .api import register_api
+
         register_api(hass)
         await _register_frontend_panel(hass)
         entry.async_on_unload(lambda: _remove_frontend_panel(hass))
@@ -486,9 +648,47 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _intentional_contexts,
                 _diagnostic_rate_limiter,
                 _runtime.pulses,
+                _runtime,
+                lifecycle_writer,
+                selector_planner,
             ),
         )
     )
+
+    async def _apply_registry_changes() -> None:
+        try:
+            while _runtime.registry_pending and not _runtime.unloading:
+                # Registry updates commonly arrive in entity/device/area bursts.
+                await asyncio.sleep(0.05)
+                _runtime.registry_pending = False
+                async with _runtime.mutation_lock:
+                    _apply_membership_change(
+                        hass, engine, selector_planner.registry_changed()
+                    )
+                    sync_time_context_into_engine(engine)
+                    engine.evaluate_all()
+                    _runtime.advance_revision()
+                    lifecycle_writer.mutated()
+                publication.publish_if_changed()
+        finally:
+            _runtime.registry_task = None
+
+    def _registry_changed(_event) -> None:
+        if _runtime.unloading:
+            return
+        _runtime.registry_pending = True
+        if _runtime.registry_task is None or _runtime.registry_task.done():
+            _runtime.registry_task = hass.async_create_task(
+                _apply_registry_changes(), name=f"{DOMAIN}_registry"
+            )
+
+    for registry_event in (
+        "entity_registry_updated",
+        "device_registry_updated",
+        "area_registry_updated",
+        "label_registry_updated",
+    ):
+        entry.async_on_unload(hass.bus.async_listen(registry_event, _registry_changed))
 
     return True
 
@@ -499,14 +699,30 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not isinstance(runtime, TickRuntime):
         return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
-    # Keep the runtime operational if any platform rejects the unload. Holding
-    # the lock prevents a tick from racing platform entity cleanup.
-    async with runtime.tick_lock:
-        unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-        if not unload_ok:
-            return False
-        runtime.stop_event.set()
+    publication = hass.data[DOMAIN].get(publication_key(entry.entry_id))
+    async with runtime.mutation_lock:
+        runtime.unloading = True
+        runtime.advance_revision()
+        if isinstance(publication, EntityPublication):
+            publication.pause()
+    await runtime.tick_idle.wait()
+    if runtime.registry_task is not None:
+        runtime.registry_pending = False
+        runtime.registry_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await runtime.registry_task
 
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if not unload_ok:
+        async with runtime.mutation_lock:
+            runtime.unloading = False
+            if isinstance(publication, EntityPublication):
+                publication.resume()
+        return False
+
+    async with runtime.mutation_lock:
+        runtime.stop_event.set()
+        runtime.advance_revision()
     if runtime.tick_task is not None:
         try:
             await runtime.tick_task
@@ -522,6 +738,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN].pop(entry.entry_id, None)
     hass.data[DOMAIN].pop(rule_store_key(entry.entry_id), None)
     hass.data[DOMAIN].pop(runtime_key(entry.entry_id), None)
+    hass.data[DOMAIN].pop(lifecycle_writer_key(entry.entry_id), None)
+    hass.data[DOMAIN].pop(publication_key(entry.entry_id), None)
+    hass.data[DOMAIN].pop(reconciliation_key(entry.entry_id), None)
+    hass.data[DOMAIN].pop(mutation_coordinator_key(entry.entry_id), None)
     return True
 
 
@@ -536,9 +756,11 @@ async def _register_frontend_panel(hass: HomeAssistant) -> None:
     domain_data = hass.data.setdefault(DOMAIN, {})
     if not domain_data.get(FRONTEND_STATIC_REGISTERED):
         frontend_path = Path(__file__).parent / "frontend"
-        await hass.http.async_register_static_paths([
-            StaticPathConfig(FRONTEND_URL_PATH, str(frontend_path), True),
-        ])
+        await hass.http.async_register_static_paths(
+            [
+                StaticPathConfig(FRONTEND_URL_PATH, str(frontend_path), True),
+            ]
+        )
         domain_data[FRONTEND_STATIC_REGISTERED] = True
 
     if frontend.async_panel_exists(hass, PANEL_URL_PATH):
@@ -618,7 +840,8 @@ async def _maybe_install_starter_rules(hass: HomeAssistant, rule_dir: str) -> in
                 "Installed %d starter rule(s) to %s. "
                 "Edit them to match your home, or call `intentional.reload` "
                 "to see them in action.",
-                copied, rule_dir,
+                copied,
+                rule_dir,
             )
         return copied
     except OSError as err:
@@ -629,45 +852,22 @@ async def _maybe_install_starter_rules(hass: HomeAssistant, rule_dir: str) -> in
 def _sync_state_into_engine(
     hass: HomeAssistant,
     engine: Engine,
-    entity_ids: set[str] | None = None,
+    entity_ids: set[str],
 ) -> None:
-    """Pull HA state into the engine.
-
-    When *entity_ids* is given, only those entities are synced (scoped poll).
-    When None, all entities are synced (full sweep for selector coverage).
-    See ADR-0003.
-    """
-    if entity_ids is None:
-        for state in hass.states.async_all():
+    """Pull selected HA state into the engine."""
+    states = hass.states
+    for entity_id in entity_ids:
+        state = states.get(entity_id)
+        if state is not None:
             sync_state_object_into_engine(engine, state)
-    else:
-        states = hass.states
-        for entity_id in entity_ids:
-            state = states.get(entity_id)
-            if state is not None:
-                sync_state_object_into_engine(engine, state)
 
 
-def _resolve_intent_selector(hass: HomeAssistant, selector: Any) -> list[str]:
-    """Resolve a VNext intent selector against current HA state/registry metadata."""
-    registry = er.async_get(hass)
-    matches: list[str] = []
-    excluded = set(getattr(selector, "exclude", ()))
-    for state in hass.states.async_all():
-        entity_id = state.entity_id
-        if entity_id in excluded:
-            continue
-        domain, _sep, _object_id = entity_id.partition(".")
-        if selector.domain and domain != selector.domain:
-            continue
-        entry = registry.async_get(entity_id)
-        if selector.area and (entry is None or entry.area_id != selector.area):
-            continue
-        labels = getattr(entry, "labels", set()) if entry is not None else set()
-        if selector.label and selector.label not in labels:
-            continue
-        matches.append(entity_id)
-    return matches
+def _apply_membership_change(hass: HomeAssistant, engine: Engine, change: MembershipChange) -> None:
+    """Eagerly ingest arrivals and discard state with no remaining owner."""
+    if change.added:
+        _sync_state_into_engine(hass, engine, entity_ids=set(change.added))
+    for entity_id in change.removed:
+        engine.remove_state(entity_id)
 
 
 def _on_ha_state_change_factory(
@@ -677,32 +877,72 @@ def _on_ha_state_change_factory(
     context_tracker: IntentionalContextTracker | None = None,
     diagnostic_rate_limiter: DiagnosticRateLimiter | None = None,
     state_change_pulses: StateChangePulseQueue | None = None,
+    runtime: TickRuntime | None = None,
+    lifecycle_writer: LifecycleWriter | None = None,
+    selector_planner: SelectorMembershipPlanner | None = None,
 ):
     """Return a state_changed listener that pushes updates into the engine."""
 
-    def _listener(event) -> None:
-        old_state: State | None = event.data.get("old_state")
-        new_state: State | None = event.data.get("new_state")
-        if new_state is None:
-            if old_state is not None:
-                engine.remove_state(old_state.entity_id)
-                sync_time_context_into_engine(engine)
-                engine.evaluate_all()
+    async def _listener(event) -> None:
+        if runtime is not None and runtime.unloading:
             return
-        sync_state_object_into_engine(engine, new_state)
-        if state_change_pulses is not None and pulse_state_change(
-            engine, old_state, new_state
-        ):
-            state_change_pulses.add(new_state.entity_id)
-        now_ms = _monotonic_ms()
-        events = reconciler.on_state_delta(engine, new_state, context_tracker, now_ms)
-        if events:
-            _apply_reconciliation_events(
-                hass, engine, events, now_ms=now_ms, rate_limiter=diagnostic_rate_limiter
+        lock = runtime.mutation_lock if runtime is not None else asyncio.Lock()
+        async with lock:
+            if runtime is not None and runtime.unloading:
+                return
+            old_state: State | None = event.data.get("old_state")
+            new_state: State | None = event.data.get("new_state")
+            entity_id = (
+                new_state.entity_id
+                if new_state is not None
+                else (old_state.entity_id if old_state is not None else None)
             )
-        # Re-evaluate immediately for snappy response
-        sync_time_context_into_engine(engine)
-        engine.evaluate_all()
+            if selector_planner is not None and entity_id is not None:
+                _apply_membership_change(
+                    hass,
+                    engine,
+                    selector_planner.state_changed(entity_id, exists=new_state is not None),
+                )
+            if selector_planner is not None and entity_id not in selector_planner.relevant:
+                return
+            if new_state is None:
+                if old_state is not None:
+                    engine.remove_state(old_state.entity_id)
+                    sync_time_context_into_engine(engine)
+                    engine.evaluate_all()
+                if runtime is not None:
+                    runtime.advance_revision()
+                if lifecycle_writer is not None:
+                    lifecycle_writer.mutated()
+                return
+            lifecycle_before = engine.export_lifecycle_records()
+            owned_result = (
+                context_tracker is not None and context_tracker.owns_state(new_state)
+            )
+            sync_state_object_into_engine(engine, new_state)
+            if state_change_pulses is not None and pulse_state_change(engine, old_state, new_state):
+                state_change_pulses.add(new_state.entity_id)
+            now_ms = _monotonic_ms()
+            events = reconciler.on_state_delta(engine, new_state, context_tracker, now_ms)
+            if events:
+                _apply_reconciliation_events(
+                    hass,
+                    engine,
+                    events,
+                    now_ms=now_ms,
+                    rate_limiter=diagnostic_rate_limiter,
+                )
+            # Re-evaluate immediately for snappy response
+            sync_time_context_into_engine(engine)
+            engine.evaluate_all()
+            own_feedback_only = owned_result and bool(events) and all(
+                event.kind == "context_ignored" for event in events
+            )
+            lifecycle_changed = engine.export_lifecycle_records() != lifecycle_before
+            if runtime is not None and (not own_feedback_only or lifecycle_changed):
+                runtime.advance_revision()
+            if lifecycle_writer is not None:
+                lifecycle_writer.mutated()
 
     return _listener
 
@@ -765,11 +1005,13 @@ async def _activate_scene_rules(
         context = new_intentional_context(intentional_contexts)
         _LOGGER.info(
             "Activating scene %s (transition=%ss)",
-            scene_id, service_data.get("transition"),
+            scene_id,
+            service_data.get("transition"),
         )
         try:
             await hass.services.async_call(
-                domain, service,
+                domain,
+                service,
                 service_data,
                 blocking=False,
                 context=context,
@@ -786,13 +1028,31 @@ async def _activate_scene_rules(
     return active
 
 
-async def _apply_pending_effects(
+async def _dispatch_effect_outbox(
     hass: HomeAssistant,
     engine: Engine,
     intentional_contexts: IntentionalContextTracker | None = None,
+    runtime: TickRuntime | None = None,
+    lifecycle_writer: LifecycleWriter | None = None,
 ) -> None:
-    """Apply effect service calls that became active this cycle."""
-    for rule_id, effect in engine.drain_pending_effects():
+    """Deliver durable outbox records and force their acknowledgement."""
+    lock = runtime.mutation_lock if runtime is not None else asyncio.Lock()
+    for due in engine.due_effects():
+        # The queue record, rather than its attempt counter, is the at-least-once
+        # boundary. A fresh obligation must be durable before HA can accept it.
+        if lifecycle_writer is not None and not lifecycle_writer.contains_durable_effect(
+            due.activation_id, due.effect_index
+        ):
+            lifecycle_writer.mutated()
+            await lifecycle_writer.async_flush(force=True)
+            if lifecycle_writer.current_error is not None:
+                return
+        async with lock:
+            effect = engine.begin_effect_attempt(due.activation_id, due.effect_index)
+            if effect is None:
+                continue
+            if lifecycle_writer is not None:
+                lifecycle_writer.mutated()
         service_data = {**effect.target, **effect.data}
         context = new_intentional_context(intentional_contexts)
         try:
@@ -800,22 +1060,45 @@ async def _apply_pending_effects(
                 effect.domain,
                 effect.service,
                 service_data,
-                blocking=False,
+                # Successful return is our acceptance boundary. HA may have
+                # completed the handler or accepted delegated work; either is
+                # sufficient for acknowledgement, but not exactly-once proof.
+                blocking=True,
                 context=context,
             )
+            async with lock:
+                engine.acknowledge_effect(effect.activation_id, effect.effect_index)
+                if lifecycle_writer is not None:
+                    lifecycle_writer.mutated()
+            if lifecycle_writer is not None:
+                await lifecycle_writer.async_flush(force=True)
             record_diagnostic(
                 hass,
                 "effect_applied",
-                rule_id=rule_id,
+                activation_id=effect.activation_id,
+                rule_id=effect.rule_id,
+                effect_index=effect.effect_index,
+                attempts=effect.attempts,
                 domain=effect.domain,
                 service=effect.service,
                 service_data=service_data,
             )
         except Exception as err:  # noqa: BLE001
+            async with lock:
+                terminal = engine.fail_effect(effect.activation_id, effect.effect_index, str(err))
+                if lifecycle_writer is not None:
+                    lifecycle_writer.mutated()
+            if lifecycle_writer is not None:
+                await lifecycle_writer.async_flush(force=True)
             record_diagnostic(
                 hass,
                 "effect_failed",
-                rule_id=rule_id,
+                activation_id=effect.activation_id,
+                rule_id=effect.rule_id,
+                effect_index=effect.effect_index,
+                attempts=effect.attempts,
+                next_retry_ms=effect.next_retry_ms,
+                terminal=terminal,
                 domain=effect.domain,
                 service=effect.service,
                 service_data=service_data,
@@ -823,21 +1106,29 @@ async def _apply_pending_effects(
             )
             _LOGGER.warning(
                 "Failed to apply effect from rule %s via %s.%s: %s",
-                rule_id,
+                effect.rule_id,
                 effect.domain,
                 effect.service,
                 err,
             )
 
 
-async def _refresh_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Force the sensor platform to refresh by dispatching a custom event.
-
-    The sensor entities listen for this event and call async_write_ha_state.
-    This is the standard HA pattern for forcing entity refreshes from
-    non-entity code (see the entity documentation on coordinator pattern).
-    """
-    hass.bus.async_fire(f"{DOMAIN}_refresh", {"entry_id": entry.entry_id})
+async def _activate_scenes_and_dispatch_effects(
+    hass: HomeAssistant,
+    engine: Engine,
+    intentional_contexts: IntentionalContextTracker,
+    runtime: TickRuntime,
+    lifecycle_writer: LifecycleWriter,
+    previous_scenes: set[str],
+    tick_revision: int,
+) -> set[str] | None:
+    """Dispatch Effects only if scene calls did not make the tick stale."""
+    active_scenes = await _activate_scene_rules(hass, engine, previous_scenes, intentional_contexts)
+    async with runtime.mutation_lock:
+        if not runtime.is_revision(tick_revision):
+            return None
+    await _dispatch_effect_outbox(hass, engine, intentional_contexts, runtime, lifecycle_writer)
+    return active_scenes
 
 
 async def _register_services(
@@ -845,6 +1136,11 @@ async def _register_services(
     engine: Engine,
     rule_store: StorageRuleStore,
     entry: ConfigEntry,
+    runtime: TickRuntime,
+    reconciler: Reconciliation,
+    lifecycle_writer: LifecycleWriter,
+    selector_planner: SelectorMembershipPlanner,
+    mutation_coordinator: RuleMutationCoordinator,
 ) -> None:
     """Register the fire and reload services."""
 
@@ -860,15 +1156,27 @@ async def _register_services(
         ttl_seconds = call.data.get("ttl", MANUAL_OVERRIDE_TTL_SECONDS)
         ttl_ms = ttl_seconds * 1000
 
-        engine.emit_user_intent(
-            target=target,
-            set=set_dict,
-            ttl_ms=ttl_ms,
-            reason=f"Manual fire service at {call.service}",
-        )
-        # Force a re-evaluation cycle
-        engine.evaluate_all()
-        await _refresh_entities(hass, entry)
+        async with runtime.mutation_lock:
+            _apply_membership_change(
+                hass,
+                engine,
+                selector_planner.update_owned(
+                    set(engine.list_active_targets())
+                    | set(reconciler.pending_withdraw_targets())
+                    | {target}
+                ),
+            )
+            engine.emit_user_intent(
+                target=target,
+                set=set_dict,
+                ttl_ms=ttl_ms,
+                reason=f"Manual fire service at {call.service}",
+            )
+            # Force a re-evaluation cycle
+            engine.evaluate_all()
+            runtime.advance_revision()
+            lifecycle_writer.mutated()
+        hass.data[DOMAIN][publication_key(entry.entry_id)].publish_if_changed()
 
     async def _activate_scene_service(call: ServiceCall) -> None:
         """Handle the `intentional.activate_scene` service call.
@@ -879,27 +1187,33 @@ async def _register_services(
         rule_id = call.data["rule_id"]
         ttl_override = call.data.get("ttl", 0)
 
-        intent = engine.activate_scene_rule(
-            rule_id,
-            ttl_ms=ttl_override * 1000 if ttl_override else None,
-        )
-        if intent is None:
-            _LOGGER.error("No scene rule found with id %r", rule_id)
-            return
-        # Re-evaluate so the activation path picks it up
-        engine.evaluate_all()
-        await _refresh_entities(hass, entry)
+        async with runtime.mutation_lock:
+            intent = engine.activate_scene_rule(
+                rule_id, ttl_ms=ttl_override * 1000 if ttl_override else None
+            )
+            if intent is None:
+                _LOGGER.error("No scene rule found with id %r", rule_id)
+                return
+            # Re-evaluate so the activation path picks it up
+            engine.evaluate_all()
+            runtime.advance_revision()
+            lifecycle_writer.mutated()
+        hass.data[DOMAIN][publication_key(entry.entry_id)].publish_if_changed()
         _LOGGER.info(
             "Scene rule %r activated manually (ttl=%sms)",
-            rule_id, intent.ttl_ms,
+            rule_id,
+            intent.ttl_ms,
         )
 
     async def _clear_service(call: ServiceCall) -> None:
         """Handle the `intentional.clear` service call."""
         target = call.data.get(ATTR_TARGET)
-        removed = engine.clear_user_intents(target=target)
-        engine.evaluate_all()
-        await _refresh_entities(hass, entry)
+        async with runtime.mutation_lock:
+            removed = engine.clear_user_intents(target=target)
+            engine.evaluate_all()
+            runtime.advance_revision()
+            lifecycle_writer.mutated()
+        hass.data[DOMAIN][publication_key(entry.entry_id)].publish_if_changed()
         _LOGGER.info(
             "Cleared %s manual intent(s)%s",
             removed,
@@ -912,18 +1226,11 @@ async def _register_services(
         Re-reads stored rules. Same effect as saving through the YAML editor
         or HTTP API.
         """
-        try:
-            new_rules = await rule_store.async_rules()
-        except RuleLoadError as err:
-            _LOGGER.error("Rule reload failed: %s", err)
-            return
-        engine.load_rules(new_rules)
-        hass.data[DOMAIN][f"{entry.entry_id}:referenced"] = referenced_entities(new_rules)
-        sync_time_context_into_engine(engine)
-        engine.evaluate_all()
-        await _refresh_entities(hass, entry)
+        await mutation_coordinator.async_reload()
 
     hass.services.async_register(DOMAIN, SERVICE_FIRE, _fire_service, schema=FIRE_SERVICE_SCHEMA)
     hass.services.async_register(DOMAIN, SERVICE_CLEAR, _clear_service, schema=CLEAR_SERVICE_SCHEMA)
-    hass.services.async_register(DOMAIN, SERVICE_ACTIVATE_SCENE, _activate_scene_service, schema=ACTIVATE_SCENE_SCHEMA)
+    hass.services.async_register(
+        DOMAIN, SERVICE_ACTIVATE_SCENE, _activate_scene_service, schema=ACTIVATE_SCENE_SCHEMA
+    )
     hass.services.async_register(DOMAIN, SERVICE_RELOAD, _reload_service)

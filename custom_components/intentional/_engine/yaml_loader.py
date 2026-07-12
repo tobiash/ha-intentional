@@ -56,6 +56,7 @@ from .generation import ValueGeneratorSpec, parse_generator_spec
 from .intent import Authority
 from .records import Effect, IntentSelector, ObserveSelector
 from .rule_model import Rule, RuleDirFingerprint, RuleLoadError
+from .target_policy import TargetPolicy
 
 # ── Schema validation ────────────────────────────────────────────────
 
@@ -88,6 +89,21 @@ class _RawRuleDef:
     line: int | None
     scenes: dict[str, Any] = field(default_factory=dict)
     authored_rule_id: str | None = None
+    target_policies: dict[str, TargetPolicy] = field(default_factory=dict)
+
+
+class RuleSet(list[Rule]):
+    """Validated Rules plus document-owned Target policies."""
+
+    def __init__(self, rules: list[Rule], target_policies: dict[str, TargetPolicy]) -> None:
+        super().__init__(rules)
+        self.target_policies = dict(target_policies)
+
+
+class _RawRuleDefs(list[_RawRuleDef]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.target_policies: dict[str, TargetPolicy] = {}
 
 
 def _validate_rule(
@@ -96,6 +112,7 @@ def _validate_rule(
     file: Path | None = None,
     line: int | None = None,
     authored_rule_id: str | None = None,
+    target_policies: dict[str, TargetPolicy] | None = None,
 ) -> Rule:
     """Validate a single rule dict and return a Rule object.
 
@@ -1263,8 +1280,9 @@ def _load_raw_rule_defs_from_string(
         line_num = line.line + 1 if line else None
         raise RuleLoadError(f"YAML parse error: {e}", file=file, line=line_num) from e
 
-    raw_rules: list[_RawRuleDef] = []
+    raw_rules = _RawRuleDefs()
     all_scenes: dict[str, Any] = {}
+    all_target_policies: dict[str, TargetPolicy] = {}
     for doc in docs:
         if doc is None:
             continue  # empty document
@@ -1285,6 +1303,12 @@ def _load_raw_rule_defs_from_string(
                 if scene_id in all_scenes:
                     raise RuleLoadError(f"Duplicate scene id {scene_id!r}", file=file)
                 all_scenes[scene_id] = scene
+            target_policies = _target_policies_from_document(doc.get("targets", {}), file=file)
+            for target, policy in target_policies.items():
+                if target in all_target_policies and all_target_policies[target] != policy:
+                    raise RuleLoadError(f"Conflicting Target policy for {target!r}", file=file)
+                all_target_policies[target] = policy
+                raw_rules.target_policies[target] = policy
             raw_rules.extend(
                 _target_default_rule_defs_from_document(
                     doc.get("targets", {}),
@@ -1308,9 +1332,72 @@ def _load_raw_rule_defs_from_string(
                     f"Each rule must be a mapping, got {type(raw).__name__}",
                     file=file, line=line_num,
                 )
-            raw_rules.append(_RawRuleDef(raw=raw, file=file, line=line_num, scenes=all_scenes))
+            raw_rules.append(_RawRuleDef(
+                raw=raw, file=file, line=line_num, scenes=all_scenes,
+                target_policies=dict(all_target_policies),
+            ))
+
+    for raw_def in raw_rules:
+        raw_def.target_policies.update(all_target_policies)
 
     return raw_rules
+
+
+_TARGET_POLICY_FIELDS = {
+    "default", "ownership", "allowed_fields", "forbidden_automatic_states",
+    "unavailable", "max_retries", "user_authority",
+}
+
+
+def _target_policies_from_document(raw_targets: Any, *, file: Path | None) -> dict[str, TargetPolicy]:
+    if raw_targets is None:
+        return {}
+    if not isinstance(raw_targets, dict):
+        raise RuleLoadError("Document `targets` must be a mapping", file=file)
+    result = {}
+    for target, raw in raw_targets.items():
+        if not isinstance(target, str) or not target or "." not in target:
+            raise RuleLoadError("Document `targets` keys must be entity IDs", file=file)
+        if not isinstance(raw, dict):
+            raise RuleLoadError(f"Target policy for {target!r} must be a mapping", file=file)
+        unknown = set(raw) - _TARGET_POLICY_FIELDS
+        if unknown:
+            raise RuleLoadError(
+                f"Target policy for {target!r} has unknown fields: {sorted(unknown)}. "
+                f"Allowed: {sorted(_TARGET_POLICY_FIELDS)}", file=file,
+            )
+        ownership = raw.get("ownership", "managed")
+        if ownership not in {"managed", "opportunistic", "observe_only"}:
+            raise RuleLoadError(f"Target {target!r}: `ownership` must be managed, opportunistic, or observe_only", file=file)
+        unavailable = raw.get("unavailable", "allow")
+        if unavailable not in {"allow", "skip"}:
+            raise RuleLoadError(f"Target {target!r}: `unavailable` must be allow or skip", file=file)
+        allowed_fields = _string_set(raw.get("allowed_fields"), target, "allowed_fields", file, optional=True)
+        forbidden = _string_set(raw.get("forbidden_automatic_states", []), target, "forbidden_automatic_states", file)
+        user = raw.get("user_authority", {})
+        if not isinstance(user, dict) or set(user) - {"fields", "states"}:
+            raise RuleLoadError(f"Target {target!r}: `user_authority` must contain only fields and states", file=file)
+        max_retries = raw.get("max_retries")
+        if max_retries is not None and (not isinstance(max_retries, int) or isinstance(max_retries, bool) or max_retries < 0):
+            raise RuleLoadError(f"Target {target!r}: `max_retries` must be a non-negative integer", file=file)
+        result[target] = TargetPolicy(
+            ownership=ownership,
+            allowed_fields=allowed_fields,
+            forbidden_automatic_states=forbidden or frozenset(),
+            unavailable=unavailable,
+            max_retries=max_retries,
+            user_authority_fields=_string_set(user.get("fields", []), target, "user_authority.fields", file) or frozenset(),
+            user_authority_states=_string_set(user.get("states", []), target, "user_authority.states", file) or frozenset(),
+        )
+    return result
+
+
+def _string_set(value: Any, target: str, field: str, file: Path | None, *, optional: bool = False) -> frozenset[str] | None:
+    if value is None and optional:
+        return None
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise RuleLoadError(f"Target {target!r}: `{field}` must be a list of non-empty strings", file=file)
+    return frozenset(value)
 
 
 def _target_default_rule_defs_from_document(
@@ -1329,11 +1416,11 @@ def _target_default_rule_defs_from_document(
             raise RuleLoadError("Document `targets` keys must be non-empty entity IDs", file=file)
         if not isinstance(policy, dict):
             raise RuleLoadError(f"Target policy for {target!r} must be a mapping", file=file)
-        unknown = set(policy) - {"default"}
+        unknown = set(policy) - _TARGET_POLICY_FIELDS
         if unknown:
             raise RuleLoadError(
                 f"Target policy for {target!r} has unknown fields: {sorted(unknown)}. "
-                "Allowed: ['default']",
+                f"Allowed: {sorted(_TARGET_POLICY_FIELDS)}",
                 file=file,
             )
         default = policy.get("default")
@@ -1429,6 +1516,7 @@ def _resolve_rule_inheritance(raw_rules: list[_RawRuleDef]) -> list[_RawRuleDef]
                 file=raw_def.file,
                 line=raw_def.line,
                 authored_rule_id=raw_def.authored_rule_id,
+                target_policies=raw_def.target_policies,
             ))
         else:
             output.append(raw_def)
@@ -1486,6 +1574,7 @@ def _validate_raw_rule_defs(raw_rules: list[_RawRuleDef]) -> list[Rule]:
             file=raw_def.file,
             line=raw_def.line,
             authored_rule_id=raw_def.authored_rule_id,
+            target_policies=raw_def.target_policies,
         )
         for raw_def in expanded_rules
     ]
@@ -1523,7 +1612,8 @@ def _expand_vnext_scene_includes(
         file=raw_def.file,
         line=raw_def.line,
         scenes=raw_def.scenes,
-        authored_rule_id=raw_def.authored_rule_id,
+            authored_rule_id=raw_def.authored_rule_id,
+            target_policies=raw_def.target_policies,
     )
 
 
@@ -1625,6 +1715,7 @@ def _expand_vnext_multi_target_rule(raw_def: _RawRuleDef) -> list[_RawRuleDef]:
             file=raw_def.file,
             line=raw_def.line,
             authored_rule_id=rule_id if isinstance(rule_id, str) else None,
+            target_policies=raw_def.target_policies,
         ))
     return expanded
 
@@ -1632,15 +1723,17 @@ def _expand_vnext_multi_target_rule(raw_def: _RawRuleDef) -> list[_RawRuleDef]:
 # ── Public API ───────────────────────────────────────────────────────
 
 
-def load_rules_from_string(text: str, *, file: Path | None = None) -> list[Rule]:
+def load_rules_from_string(text: str, *, file: Path | None = None) -> RuleSet:
     """Parse a YAML string into a list of validated Rule objects.
 
     Raises RuleLoadError on any parse or schema error.
     """
-    return _validate_raw_rule_defs(_load_raw_rule_defs_from_string(text, file=file))
+    raw_rules = _load_raw_rule_defs_from_string(text, file=file)
+    policies = _policies_from_raw_defs(raw_rules)
+    return RuleSet(_validate_raw_rule_defs(raw_rules), policies)
 
 
-def load_rules(directory: str | Path) -> list[Rule]:
+def load_rules(directory: str | Path) -> RuleSet:
     """Load all rule files from a directory, in alphabetical order.
 
     Files must end in .yaml or .yml. Other files (README, .md) are ignored.
@@ -1656,15 +1749,32 @@ def load_rules(directory: str | Path) -> list[Rule]:
         if f.is_file() and f.suffix.lower() in (".yaml", ".yml")
     )
 
-    raw_rules: list[_RawRuleDef] = []
+    raw_rules = _RawRuleDefs()
     for path in rule_files:
         try:
             text = path.read_text(encoding="utf-8")
         except OSError as e:
             raise RuleLoadError(f"Could not read {path}: {e}", file=path) from e
-        raw_rules.extend(_load_raw_rule_defs_from_string(text, file=path))
+        loaded = _load_raw_rule_defs_from_string(text, file=path)
+        for target, policy in loaded.target_policies.items():
+            existing = raw_rules.target_policies.get(target)
+            if existing is not None and existing != policy:
+                raise RuleLoadError(f"Conflicting Target policy for {target!r}", file=path)
+            raw_rules.target_policies[target] = policy
+        raw_rules.extend(loaded)
 
-    return _validate_raw_rule_defs(raw_rules)
+    return RuleSet(_validate_raw_rule_defs(raw_rules), _policies_from_raw_defs(raw_rules))
+
+
+def _policies_from_raw_defs(raw_rules: list[_RawRuleDef]) -> dict[str, TargetPolicy]:
+    policies: dict[str, TargetPolicy] = dict(getattr(raw_rules, "target_policies", {}))
+    for raw_def in raw_rules:
+        for target, policy in raw_def.target_policies.items():
+            existing = policies.get(target)
+            if existing is not None and existing != policy:
+                raise RuleLoadError(f"Conflicting Target policy for {target!r}", file=raw_def.file)
+            policies[target] = policy
+    return policies
 
 
 def rule_dir_fingerprint(directory: str | Path) -> RuleDirFingerprint:

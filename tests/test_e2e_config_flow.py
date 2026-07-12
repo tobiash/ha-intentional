@@ -75,9 +75,11 @@ from pathlib import Path
 
 import pytest
 
+from tests.dependencies import require_test_dependency
+
 # Skip the entire module if HA isn't installed (CI has it, minimal dev doesn't)
-pytest.importorskip("homeassistant", reason="homeassistant not installed")
-pytest.importorskip(
+require_test_dependency("homeassistant", reason="homeassistant not installed")
+require_test_dependency(
     "pytest_homeassistant_custom_component",
     reason="pytest-homeassistant-custom-component not installed",
 )

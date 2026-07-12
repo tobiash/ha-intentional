@@ -9,10 +9,14 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from ._engine.runtime import TickRuntime, runtime_key
 from .const import DEFAULT_NAME, DOMAIN
+from .lifecycle_writer import mark_lifecycle_mutated
+from .publication import publication_key, publication_signal
 from .room_controls import area_for_target, room_controls_for_engine, slugify_area_id
 
 
@@ -38,8 +42,9 @@ async def async_setup_entry(
     entities.extend(room_entities.values())
     async_add_entities(entities)
 
-    async def _on_refresh(event) -> None:
-        if event.data.get("entry_id") != entry.entry_id:
+    async def _on_publication(_changed: frozenset[str]) -> None:
+        runtime = hass.data[DOMAIN].get(runtime_key(entry.entry_id))
+        if isinstance(runtime, TickRuntime) and runtime.unloading:
             return
         current_room_ids = set(room_controls_for_engine(
             engine,
@@ -57,7 +62,7 @@ async def async_setup_entry(
             async_add_entities(new_entities)
 
     entry.async_on_unload(
-        hass.bus.async_listen(f"{DOMAIN}_refresh", _on_refresh)
+        async_dispatcher_connect(hass, publication_signal(entry.entry_id), _on_publication)
     )
 
 
@@ -141,8 +146,15 @@ class IntentionalClearManualOverridesButton(ButtonEntity):
         return {"target": self._target}
 
     async def async_press(self) -> None:
-        self._engine.clear_user_intents(self._target)
-        self.hass.bus.async_fire(f"{DOMAIN}_refresh", {"entry_id": self._entry.entry_id})
+        runtime = self.hass.data[DOMAIN].get(runtime_key(self._entry.entry_id))
+        if isinstance(runtime, TickRuntime):
+            async with runtime.mutation_lock:
+                self._engine.clear_user_intents(self._target)
+                runtime.advance_revision()
+                mark_lifecycle_mutated(self.hass, self._entry.entry_id)
+        else:
+            self._engine.clear_user_intents(self._target)
+        self.hass.data[DOMAIN][publication_key(self._entry.entry_id)].publish_if_changed()
 
 
 class IntentionalClearRoomOverridesButton(ButtonEntity):
@@ -191,9 +203,17 @@ class IntentionalClearRoomOverridesButton(ButtonEntity):
         control = self._room_control()
         if control is None:
             return
-        for target in control.targets | control.manual_override_targets:
-            self._engine.clear_user_intents(target)
-        self.hass.bus.async_fire(f"{DOMAIN}_refresh", {"entry_id": self._entry.entry_id})
+        runtime = self.hass.data[DOMAIN].get(runtime_key(self._entry.entry_id))
+        if isinstance(runtime, TickRuntime):
+            async with runtime.mutation_lock:
+                for target in control.targets | control.manual_override_targets:
+                    self._engine.clear_user_intents(target)
+                runtime.advance_revision()
+                mark_lifecycle_mutated(self.hass, self._entry.entry_id)
+        else:
+            for target in control.targets | control.manual_override_targets:
+                self._engine.clear_user_intents(target)
+        self.hass.data[DOMAIN][publication_key(self._entry.entry_id)].publish_if_changed()
 
     def _room_control(self):
         return room_controls_for_engine(

@@ -33,6 +33,20 @@ class TemplateRenderer:
             return tuple(self.render_value(item, state) for item in value)
         return value
 
+    def validate_value(self, value: Any) -> None:
+        """Compile templated scalars recursively without rendering them."""
+        if isinstance(value, str):
+            if "{{" in value or "{%" in value:
+                self._env.from_string(value)
+            return
+        if isinstance(value, dict):
+            for item in value.values():
+                self.validate_value(item)
+            return
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                self.validate_value(item)
+
     def render_effect(self, effect: Effect, state: dict[str, Any]) -> Effect:
         """Render templated effect target/data values."""
         return Effect(

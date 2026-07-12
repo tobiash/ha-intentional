@@ -37,6 +37,7 @@ from .rule_files import (
     _validate_rule_dir,
     _write_rule_file,
 )
+from .rule_mutation import RuleMutationCoordinator, mutation_coordinator_key
 from .rule_store import RULE_STORE_FILENAME, StorageRuleStore, rule_store_key
 
 _LOGGER = logging.getLogger(__name__)
@@ -79,6 +80,11 @@ def _storage_rule_store(hass, entry_id: str) -> StorageRuleStore | None:
     """Return loaded storage-backed rule store, if the integration is running."""
     store = hass.data.get(DOMAIN, {}).get(rule_store_key(entry_id))
     return store if isinstance(store, StorageRuleStore) else None
+
+
+def _mutation_coordinator(hass, entry_id: str) -> RuleMutationCoordinator | None:
+    coordinator = hass.data.get(DOMAIN, {}).get(mutation_coordinator_key(entry_id))
+    return coordinator if isinstance(coordinator, RuleMutationCoordinator) else None
 
 
 class IntentionalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -278,7 +284,21 @@ class IntentionalOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
             # EXECUTOR: writes go through the executor (mkdir + write_text
             # + yaml validation — all blocking).
             if rule_store is not None:
-                err = await rule_store.async_write(RULE_STORE_FILENAME, contents)
+                coordinator = _mutation_coordinator(self.hass, self.config_entry.entry_id)
+                if coordinator is None:
+                    err = "Rule mutation coordinator is not loaded"
+                else:
+                    result, reload_error = await coordinator.async_mutate_and_reload(
+                        lambda: rule_store.async_write(RULE_STORE_FILENAME, contents),
+                        expected_generation=self._selected_generation,
+                    )
+                    err = (
+                        "Rules changed while this editor was open"
+                        if isinstance(result, dict) and result.get("error") == "generation_mismatch"
+                        else (result if isinstance(result, str) else None)
+                    )
+                    if reload_error is not None:
+                        err = f"Reload failed: {reload_error}"
             else:
                 err = await _write_in_executor(
                     self.hass, rule_dir, self._selected_file, contents
@@ -298,7 +318,8 @@ class IntentionalOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
                     errors={"base": err},
                     description_placeholders={"filename": self._selected_file},
                 )
-            await self.hass.services.async_call(DOMAIN, "reload", blocking=True)
+            if rule_store is None:
+                await self.hass.services.async_call(DOMAIN, "reload", blocking=True)
             return self.async_create_entry(title="", data={})
 
         # EXECUTOR: read_text() on the loop. v0.3.0..v0.3.3 hit this
@@ -306,6 +327,7 @@ class IntentionalOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
         if rule_store is not None:
             current = rule_store.contents
             self._selected_file = RULE_STORE_FILENAME
+            self._selected_generation = rule_store.generation
         else:
             current = await _read_in_executor(
                 self.hass, rule_dir, self._selected_file
@@ -378,15 +400,29 @@ class IntentionalOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
         rule_store = _storage_rule_store(self.hass, self.config_entry.entry_id)
         if rule_store is not None:
             if user_input is not None:
-                err = await rule_store.async_delete(RULE_STORE_FILENAME)
+                coordinator = _mutation_coordinator(self.hass, self.config_entry.entry_id)
+                if coordinator is None:
+                    err = "Rule mutation coordinator is not loaded"
+                else:
+                    result, reload_error = await coordinator.async_mutate_and_reload(
+                        lambda: rule_store.async_delete(RULE_STORE_FILENAME),
+                        expected_generation=self._selected_generation,
+                    )
+                    err = (
+                        "Rules changed while this form was open"
+                        if isinstance(result, dict) and result.get("error") == "generation_mismatch"
+                        else (result if isinstance(result, str) else None)
+                    )
+                    if reload_error is not None:
+                        err = f"Reload failed: {reload_error}"
                 if err:
                     return self.async_show_form(
                         step_id="delete_pick",
                         data_schema=vol.Schema({vol.Required("filename"): vol.In({RULE_STORE_FILENAME: RULE_STORE_FILENAME})}),
                         errors={"base": err},
                     )
-                await self.hass.services.async_call(DOMAIN, "reload", blocking=True)
                 return self.async_create_entry(title="", data={})
+            self._selected_generation = rule_store.generation
             return self.async_show_form(
                 step_id="delete_pick",
                 data_schema=vol.Schema({vol.Required("filename"): vol.In({RULE_STORE_FILENAME: RULE_STORE_FILENAME})}),

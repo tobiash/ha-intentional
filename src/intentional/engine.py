@@ -37,18 +37,25 @@ integration layer sets it to the real current time on startup.
 
 from __future__ import annotations
 
+import hashlib
 import time
+import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from typing import Any
 
 from intentional.compositor import ResolvedIntent, resolve_intents
 from intentional.generation import GeneratedFieldState, sample_generated_field
 from intentional.intent import Authority, Intent
-from intentional.lifecycle import export_lifecycle_records, restore_lifecycle_intents
-from intentional.records import Effect, IntentSelector
+from intentional.lifecycle import (
+    export_lifecycle_records,
+    restore_effect_outbox,
+    restore_lifecycle_intents,
+)
+from intentional.records import EffectOutboxRecord, IntentSelector
 from intentional.rule_lifecycle import dominant_phase, min_optional, rule_phase
 from intentional.selectors import observe_selectors_fire, selector_diagnostics
+from intentional.target_policy import TargetPolicy
 from intentional.templates import TemplateRenderer
 from intentional.when_parser import TimeOfDay, WhenAST, evaluate_when, parse_when
 from intentional.yaml_loader import Rule
@@ -61,6 +68,10 @@ _FOR_UNIT_MULTIPLIERS = {
     "m": 60_000,
     "h": 3_600_000,
 }
+EFFECT_RETRY_BASE_MS = 1_000
+EFFECT_RETRY_MAX_MS = 300_000
+EFFECT_MAX_ATTEMPTS = 8
+EFFECT_DEAD_LETTER_LIMIT = 100
 
 
 @dataclass
@@ -71,6 +82,20 @@ class _ParsedRule:
     when_ast: WhenAST
     hold_when_ast: WhenAST | None = None
     hold_until_ast: WhenAST | None = None
+
+
+def _rule_fingerprint(rule: Rule) -> tuple[Any, ...]:
+    """Return semantic Rule values, deliberately excluding source location."""
+    return tuple(
+        getattr(rule, field.name)
+        for field in fields(rule)
+        if field.name not in {"source_file", "source_line"}
+    )
+
+
+def _effect_rule_fingerprint(rule: Rule) -> str:
+    """Return a compact stable identity for the definition that activated."""
+    return hashlib.sha256(repr(_rule_fingerprint(rule)).encode("utf-8")).hexdigest()
 
 
 class Engine:
@@ -88,6 +113,7 @@ class Engine:
         selector_resolver: SelectorResolver | None = None,
     ) -> None:
         self._rules: dict[str, _ParsedRule] = {}
+        self._target_policies: dict[str, TargetPolicy] = {}
         self.state: dict[str, Any] = {}
         self._active_intents: list[Intent] = []
         self._time_of_day: str | TimeOfDay | None = None
@@ -101,7 +127,7 @@ class Engine:
         self._state_change_callbacks: list[StateChangeCallback] = []
         self._log: list[str] = []  # last N log lines for diagnostics
         self._active_effect_rule_ids: set[str] = set()
-        self._pending_effects: list[tuple[str, Effect]] = []
+        self._effect_outbox: list[EffectOutboxRecord] = []
         self._template_renderer = TemplateRenderer()
         self._generated_fields: dict[tuple[str, str], GeneratedFieldState] = {}
         self._enabled = True
@@ -116,6 +142,7 @@ class Engine:
             self._active_intents,
             self._active_effect_rule_ids,
             self._generated_fields,
+            self._effect_outbox,
             now_ms=self.now_ms(),
         )
         records["enabled"] = self._enabled
@@ -133,20 +160,19 @@ class Engine:
         self._active_intents.extend(restored)
         self._active_effect_rule_ids = active_effect_rule_ids
         self._generated_fields.update(generated_fields)
+        self._effect_outbox = restore_effect_outbox(records)
         if isinstance(records, dict) and records.get("enabled") is False:
             self.set_enabled(False)
         if isinstance(records, dict):
             paused_labels = records.get("paused_labels")
             if isinstance(paused_labels, list):
                 self._paused_labels = {
-                    label for label in paused_labels
-                    if isinstance(label, str) and label
+                    label for label in paused_labels if isinstance(label, str) and label
                 }
             paused_rule_ids = records.get("paused_rule_ids")
             if isinstance(paused_rule_ids, list):
                 self._paused_rule_ids = {
-                    rule_id for rule_id in paused_rule_ids
-                    if isinstance(rule_id, str) and rule_id
+                    rule_id for rule_id in paused_rule_ids if isinstance(rule_id, str) and rule_id
                 }
 
     def is_enabled(self) -> bool:
@@ -165,11 +191,13 @@ class Engine:
         if paused:
             self._paused_labels.add(label)
             self._active_intents = [
-                intent for intent in self._active_intents
+                intent
+                for intent in self._active_intents
                 if not self._intent_has_label(intent, label)
             ]
             self._active_effect_rule_ids = {
-                rule_id for rule_id in self._active_effect_rule_ids
+                rule_id
+                for rule_id in self._active_effect_rule_ids
                 if not self._rule_has_label(rule_id, label)
             }
             return
@@ -178,7 +206,8 @@ class Engine:
     def set_rule_paused(self, rule_id: str, paused: bool) -> None:
         """Pause or resume one authored or expanded rule id."""
         rule_ids = {
-            current_id for current_id in self._rules
+            current_id
+            for current_id in self._rules
             if current_id == rule_id or current_id.split(":", 1)[0] == rule_id
         }
         if not rule_ids:
@@ -186,8 +215,7 @@ class Engine:
         if paused:
             self._paused_rule_ids.update(rule_ids)
             self._active_intents = [
-                intent for intent in self._active_intents
-                if intent.rule_id not in rule_ids
+                intent for intent in self._active_intents if intent.rule_id not in rule_ids
             ]
             self._active_effect_rule_ids.difference_update(rule_ids)
             return
@@ -263,50 +291,120 @@ class Engine:
         self._state_change_callbacks.append(callback)
         return callback
 
+    def set_selector_resolver(self, resolver: SelectorResolver) -> None:
+        """Replace selector membership resolution for isolated runtimes."""
+        self._selector_resolver = resolver
+
     # ── Rules ───────────────────────────────────────────────────────
 
-    def load_rules(self, rules: list[Rule]) -> None:
-        """Replace the rule set. Parses each rule's `when` clause."""
-        self._rules = {}
+    def load_rules(
+        self,
+        rules: list[Rule],
+        *,
+        target_policies: dict[str, TargetPolicy] | None = None,
+    ) -> None:
+        """Transactionally replace rules and preserve only identical-rule memory."""
+        policies = target_policies
+        if policies is None:
+            policies = getattr(rules, "target_policies", {})
+        parsed_rules: dict[str, _ParsedRule] = {}
         for rule in rules:
             try:
                 when_ast = parse_when(rule.when)
                 hold_when_ast = parse_when(rule.hold_when) if rule.hold_when else None
                 hold_until_ast = parse_when(rule.hold_until_when) if rule.hold_until_when else None
             except Exception as e:
-                self._log.append(f"Failed to parse when for {rule.id!r}: {e}")
-                continue
-            self._rules[rule.id] = _ParsedRule(
+                raise ValueError(f"Failed to parse when for {rule.id!r}: {e}") from e
+            parsed_rules[rule.id] = _ParsedRule(
                 rule=rule,
                 when_ast=when_ast,
                 hold_when_ast=hold_when_ast,
                 hold_until_ast=hold_until_ast,
             )
+        unchanged = {
+            rule_id
+            for rule_id, parsed in parsed_rules.items()
+            if rule_id in self._rules
+            and _rule_fingerprint(self._rules[rule_id].rule) == _rule_fingerprint(parsed.rule)
+        }
+        self._rules = parsed_rules
+        self._target_policies = dict(policies)
         # Drop level-rule intents on reload so active observations recreate
         # intents from the current rule definition (target/value/lifecycle).
         self._active_intents = [
-            i for i in self._active_intents
-            if not i.rule_id or (i.rule_id in self._rules and i.ignore_when)
+            i
+            for i in self._active_intents
+            if not i.rule_id or (i.rule_id in unchanged and i.ignore_when)
         ]
         self._condition_true_since = {
             rule_id: since
             for rule_id, since in self._condition_true_since.items()
-            if rule_id in self._rules
+            if rule_id in unchanged
         }
         self._hold_until_true_since = {
             rule_id: since
             for rule_id, since in self._hold_until_true_since.items()
-            if rule_id in self._rules
+            if rule_id in unchanged
         }
         self._rule_held_since = {
             rule_id: since
             for rule_id, since in self._rule_held_since.items()
-            if rule_id in self._rules
+            if rule_id in unchanged
         }
+        self._animation_started_at = {
+            rule_id: started
+            for rule_id, started in self._animation_started_at.items()
+            if rule_id in unchanged
+        }
+        self._active_effect_rule_ids.intersection_update(unchanged)
+        # Rendered outbox entries are obligations and survive Rule changes.
+        self._generated_fields = {
+            key: value for key, value in self._generated_fields.items() if key[0] in unchanged
+        }
+
+    @staticmethod
+    def rule_fingerprint(rule: Rule) -> tuple[Any, ...]:
+        """Expose reload identity semantics to the integration coordinator."""
+        return _rule_fingerprint(rule)
+
+    @staticmethod
+    def validate_rules(rules: list[Rule]) -> None:
+        """Validate expressions and templates without mutating engine state."""
+        renderer = TemplateRenderer()
+        for rule in rules:
+            parse_when(rule.when)
+            if rule.hold_when:
+                parse_when(rule.hold_when)
+            if rule.hold_until_when:
+                parse_when(rule.hold_until_when)
+            for value in (rule.set, rule.cap, rule.floor, rule.offset, rule.multiply):
+                renderer.validate_value(value)
+            for selector in rule.intent_selectors:
+                for value in (
+                    selector.set,
+                    selector.cap,
+                    selector.floor,
+                    selector.offset,
+                    selector.multiply,
+                ):
+                    renderer.validate_value(value)
+            for effect in rule.effects:
+                renderer.validate_value(effect.target)
+                renderer.validate_value(effect.data)
+
+    def rule_fingerprints(self) -> dict[str, tuple[Any, ...]]:
+        """Return current semantic fingerprints keyed by expanded rule id."""
+        return {rule_id: _rule_fingerprint(parsed.rule) for rule_id, parsed in self._rules.items()}
+
+    def loaded_rules(self) -> list[Rule]:
+        """Return the currently loaded expanded Rules for isolated tooling."""
+        return [parsed.rule for parsed in self._rules.values()]
 
     def add_rule(self, rule: Rule) -> None:
         """Add or replace a single rule."""
-        self.load_rules([r for r in (pr.rule for pr in self._rules.values()) if r.id != rule.id] + [rule])
+        self.load_rules(
+            [r for r in (pr.rule for pr in self._rules.values()) if r.id != rule.id] + [rule]
+        )
 
     # ── Manual intent injection ────────────────────────────────────
 
@@ -339,7 +437,8 @@ class Engine:
         """Remove active manual/user intents, optionally for one target."""
         before = len(self._active_intents)
         self._active_intents = [
-            intent for intent in self._active_intents
+            intent
+            for intent in self._active_intents
             if not (
                 intent.authority is Authority.USER
                 and not intent.rule_id
@@ -386,10 +485,9 @@ class Engine:
         if not self._enabled:
             self._active_intents = []
             self._active_effect_rule_ids.clear()
-            self._pending_effects.clear()
             return
-        firing, _condition_firing, _blocked_by, _for_remaining = (
-            self._firing_rule_diagnostics(update_timers=True)
+        firing, _condition_firing, _blocked_by, _for_remaining = self._firing_rule_diagnostics(
+            update_timers=True
         )
 
         # Filter active intents:
@@ -462,13 +560,25 @@ class Engine:
         for rule_id, _target in firing.items():
             parsed = self._rules[rule_id]
             if parsed.rule.effects and rule_id not in self._active_effect_rule_ids:
-                self._pending_effects.extend(
-                    (rule_id, self._template_renderer.render_effect(effect, self.state))
-                    for effect in parsed.rule.effects
-                )
+                activation_id = str(uuid.uuid4())
+                fingerprint = _effect_rule_fingerprint(parsed.rule)
+                for effect_index, effect in enumerate(parsed.rule.effects):
+                    rendered = self._template_renderer.render_effect(effect, self.state)
+                    self._effect_outbox.append(
+                        EffectOutboxRecord(
+                            activation_id=activation_id,
+                            rule_id=rule_id,
+                            rule_fingerprint=fingerprint,
+                            effect_index=effect_index,
+                            domain=rendered.domain,
+                            service=rendered.service,
+                            target=dict(rendered.target),
+                            data=dict(rendered.data),
+                            next_retry_ms=now,
+                        )
+                    )
             has_explicit_intent = any(
-                intent.rule_id == rule_id and not intent.selector_generated
-                for intent in new_active
+                intent.rule_id == rule_id and not intent.selector_generated for intent in new_active
             )
             if not has_explicit_intent:
                 if not parsed.rule.target and parsed.rule.scene is None:
@@ -479,15 +589,94 @@ class Engine:
 
         self._active_intents = new_active
         self._active_effect_rule_ids = {
-            rule_id for rule_id in firing
-            if self._rules[rule_id].rule.effects
+            rule_id for rule_id in firing if self._rules[rule_id].rule.effects
         }
 
-    def drain_pending_effects(self) -> list[tuple[str, Effect]]:
-        """Return and clear effects that became active since the last drain."""
-        effects = list(self._pending_effects)
-        self._pending_effects.clear()
-        return effects
+    def list_effect_outbox(self, *, include_acknowledged: bool = True) -> list[EffectOutboxRecord]:
+        """Return a snapshot of durable Effect delivery records."""
+        return [
+            record
+            for record in self._effect_outbox
+            if include_acknowledged or record.acknowledged_at_ms is None
+        ]
+
+    def due_effects(self) -> list[EffectOutboxRecord]:
+        """Return unacknowledged Effects whose retry time has arrived."""
+        now = self.now_ms()
+        return [
+            record
+            for record in self._effect_outbox
+            if record.acknowledged_at_ms is None
+            and record.dead_lettered_at_ms is None
+            and record.next_retry_ms <= now
+        ]
+
+    def begin_effect_attempt(
+        self, activation_id: str, effect_index: int
+    ) -> EffectOutboxRecord | None:
+        """Record an attempt and its bounded exponential retry before dispatch."""
+        now = self.now_ms()
+        for index, record in enumerate(self._effect_outbox):
+            if (record.activation_id, record.effect_index) != (activation_id, effect_index):
+                continue
+            if (
+                record.acknowledged_at_ms is not None
+                or record.dead_lettered_at_ms is not None
+                or record.next_retry_ms > now
+            ):
+                return None
+            attempts = record.attempts + 1
+            delay = min(EFFECT_RETRY_MAX_MS, EFFECT_RETRY_BASE_MS * (2 ** min(attempts - 1, 20)))
+            updated = replace(record, attempts=attempts, next_retry_ms=now + delay)
+            self._effect_outbox[index] = updated
+            return updated
+        return None
+
+    def acknowledge_effect(self, activation_id: str, effect_index: int) -> bool:
+        """Mark an Effect accepted by Home Assistant's blocking service call."""
+        for index, record in enumerate(self._effect_outbox):
+            if (record.activation_id, record.effect_index) != (activation_id, effect_index):
+                continue
+            if record.acknowledged_at_ms is not None:
+                return False
+            # Active Effect Rule ids are the durable duplicate-suppression
+            # tombstone, so acknowledged delivery records can be compacted.
+            self._effect_outbox.pop(index)
+            return True
+        return False
+
+    def fail_effect(self, activation_id: str, effect_index: int, error: str) -> bool:
+        """Record a failed delivery and terminally bound retries/diagnostics."""
+        for index, record in enumerate(self._effect_outbox):
+            if (record.activation_id, record.effect_index) != (activation_id, effect_index):
+                continue
+            if record.acknowledged_at_ms is not None or record.dead_lettered_at_ms is not None:
+                return False
+            terminal = record.attempts >= EFFECT_MAX_ATTEMPTS
+            self._effect_outbox[index] = replace(
+                record,
+                last_error=str(error)[:500],
+                dead_lettered_at_ms=self.now_ms() if terminal else None,
+            )
+            if terminal:
+                dead = [
+                    item for item in self._effect_outbox if item.dead_lettered_at_ms is not None
+                ]
+                excess = len(dead) - EFFECT_DEAD_LETTER_LIMIT
+                if excess > 0:
+                    remove = {
+                        (item.activation_id, item.effect_index)
+                        for item in sorted(dead, key=lambda item: item.dead_lettered_at_ms or 0)[
+                            :excess
+                        ]
+                    }
+                    self._effect_outbox = [
+                        item
+                        for item in self._effect_outbox
+                        if (item.activation_id, item.effect_index) not in remove
+                    ]
+            return terminal
+        return False
 
     def _eval_when(self, ast: WhenAST) -> bool:
         return evaluate_when(ast, self.state, time_of_day=self._time_of_day)
@@ -652,7 +841,9 @@ class Engine:
             return intent
         return replace(intent, set=set_values, transition_ms=transition_ms)
 
-    def _sample_generated_fields(self, rule: Rule, set_values: dict[str, Any], now: int) -> dict[str, Any]:
+    def _sample_generated_fields(
+        self, rule: Rule, set_values: dict[str, Any], now: int
+    ) -> dict[str, Any]:
         sampled = dict(set_values)
         for field_name, spec in rule.generators.items():
             key = (rule.id, field_name)
@@ -683,24 +874,28 @@ class Engine:
                 if target in selector.exclude or target in matched_targets:
                     continue
                 matched_targets.add(target)
-                intents.append(Intent(
-                    target=target,
-                    set=self._template_renderer.render_value(selector.set, self.state),
-                    cap=self._template_renderer.render_value(selector.cap, self.state),
-                    floor=self._template_renderer.render_value(selector.floor, self.state),
-                    offset=self._template_renderer.render_value(selector.offset, self.state),
-                    multiply=self._template_renderer.render_value(selector.multiply, self.state),
-                    transition_ms=selector.transition_ms,
-                    easing=selector.easing,
-                    authority=rule.authority,
-                    confidence=rule.confidence,
-                    ttl_ms=selector.ttl_ms,
-                    reason=rule.reason,
-                    rule_id=rule.id,
-                    ignore_when=rule.edge_created,
-                    selector_generated=True,
-                    created_at_ms=now,
-                ))
+                intents.append(
+                    Intent(
+                        target=target,
+                        set=self._template_renderer.render_value(selector.set, self.state),
+                        cap=self._template_renderer.render_value(selector.cap, self.state),
+                        floor=self._template_renderer.render_value(selector.floor, self.state),
+                        offset=self._template_renderer.render_value(selector.offset, self.state),
+                        multiply=self._template_renderer.render_value(
+                            selector.multiply, self.state
+                        ),
+                        transition_ms=selector.transition_ms,
+                        easing=selector.easing,
+                        authority=rule.authority,
+                        confidence=rule.confidence,
+                        ttl_ms=selector.ttl_ms,
+                        reason=rule.reason,
+                        rule_id=rule.id,
+                        ignore_when=rule.edge_created,
+                        selector_generated=True,
+                        created_at_ms=now,
+                    )
+                )
         return intents
 
     # ── Resolution ─────────────────────────────────────────────────
@@ -711,19 +906,23 @@ class Engine:
 
     def list_known_targets(self) -> tuple[str, ...]:
         """Return sorted target entity IDs referenced by loaded target rules."""
-        return tuple(sorted({
-            parsed.rule.target
-            for parsed in self._rules.values()
-            if parsed.rule.target
-        }))
+        return tuple(
+            sorted({parsed.rule.target for parsed in self._rules.values() if parsed.rule.target})
+        )
+
+    def target_policy(self, target: str) -> Any | None:
+        """Return the explicit document policy for a Target, if declared."""
+        return self._target_policies.get(target)
+
+    def target_policies(self) -> dict[str, TargetPolicy]:
+        """Return an isolated snapshot of document-owned Target policies."""
+        return dict(self._target_policies)
 
     def active_intent_count(self) -> int:
         """Return the number of currently active, non-expired intents."""
         now = self.now_ms()
         return sum(
-            1
-            for intent in self._active_intents
-            if not intent.is_expired(into_the_future_ms=now)
+            1 for intent in self._active_intents if not intent.is_expired(into_the_future_ms=now)
         )
 
     def list_active_intents(self, target: str) -> list[Intent]:
@@ -733,7 +932,8 @@ class Engine:
         """
         now = self.now_ms()
         return [
-            i for i in self._active_intents
+            i
+            for i in self._active_intents
             if i.target == target and not i.is_expired(into_the_future_ms=now)
         ]
 
@@ -741,7 +941,8 @@ class Engine:
         """Return active manual/user intents, optionally for one target."""
         now = self.now_ms()
         return [
-            intent for intent in self._active_intents
+            intent
+            for intent in self._active_intents
             if intent.authority is Authority.USER
             and not intent.rule_id
             and (target is None or intent.target == target)
@@ -751,11 +952,15 @@ class Engine:
     def list_active_targets(self) -> tuple[str, ...]:
         """Return sorted target entity IDs with at least one active intent."""
         now = self.now_ms()
-        return tuple(sorted({
-            intent.target
-            for intent in self._active_intents
-            if intent.target and not intent.is_expired(into_the_future_ms=now)
-        }))
+        return tuple(
+            sorted(
+                {
+                    intent.target
+                    for intent in self._active_intents
+                    if intent.target and not intent.is_expired(into_the_future_ms=now)
+                }
+            )
+        )
 
     def has_active_target(self, target: str) -> bool:
         """Return whether a target has at least one active, non-expired intent."""
@@ -765,9 +970,7 @@ class Engine:
             for intent in self._active_intents
         )
 
-    def list_active_scene_intents(
-        self, return_intents: bool = False
-    ):
+    def list_active_scene_intents(self, return_intents: bool = False):
         """Return the scene IDs of currently-active scene rules.
 
         By default returns a list of scene entity_id strings (the
@@ -781,7 +984,8 @@ class Engine:
         """
         now = self.now_ms()
         active_scene_intents = [
-            i for i in self._active_intents
+            i
+            for i in self._active_intents
             if not i.target  # scene rules have empty target
             and not i.is_expired(into_the_future_ms=now)
             and i.rule_id in self._rules
@@ -876,25 +1080,35 @@ class Engine:
             if parsed.rule.target != target:
                 continue
             status = statuses.get(rule_id, {})
-            rules_for_target.append({
-                "rule_id": rule_id,
-                "firing": rule_id in firing,
-                "condition_firing": rule_id in condition_firing,
-                "blocked_by": sorted(blocked_by.get(rule_id, [])),
-                "for_remaining_ms": for_remaining.get(rule_id),
-                "phase": status.get("phase", "idle"),
-                "active_for_ms": status.get("active_for_ms"),
-                "condition_active_for_ms": status.get("condition_active_for_ms"),
-                "held_for_ms": status.get("held_for_ms"),
-                "group": status.get("group", ""),
-                "profile": status.get("profile", ""),
-            })
+            rules_for_target.append(
+                {
+                    "rule_id": rule_id,
+                    "firing": rule_id in firing,
+                    "condition_firing": rule_id in condition_firing,
+                    "blocked_by": sorted(blocked_by.get(rule_id, [])),
+                    "for_remaining_ms": for_remaining.get(rule_id),
+                    "phase": status.get("phase", "idle"),
+                    "active_for_ms": status.get("active_for_ms"),
+                    "condition_active_for_ms": status.get("condition_active_for_ms"),
+                    "held_for_ms": status.get("held_for_ms"),
+                    "group": status.get("group", ""),
+                    "profile": status.get("profile", ""),
+                }
+            )
+
+        from intentional.reconciliation import target_policy_denial
 
         return {
             "target": target,
+            "target_policy": None
+            if self.target_policy(target) is None
+            else self.target_policy(target).as_dict(),
             "resolved": resolved,
             "active_intents": [_intent_to_diagnostic_dict(intent) for intent in active],
             "winning_intent": winning_intent,
+            "policy_denial": None
+            if resolved_obj is None
+            else target_policy_denial(self, target, dict(resolved_obj.value)),
             "rules_for_target": rules_for_target,
         }
 
@@ -906,20 +1120,23 @@ class Engine:
             if resolved is None:
                 continue
             winning = resolved.winning_intent
-            desired_records.append({
-                "target": target,
-                "desired": dict(resolved.value),
-                "rule_id": winning.rule_id if winning is not None else "",
-                "reason": winning.reason if winning is not None else "",
-                "conditions": [{"type": "DesiredResolved", "status": "true"}],
-            })
+            desired_records.append(
+                {
+                    "target": target,
+                    "desired": dict(resolved.value),
+                    "rule_id": winning.rule_id if winning is not None else "",
+                    "reason": winning.reason if winning is not None else "",
+                    "conditions": [{"type": "DesiredResolved", "status": "true"}],
+                }
+            )
         return {
             "dsl_version": "vnext-draft",
             "rule_count": self.rule_count(),
             "active_intent_count": self.active_intent_count(),
             "authored_rules": list(self.list_authored_rule_statuses().values()),
             "active_rules": [
-                status for status in self.list_authored_rule_statuses().values()
+                status
+                for status in self.list_authored_rule_statuses().values()
                 if status["active"] or status["active_intent_count"]
             ],
             "desired_records": desired_records,
@@ -977,21 +1194,28 @@ class Engine:
                 continue
             current["paused"] = current.get("paused", False) or status.get("paused", False)
             current["active"] = current["active"] or status["active"]
-            current["phase"] = dominant_phase(str(current.get("phase", "idle")), str(status.get("phase", "idle")))
+            current["phase"] = dominant_phase(
+                str(current.get("phase", "idle")), str(status.get("phase", "idle"))
+            )
             current["condition_firing"] = current["condition_firing"] or status["condition_firing"]
             current["active_intent_count"] += status["active_intent_count"]
-            current["active_for_ms"] = min_optional(current.get("active_for_ms"), status.get("active_for_ms"))
+            current["active_for_ms"] = min_optional(
+                current.get("active_for_ms"), status.get("active_for_ms")
+            )
             current["condition_active_for_ms"] = min_optional(
                 current.get("condition_active_for_ms"),
                 status.get("condition_active_for_ms"),
             )
-            current["held_for_ms"] = min_optional(current.get("held_for_ms"), status.get("held_for_ms"))
+            current["held_for_ms"] = min_optional(
+                current.get("held_for_ms"), status.get("held_for_ms")
+            )
             current["targets"] = sorted(set(current["targets"]) | set(status["targets"]))
             current["blocked_by"] = sorted(set(current["blocked_by"]) | set(status["blocked_by"]))
             current["group"] = current.get("group") or status.get("group", "")
             current["profile"] = current.get("profile") or status.get("profile", "")
             remaining = [
-                value for value in (current.get("for_remaining_ms"), status.get("for_remaining_ms"))
+                value
+                for value in (current.get("for_remaining_ms"), status.get("for_remaining_ms"))
                 if value is not None
             ]
             current["for_remaining_ms"] = min(remaining) if remaining else None
@@ -1014,10 +1238,7 @@ class Engine:
             targets.append(rule.target)
         if rule.scene:
             targets.append(rule.scene)
-        targets.extend(
-            _selector_summary(selector)
-            for selector in rule.intent_selectors
-        )
+        targets.extend(_selector_summary(selector) for selector in rule.intent_selectors)
         desired: dict[str, Any] = {}
         if rule.set:
             desired["set"] = dict(rule.set)
@@ -1096,7 +1317,9 @@ class Engine:
             ttl_info = ""
             if i.ttl_ms is not None:
                 ttl_info = f" (ttl: {i.ttl_ms}ms)"
-            lines.append(f"    - {i.rule_id or '<manual>'}: {i.authority.value}{ttl_info} — {i.reason}")
+            lines.append(
+                f"    - {i.rule_id or '<manual>'}: {i.authority.value}{ttl_info} — {i.reason}"
+            )
         return "\n".join(lines)
 
     def explain_scenes(self) -> str:

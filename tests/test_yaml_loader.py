@@ -71,6 +71,60 @@ class TestDurationParsing:
 
 
 class TestRuleSchemaValidation:
+    def test_document_target_safety_policy_is_owned_by_document(self) -> None:
+        rules = load_rules_from_string("""
+targets:
+  lock.front_door:
+    ownership: managed
+    allowed_fields: [state]
+    forbidden_automatic_states: [unlocked]
+    unavailable: skip
+    max_retries: 2
+    user_authority:
+      fields: [state]
+      states: [unlocked]
+rules:
+  - id: secure-door
+    while: {input_boolean.away: on}
+    intent: {lock.front_door: {state: locked}}
+""")
+
+        policy = rules.target_policies["lock.front_door"]
+        assert policy is not None
+        assert policy.ownership == "managed"
+        assert policy.allowed_fields == frozenset({"state"})
+        assert policy.forbidden_automatic_states == frozenset({"unlocked"})
+        assert policy.unavailable == "skip"
+        assert policy.max_retries == 2
+        assert policy.user_authority_states == frozenset({"unlocked"})
+
+    def test_policy_without_explicit_rule_remains_in_document_registry(self) -> None:
+        rules = load_rules_from_string("""
+targets:
+  light.dynamic:
+    ownership: observe_only
+rules: []
+""")
+
+        assert rules == []
+        assert rules.target_policies["light.dynamic"].ownership == "observe_only"
+
+    @pytest.mark.parametrize("field,value", [
+        ("ownership", "exclusive"),
+        ("unavailable", "retry"),
+        ("max_retries", -1),
+        ("allowed_fields", "state"),
+    ])
+    def test_document_target_safety_policy_rejects_noncanonical_values(self, field: str, value: object) -> None:
+        import yaml
+
+        contents = yaml.safe_dump({
+            "targets": {"lock.front_door": {field: value}},
+            "rules": [{"id": "secure", "when": "true", "emit": {"target": "lock.front_door", "set": {"state": "locked"}}}],
+        })
+        with pytest.raises(RuleLoadError):
+            load_rules_from_string(contents)
+
     def test_vnext_observe_intent_rule_normalizes_to_rule(self) -> None:
         rules = load_rules_from_string("""
 - id: living-room-tv

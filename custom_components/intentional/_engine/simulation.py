@@ -1,0 +1,350 @@
+"""Pure reconciliation-aware timeline simulation."""
+
+from __future__ import annotations
+
+import asyncio
+from types import SimpleNamespace
+from typing import Any
+
+from .engine import Engine
+from .projection import simulation_step, target_projection
+from .reconciliation import Reconciliation
+from .records import IntentSelector, ObserveSelector
+
+
+class FakeAdapter:
+    """In-memory Adapter used by simulation; it never touches Home Assistant."""
+
+    def __init__(self) -> None:
+        self.states: dict[str, Any] = {}
+        self.calls: list[dict[str, Any]] = []
+        self.reject: bool | set[str] = False
+
+    def get_state(self, entity_id: str) -> Any:
+        return self.states.get(entity_id)
+
+    def set_state(self, entity_id: str, value: Any) -> Any:
+        if isinstance(value, dict):
+            state = value.get("state", "unknown")
+            attributes = value.get("attributes", {})
+            user_id = value.get("user_id")
+        else:
+            state, attributes, user_id = value, {}, None
+        result = SimpleNamespace(
+            entity_id=entity_id,
+            state=str(state),
+            attributes=dict(attributes),
+            context=SimpleNamespace(id=None, parent_id=None, user_id=user_id),
+        )
+        self.states[entity_id] = result
+        return result
+
+    async def async_call(
+        self, domain: str, service: str, data: dict[str, Any], *, context: Any
+    ) -> None:
+        rejected = self.reject is True or isinstance(self.reject, set) and service in self.reject
+        self.calls.append(
+            {"domain": domain, "service": service, "data": dict(data), "rejected": rejected}
+        )
+        if rejected:
+            raise RuntimeError("simulated rejected service call")
+
+    def new_context(self) -> Any:
+        return SimpleNamespace(id="simulation", parent_id=None, user_id=None)
+
+
+class _NoOwnership:
+    def owns_state(self, state: Any) -> bool:
+        return False
+
+
+MAX_TIMELINE_STEPS = 500
+MAX_STATE_UPDATES_PER_STEP = 200
+MAX_ACTUAL_STATES_PER_STEP = 100
+MAX_TOTAL_STATE_UPDATES = 5_000
+MAX_PROJECTED_TARGETS = 200
+MAX_SELECTOR_MEMBERSHIPS = 200
+_RECONCILIATION_OPTIONS = {
+    "drift_override_ttl_ms",
+    "drift_confirmation_ms",
+    "service_failure_backoff_ms",
+    "service_failure_backoff_max_ms",
+    "drift_transition_grace_ms",
+}
+
+
+def validate_simulation_input(
+    timeline: Any,
+    options: Any,
+    *,
+    projected_rule_targets: int = 0,
+    selector_memberships: Any = None,
+) -> None:
+    """Strictly validate and bound an API simulation request."""
+    if not isinstance(timeline, list):
+        raise ValueError("`timeline` must be a list")
+    if len(timeline) > MAX_TIMELINE_STEPS:
+        raise ValueError(f"`timeline` may contain at most {MAX_TIMELINE_STEPS} steps")
+    if not isinstance(options, dict):
+        raise ValueError("`reconciliation` must be a mapping")
+    unknown = set(options) - _RECONCILIATION_OPTIONS
+    if unknown:
+        raise ValueError(f"Unknown reconciliation options: {sorted(unknown)}")
+    for name, value in options.items():
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"reconciliation.{name} must be a non-negative integer")
+    base = options.get("service_failure_backoff_ms", 1_000)
+    maximum = options.get("service_failure_backoff_max_ms")
+    if maximum is not None and maximum < base:
+        raise ValueError(
+            "reconciliation.service_failure_backoff_max_ms must be at least the base backoff"
+        )
+    if projected_rule_targets > MAX_PROJECTED_TARGETS:
+        raise ValueError(f"simulation may project at most {MAX_PROJECTED_TARGETS} Targets")
+    _validate_selector_memberships(selector_memberships)
+    total = 0
+    allowed = {
+        "advance_ms",
+        "states",
+        "actual",
+        "reject_calls",
+        "pause_rule_ids",
+        "resume_rule_ids",
+        "enabled",
+        "restart",
+    }
+    for index, step in enumerate(timeline):
+        if not isinstance(step, dict):
+            raise ValueError(f"timeline[{index}] must be a mapping")
+        unknown = set(step) - allowed
+        if unknown:
+            raise ValueError(f"timeline[{index}] has unknown fields: {sorted(unknown)}")
+        advance = step.get("advance_ms", 0)
+        if not isinstance(advance, int) or isinstance(advance, bool) or advance < 0:
+            raise ValueError(f"timeline[{index}].advance_ms must be a non-negative integer")
+        for name in ("enabled", "restart"):
+            if name in step and not isinstance(step[name], bool):
+                raise ValueError(f"timeline[{index}].{name} must be a boolean")
+        for name in ("pause_rule_ids", "resume_rule_ids"):
+            value = step.get(name, [])
+            if not isinstance(value, list) or not all(
+                isinstance(item, str) and item for item in value
+            ):
+                raise ValueError(f"timeline[{index}].{name} must be a list of Rule IDs")
+        reject = step.get("reject_calls", False)
+        if not isinstance(reject, bool) and not (
+            isinstance(reject, list) and all(isinstance(item, str) and item for item in reject)
+        ):
+            raise ValueError(
+                f"timeline[{index}].reject_calls must be a boolean or list of service names"
+            )
+        states = step.get("states", {})
+        if not isinstance(states, dict) or not all(
+            isinstance(key, str) and "." in key for key in states
+        ):
+            raise ValueError(f"timeline[{index}].states must map state-field keys to values")
+        if len(states) > MAX_STATE_UPDATES_PER_STEP:
+            raise ValueError(
+                f"timeline[{index}].states exceeds {MAX_STATE_UPDATES_PER_STEP} updates"
+            )
+        actual = step.get("actual", {})
+        if not isinstance(actual, dict) or not all(
+            isinstance(key, str) and "." in key for key in actual
+        ):
+            raise ValueError(f"timeline[{index}].actual must map Target IDs to states")
+        if len(actual) > MAX_ACTUAL_STATES_PER_STEP:
+            raise ValueError(
+                f"timeline[{index}].actual exceeds {MAX_ACTUAL_STATES_PER_STEP} Targets"
+            )
+        for target, snapshot in actual.items():
+            if isinstance(snapshot, dict):
+                if set(snapshot) - {"state", "attributes", "user_id"}:
+                    raise ValueError(f"timeline[{index}].actual[{target!r}] has unknown fields")
+                if "attributes" in snapshot and not isinstance(snapshot["attributes"], dict):
+                    raise ValueError(
+                        f"timeline[{index}].actual[{target!r}].attributes must be a mapping"
+                    )
+        total += len(states) + len(actual)
+        if total > MAX_TOTAL_STATE_UPDATES:
+            raise ValueError(f"simulation exceeds {MAX_TOTAL_STATE_UPDATES} total state updates")
+
+
+async def simulate_timeline(
+    engine: Any,
+    timeline: list[dict[str, Any]],
+    *,
+    reconciliation_options: dict[str, Any] | None = None,
+    selector_memberships: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Evaluate Rules and Reconciliation over a deterministic timeline."""
+    options = reconciliation_options or {}
+    resolver = _simulation_selector_resolver(engine, selector_memberships)
+    engine.set_selector_resolver(resolver)
+    validate_simulation_input(timeline, options, projected_rule_targets=len(engine.list_active_targets()), selector_memberships=selector_memberships)
+    adapter = FakeAdapter()
+    tracker = _NoOwnership()
+    reconciler = _new_reconciler(options)
+    steps = []
+    for index, step in enumerate(timeline):
+        if step.get("advance_ms"):
+            engine.advance_clock(step["advance_ms"])
+        if "enabled" in step:
+            engine.set_enabled(bool(step["enabled"]))
+        for rule_id in step.get("pause_rule_ids", []):
+            engine.set_rule_paused(rule_id, True)
+        for rule_id in step.get("resume_rule_ids", []):
+            engine.set_rule_paused(rule_id, False)
+        if step.get("restart"):
+            lifecycle = engine.export_lifecycle_records()
+            pending = reconciler.export_pending_withdraws(engine)
+            previous = engine
+            engine = Engine(
+                clock_fn=lambda now=previous.now_ms(): now, selector_resolver=resolver
+            )
+            engine.load_rules(previous.loaded_rules(), target_policies=previous.target_policies())
+            for key, value in previous.state.items():
+                if isinstance(key, str) and "." in key:
+                    entity_id, _separator, field = key.rpartition(".")
+                    engine.update_state(entity_id, value, field=field)
+            engine.import_lifecycle_records(lifecycle)
+            reconciler = _new_reconciler(options)
+            reconciler.restore_pending_withdraws(
+                {"pending_withdraws": pending}, now_ms=engine.now_ms()
+            )
+        adapter.reject = _rejections(step.get("reject_calls", False))
+        changed_actual = []
+        for entity_id, value in step.get("actual", {}).items():
+            changed_actual.append(adapter.set_state(entity_id, value))
+        for key, value in step.get("states", {}).items():
+            entity_id, separator, field = key.rpartition(".")
+            if separator:
+                engine.update_state(entity_id, value, field=field)
+        engine.evaluate_all()
+        events = []
+        for state in changed_actual:
+            events.extend(reconciler.on_state_delta(engine, state, tracker, engine.now_ms()))
+        _promote(engine, events)
+        tick_events = await reconciler.tick(engine, adapter, tracker, engine.now_ms())
+        _promote(engine, tick_events)
+        if any(event.kind == "drift_promoted" for event in tick_events):
+            engine.evaluate_all()
+        events.extend(tick_events)
+        record = simulation_step(engine, index=index)
+        targets = sorted(
+            set(engine.list_active_targets())
+            | set(reconciler.pending_withdraw_targets())
+            | set(adapter.states)
+        )
+        if len(targets) > MAX_PROJECTED_TARGETS:
+            raise ValueError(f"simulation may project at most {MAX_PROJECTED_TARGETS} Targets")
+        record.update(
+            {
+                "events": [
+                    {
+                        "kind": event.kind,
+                        "target": event.target,
+                        "details": _json_details(event.details),
+                    }
+                    for event in events
+                ],
+                "calls": list(adapter.calls),
+                "targets": [
+                    target_projection(
+                        engine,
+                        target,
+                        actual_state=adapter.get_state(target),
+                        reconciliation=reconciler,
+                    )
+                    for target in targets
+                ],
+                "checkpoint": "restart" if step.get("restart") else None,
+            }
+        )
+        adapter.calls.clear()
+        steps.append(record)
+        if index % 10 == 9:
+            await asyncio.sleep(0)
+    return steps
+
+
+def _new_reconciler(options: dict[str, Any]) -> Reconciliation:
+    return Reconciliation(
+        drift_override_ttl_ms=int(options.get("drift_override_ttl_ms", 300_000)),
+        drift_confirmation_ms=int(options.get("drift_confirmation_ms", 1_500)),
+        service_failure_backoff_ms=int(options.get("service_failure_backoff_ms", 1_000)),
+        drift_transition_grace_ms=int(options.get("drift_transition_grace_ms", 2_000)),
+        service_failure_backoff_max_ms=int(options["service_failure_backoff_max_ms"])
+        if "service_failure_backoff_max_ms" in options
+        else None,
+    )
+
+
+def _promote(engine: Any, events: list[Any]) -> None:
+    for event in events:
+        if event.kind == "drift_promoted":
+            engine.emit_user_intent(**event.details)
+
+
+def _rejections(value: Any) -> bool | set[str]:
+    return set(value) if isinstance(value, list) else bool(value)
+
+
+def _json_details(details: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in details.items() if key != "state"}
+
+
+def _selector_key(selector: Any) -> tuple[str | None, str | None, str | None]:
+    return (selector.domain, selector.area, selector.label)
+
+
+def _validate_selector_memberships(value: Any) -> None:
+    if value is None:
+        return
+    if not isinstance(value, list) or len(value) > MAX_SELECTOR_MEMBERSHIPS:
+        raise ValueError(f"`selectors` must be a list of at most {MAX_SELECTOR_MEMBERSHIPS} memberships")
+    total_targets = 0
+    seen = set()
+    for index, item in enumerate(value):
+        if not isinstance(item, dict) or set(item) != {"selector", "targets"}:
+            raise ValueError(f"selectors[{index}] must contain exactly `selector` and `targets`")
+        selector = item["selector"]
+        if not isinstance(selector, dict) or set(selector) - {"domain", "area", "label"} or not selector:
+            raise ValueError(f"selectors[{index}].selector must contain domain, area, and/or label")
+        if not all(isinstance(entry, str) and entry for entry in selector.values()):
+            raise ValueError(f"selectors[{index}].selector values must be non-empty strings")
+        targets = item["targets"]
+        if not isinstance(targets, list) or not all(
+            isinstance(target, str) and "." in target for target in targets
+        ):
+            raise ValueError(f"selectors[{index}].targets must be a list of Target IDs")
+        key = (selector.get("domain"), selector.get("area"), selector.get("label"))
+        if key in seen:
+            raise ValueError(f"selectors[{index}] duplicates a selector membership")
+        seen.add(key)
+        total_targets += len(set(targets))
+    if total_targets > MAX_PROJECTED_TARGETS:
+        raise ValueError(f"selector memberships may expand to at most {MAX_PROJECTED_TARGETS} Targets")
+
+
+def _simulation_selector_resolver(engine: Any, memberships: Any):
+    _validate_selector_memberships(memberships)
+    required = {
+        _selector_key(selector)
+        for rule in engine.loaded_rules()
+        for selector in (*rule.intent_selectors, *rule.observe_selectors)
+    }
+    registry = {
+        (item["selector"].get("domain"), item["selector"].get("area"), item["selector"].get("label")): tuple(sorted(set(item["targets"])))
+        for item in memberships or []
+    }
+    missing = required - set(registry)
+    if missing:
+        formatted = [dict(zip(("domain", "area", "label"), key, strict=True)) for key in sorted(missing, key=repr)]
+        formatted = [{name: value for name, value in item.items() if value is not None} for item in formatted]
+        raise ValueError(f"Missing simulated selector memberships: {formatted}")
+
+    def resolve(selector: IntentSelector | ObserveSelector) -> list[str]:
+        targets = registry[_selector_key(selector)]
+        return [target for target in targets if target not in selector.exclude]
+
+    return resolve

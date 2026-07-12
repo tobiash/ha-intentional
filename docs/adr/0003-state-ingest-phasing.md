@@ -1,5 +1,7 @@
 # State ingest lands in two phases: targeted set first, full subscriptions after selectors are solved
 
+Phase 2 is implemented. Selector membership is resolved eagerly from registry metadata and cached by selector plus registry generation. Registry changes reconcile the targeted ingest set, and stable ticks no longer scan Home Assistant's complete state machine.
+
 We collapse the dual state-sync paths (the all-entity 100ms poll at `custom_components/intentional/__init__.py:534` + the raw `state_changed` listener) into a single ingest module scoped to a relevant-entity set. We deliberately phase it: phase 1 builds the set from the three tractable inputs (rule-referenced entities via an AST collector, managed targets, active overrides) and scopes the poll to that set; selector-matched entities stay on the all-entity poll. Phase 2 adds eager selector resolution against the HA entity registry, kills the poll, and moves to `async_track_state_change_event` subscriptions.
 
 ## Considered options

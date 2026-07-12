@@ -16,11 +16,80 @@ the engine emits intents when triggers fire) without depending on HA.
 
 from __future__ import annotations
 
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from intentional.engine import Engine
 from intentional.intent import Authority
+from intentional.target_policy import TargetPolicy
 from intentional.yaml_loader import Rule
+
+
+def test_target_policy_is_replaced_independently_of_rule_lifecycle_identity() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    original = Rule(
+        id="door",
+        when="true",
+        target="lock.front",
+        set={"state": "locked"},
+    )
+    engine.load_rules([original], target_policies={"lock.front": TargetPolicy(max_retries=1)})
+    engine.evaluate_all()
+    assert engine.active_intent_count() == 1
+
+    changed = Rule(
+        id="door",
+        when="true",
+        target="lock.front",
+        set={"state": "locked"},
+    )
+    engine.load_rules([changed], target_policies={"lock.front": TargetPolicy(max_retries=2)})
+
+    assert engine.active_intent_count() == 0
+    assert engine.target_policy("lock.front").max_retries == 2
+
+
+def test_reload_fingerprint_ignores_source_location_and_preserves_runtime_memory() -> None:
+    engine = Engine()
+    original = Rule(
+        id="stable",
+        when="input_boolean.ready == 'on'",
+        target="light.desk",
+        set={"state": "on"},
+        source_file=Path("old.yaml"),
+        source_line=1,
+    )
+    engine.load_rules([original])
+    engine._condition_true_since["stable"] = 10
+    engine._active_effect_rule_ids.add("stable")
+    engine._generated_fields[("stable", "brightness_pct")] = object()
+
+    engine.load_rules([replace(original, source_file=Path("moved.yaml"), source_line=20)])
+
+    assert engine._condition_true_since == {"stable": 10}
+    assert engine._active_effect_rule_ids == {"stable"}
+    assert set(engine._generated_fields) == {("stable", "brightness_pct")}
+
+
+def test_reload_semantic_change_resets_rule_runtime_memory() -> None:
+    engine = Engine()
+    original = Rule(
+        id="changed",
+        when="input_boolean.ready == 'on'",
+        target="light.desk",
+        set={"state": "on"},
+    )
+    engine.load_rules([original])
+    engine._condition_true_since["changed"] = 10
+    engine._active_effect_rule_ids.add("changed")
+    engine._generated_fields[("changed", "brightness_pct")] = object()
+
+    engine.load_rules([replace(original, set={"state": "off"})])
+
+    assert engine._condition_true_since == {}
+    assert engine._active_effect_rule_ids == set()
+    assert engine._generated_fields == {}
 
 
 def _rule(id_: str, when: str, target: str = "light.x", **kwargs: Any) -> Rule:
@@ -80,7 +149,8 @@ class TestRuleEvaluation:
         from intentional.yaml_loader import load_rules_from_string
 
         engine = Engine(clock_fn=lambda: 1000)
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 - id: living-room-presence
   observe:
     binary_sensor.living_room_presence: on
@@ -89,7 +159,8 @@ class TestRuleEvaluation:
       state: on
     light.table:
       state: on
-'''))
+""")
+        )
         engine.update_state("binary_sensor.living_room_presence", "on")
         engine.evaluate_all()
 
@@ -107,14 +178,16 @@ class TestRuleEvaluation:
         from intentional.yaml_loader import load_rules_from_string
 
         engine = Engine(clock_fn=lambda: 1000)
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 - id: living-room-presence
   observe:
     binary_sensor.living_room_presence: on
   intent:
     light.sofa:
       state: on
-'''))
+""")
+        )
 
         world = engine.world_model()
 
@@ -125,7 +198,8 @@ class TestRuleEvaluation:
         from intentional.yaml_loader import load_rules_from_string
 
         engine = Engine(clock_fn=lambda: 1000)
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 targets:
   light.living_room:
     default:
@@ -138,7 +212,8 @@ rules:
       light.living_room:
         state: on
         brightness_pct: 80
-'''))
+""")
+        )
         engine.evaluate_all()
 
         assert engine.resolve("light.living_room").value == {"state": "off"}
@@ -155,7 +230,8 @@ rules:
         from intentional.yaml_loader import load_rules_from_string
 
         engine = Engine(clock_fn=lambda: 1000)
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 - id: living-room-presence
   observe:
     binary_sensor.living_room_presence: on
@@ -163,7 +239,8 @@ rules:
     light.sofa:
       state: on
       linger: 2m
-'''))
+""")
+        )
         engine.update_state("binary_sensor.living_room_presence", "on")
         engine.evaluate_all()
         engine.update_state("binary_sensor.living_room_presence", "off")
@@ -179,14 +256,16 @@ rules:
         from intentional.yaml_loader import load_rules_from_string
 
         engine = Engine(clock_fn=lambda: 1000)
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 - id: office-light
   observe:
     binary_sensor.office_occupancy: on
   intent:
     light.office:
       state: on
-'''))
+""")
+        )
         engine.update_state("binary_sensor.office_occupancy", "on")
         engine.evaluate_all()
         assert engine.resolve("light.office") is not None
@@ -213,7 +292,8 @@ rules:
         from intentional.yaml_loader import load_rules_from_string
 
         engine = Engine(clock_fn=lambda: 1000)
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 - id: monitor-backlight-random
   observe:
     binary_sensor.office_occupancy: on
@@ -227,7 +307,8 @@ rules:
             - [255, 120, 40]
             - [120, 40, 255]
           every: 2m
-'''))
+""")
+        )
 
         engine.update_state("binary_sensor.office_occupancy", "on")
         engine.evaluate_all()
@@ -242,7 +323,8 @@ rules:
         from intentional.yaml_loader import load_rules_from_string
 
         engine = Engine(clock_fn=lambda: 1000)
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 - id: monitor-backlight-random
   observe:
     binary_sensor.office_occupancy: on
@@ -256,7 +338,8 @@ rules:
             - [255, 120, 40]
             - [120, 40, 255]
           every: 2m
-'''))
+""")
+        )
         engine.update_state("binary_sensor.office_occupancy", "on")
         engine.evaluate_all()
         first = engine.resolve("light.monitor_backlight").value["rgb_color"]
@@ -276,7 +359,8 @@ rules:
         from intentional.yaml_loader import load_rules_from_string
 
         engine = Engine(clock_fn=lambda: 1000)
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 - id: monitor-backlight-random
   observe:
     binary_sensor.office_occupancy: on
@@ -290,7 +374,8 @@ rules:
             - [120, 40, 255]
           every: 2m
           transition: 7s
-'''))
+""")
+        )
 
         engine.update_state("binary_sensor.office_occupancy", "on")
         engine.evaluate_all()
@@ -301,7 +386,7 @@ rules:
     def test_generated_sample_field_survives_lifecycle_restore(self) -> None:
         from intentional.yaml_loader import load_rules_from_string
 
-        rules = load_rules_from_string('''
+        rules = load_rules_from_string("""
 - id: monitor-backlight-random
   observe:
     binary_sensor.office_occupancy: on
@@ -314,7 +399,7 @@ rules:
             - [255, 120, 40]
             - [120, 40, 255]
           every: 2m
-''')
+""")
         engine = Engine(clock_fn=lambda: 1000)
         engine.load_rules(rules)
         engine.update_state("binary_sensor.office_occupancy", "on")
@@ -349,14 +434,16 @@ rules:
             return ["light.floor_lamp", "light.table_lamp"]
 
         engine = Engine(clock_fn=lambda: 1000, selector_resolver=resolve_selector)
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 - id: living-room-off
   intent:
     select:
       - domain: light
         area: living_room
         state: off
-'''))
+""")
+        )
 
         engine.evaluate_all()
 
@@ -371,13 +458,15 @@ rules:
             clock_fn=lambda: 1000,
             selector_resolver=lambda _selector: list(selected),
         )
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 - id: living-room-off
   intent:
     select:
       - domain: light
         state: off
-'''))
+""")
+        )
         engine.evaluate_all()
         selected[:] = ["light.table_lamp"]
 
@@ -394,7 +483,8 @@ rules:
             clock_fn=lambda: now,
             selector_resolver=lambda _selector: ["light.floor_lamp"],
         )
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 - id: base-brightness
   intent:
     light.floor_lamp:
@@ -410,7 +500,8 @@ rules:
         label: dimmable
         brightness_pct: {offset: 10, multiply: 0.5}
         ttl: 10s
-'''))
+""")
+        )
 
         engine.evaluate_all()
 
@@ -454,7 +545,8 @@ rules:
             clock_fn=lambda: now,
             selector_resolver=lambda _selector: list(selected),
         )
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 - id: living-room-off
   while:
     input_boolean.active: on
@@ -466,7 +558,8 @@ rules:
     light.table_lamp:
       state: off
       ttl: 10s
-'''))
+""")
+        )
         engine.update_state("input_boolean.active", "on")
         engine.evaluate_all()
         targets = ("light.table_lamp", "light.floor_lamp", "light.ceiling")
@@ -491,8 +584,7 @@ rules:
         assert active["light.ceiling"].created_at_ms == now
         records = engine.export_lifecycle_records()
         generated = {
-            record["target"]: record["selector_generated"]
-            for record in records["intents"]
+            record["target"]: record["selector_generated"] for record in records["intents"]
         }
         assert generated == {
             "light.table_lamp": False,
@@ -509,7 +601,8 @@ rules:
             return ["binary_sensor.kitchen_motion", "binary_sensor.hall_motion"]
 
         engine = Engine(clock_fn=lambda: 1000, selector_resolver=resolve_selector)
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 - id: selected-motion
   observe:
     select:
@@ -521,7 +614,8 @@ rules:
   intent:
     light.hallway:
       state: on
-'''))
+""")
+        )
 
         engine.update_state("binary_sensor.kitchen_motion", "off")
         engine.update_state("binary_sensor.hall_motion", "on")
@@ -536,7 +630,8 @@ rules:
             clock_fn=lambda: 1000,
             selector_resolver=lambda _selector: ["binary_sensor.a", "binary_sensor.b"],
         )
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 - id: all-motion
   observe:
     select:
@@ -548,7 +643,8 @@ rules:
   intent:
     light.hallway:
       state: on
-'''))
+""")
+        )
 
         engine.update_state("binary_sensor.a", "on")
         engine.update_state("binary_sensor.b", "off")
@@ -566,7 +662,8 @@ rules:
             clock_fn=lambda: 1000,
             selector_resolver=lambda _selector: ["binary_sensor.a", "binary_sensor.b"],
         )
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 - id: no-motion
   observe:
     select:
@@ -578,7 +675,8 @@ rules:
   intent:
     light.hallway:
       state: off
-'''))
+""")
+        )
 
         engine.update_state("binary_sensor.a", "off")
         engine.update_state("binary_sensor.b", "off")
@@ -596,7 +694,8 @@ rules:
             clock_fn=lambda: 1000,
             selector_resolver=lambda _selector: ["binary_sensor.a", "binary_sensor.b"],
         )
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 - id: selected-motion
   observe:
     select:
@@ -608,7 +707,8 @@ rules:
   intent:
     light.hallway:
       state: on
-'''))
+""")
+        )
         engine.update_state("binary_sensor.a", "off")
         engine.update_state("binary_sensor.b", "on")
         engine.evaluate_all()
@@ -619,10 +719,25 @@ rules:
             {
                 "rule_id": "selected-motion",
                 "mode": "any",
-                "selector": {"domain": "binary_sensor", "area": None, "label": "motion", "exclude": []},
+                "selector": {
+                    "domain": "binary_sensor",
+                    "area": None,
+                    "label": "motion",
+                    "exclude": [],
+                },
                 "matches": [
-                    {"target": "binary_sensor.a", "matched": False, "actual": "off", "expected": "on"},
-                    {"target": "binary_sensor.b", "matched": True, "actual": "on", "expected": "on"},
+                    {
+                        "target": "binary_sensor.a",
+                        "matched": False,
+                        "actual": "off",
+                        "expected": "on",
+                    },
+                    {
+                        "target": "binary_sensor.b",
+                        "matched": True,
+                        "actual": "on",
+                        "expected": "on",
+                    },
                 ],
             }
         ]
@@ -631,7 +746,8 @@ rules:
         from intentional.yaml_loader import load_rules_from_string
 
         engine = Engine(clock_fn=lambda: 1000)
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 - id: tv-linger
   observe:
     media_player.tv: on
@@ -639,7 +755,8 @@ rules:
     light.living_room:
       linger: 2m
       brightness_pct: 30
-'''))
+""")
+        )
 
         engine.update_state("media_player.tv", "on")
         engine.evaluate_all()
@@ -657,7 +774,8 @@ rules:
         from intentional.yaml_loader import load_rules_from_string
 
         engine = Engine(clock_fn=lambda: 1000)
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 - id: evening-occupied
   while:
     binary_sensor.living_room_presence: on
@@ -669,7 +787,8 @@ rules:
   intent:
     light.living_room:
       brightness_pct: 70
-'''))
+""")
+        )
 
         engine.update_state("binary_sensor.living_room_presence", "on")
         engine.update_state("input_boolean.evening_mode", "on")
@@ -696,7 +815,8 @@ rules:
         from intentional.yaml_loader import load_rules_from_string
 
         engine = Engine(clock_fn=lambda: 1000)
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 - id: living-room-dark
   group: living-room-lighting
   profile: stable-presence
@@ -709,7 +829,8 @@ rules:
   intent:
     light.living_room:
       state: on
-'''))
+""")
+        )
 
         engine.update_state("binary_sensor.living_room_presence", "on")
         engine.evaluate_all()
@@ -737,7 +858,8 @@ rules:
         from intentional.yaml_loader import load_rules_from_string
 
         engine = Engine(clock_fn=lambda: 1000)
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 - id: living-room-dark
   group: living-room-lighting
   profile: stable-presence
@@ -750,7 +872,8 @@ rules:
   intent:
     light.living_room:
       state: on
-'''))
+""")
+        )
 
         assert engine.list_rule_statuses()["living-room-dark"]["phase"] == "idle"
 
@@ -777,7 +900,7 @@ rules:
     def test_lifecycle_records_restore_edge_ttl_intent(self) -> None:
         from intentional.yaml_loader import load_rules_from_string
 
-        rules = load_rules_from_string('''
+        rules = load_rules_from_string("""
 - id: door-pulse
   observe:
     changed:
@@ -787,7 +910,7 @@ rules:
     light.entry:
       ttl: 5s
       state: on
-''')
+""")
         engine = Engine(clock_fn=lambda: 1000)
         engine.load_rules(rules)
         engine.update_state("binary_sensor.front_door", True, field="changed")
@@ -829,7 +952,7 @@ rules:
     def test_lifecycle_records_restore_lingering_intent(self) -> None:
         from intentional.yaml_loader import load_rules_from_string
 
-        rules = load_rules_from_string('''
+        rules = load_rules_from_string("""
 - id: tv-linger
   observe:
     media_player.tv: on
@@ -837,7 +960,7 @@ rules:
     light.living_room:
       linger: 2m
       brightness_pct: 30
-''')
+""")
         engine = Engine(clock_fn=lambda: 1000)
         engine.load_rules(rules)
         engine.update_state("media_player.tv", "on")
@@ -860,7 +983,8 @@ rules:
         from intentional.yaml_loader import load_rules_from_string
 
         engine = Engine(clock_fn=lambda: 1000)
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 - id: door-left-open-notify
   observe:
     binary_sensor.front_door: on
@@ -868,29 +992,28 @@ rules:
     service: notify.mobile_app_phone
     data:
       message: Door open
-'''))
+""")
+        )
 
         engine.update_state("binary_sensor.front_door", "on")
         engine.evaluate_all()
-        assert [effect.service for _rule_id, effect in engine.drain_pending_effects()] == [
-            "mobile_app_phone"
-        ]
+        first = engine.due_effects()
+        assert [effect.service for effect in first] == ["mobile_app_phone"]
 
         engine.evaluate_all()
-        assert engine.drain_pending_effects() == []
+        assert len(engine.due_effects()) == 1
+        assert engine.acknowledge_effect(first[0].activation_id, first[0].effect_index)
 
         engine.update_state("binary_sensor.front_door", "off")
         engine.evaluate_all()
         engine.update_state("binary_sensor.front_door", "on")
         engine.evaluate_all()
-        assert [effect.service for _rule_id, effect in engine.drain_pending_effects()] == [
-            "mobile_app_phone"
-        ]
+        assert [effect.service for effect in engine.due_effects()] == ["mobile_app_phone"]
 
     def test_lifecycle_records_restore_active_effect_dedupe_state(self) -> None:
         from intentional.yaml_loader import load_rules_from_string
 
-        rules = load_rules_from_string('''
+        rules = load_rules_from_string("""
 - id: door-left-open-notify
   observe:
     binary_sensor.front_door: on
@@ -898,39 +1021,168 @@ rules:
     service: notify.mobile_app_phone
     data:
       message: Door open
-''')
+""")
         engine = Engine(clock_fn=lambda: 1000)
         engine.load_rules(rules)
         engine.update_state("binary_sensor.front_door", "on")
         engine.evaluate_all()
-        assert engine.drain_pending_effects()
+        pending = engine.due_effects()
+        assert pending
+        engine.acknowledge_effect(pending[0].activation_id, pending[0].effect_index)
 
         restored = Engine(clock_fn=lambda: 2000)
         restored.load_rules(rules)
         restored.import_lifecycle_records(engine.export_lifecycle_records())
         restored.update_state("binary_sensor.front_door", "on")
         restored.evaluate_all()
-        assert restored.drain_pending_effects() == []
+        assert restored.due_effects() == []
 
         restored.update_state("binary_sensor.front_door", "off")
         restored.evaluate_all()
         restored.update_state("binary_sensor.front_door", "on")
         restored.evaluate_all()
-        assert [effect.service for _rule_id, effect in restored.drain_pending_effects()] == [
-            "mobile_app_phone"
-        ]
+        assert [effect.service for effect in restored.due_effects()] == ["mobile_app_phone"]
+
+    def test_effect_outbox_restores_crash_boundaries_and_retries(self) -> None:
+        from intentional.yaml_loader import load_rules_from_string
+
+        now = [1_000]
+        rules = load_rules_from_string("""
+- id: notify
+  observe: {binary_sensor.door: on}
+  effect:
+    - service: notify.first
+      data: {message: first}
+    - service: notify.second
+      data: {message: second}
+""")
+        engine = Engine(clock_fn=lambda: now[0])
+        engine.load_rules(rules)
+        engine.update_state("binary_sensor.door", "on")
+        engine.evaluate_all()
+
+        queued = engine.due_effects()
+        assert len(queued) == 2
+        assert len({record.activation_id for record in queued}) == 1
+        assert [record.effect_index for record in queued] == [0, 1]
+
+        attempted = engine.begin_effect_attempt(queued[0].activation_id, 0)
+        assert attempted is not None
+        assert attempted.attempts == 1
+        crashed = Engine(clock_fn=lambda: now[0])
+        crashed.load_rules(rules)
+        crashed.import_lifecycle_records(engine.export_lifecycle_records())
+        assert [record.effect_index for record in crashed.due_effects()] == [1]
+
+        now[0] += 1_000
+        assert [record.effect_index for record in crashed.due_effects()] == [0, 1]
+        retried = crashed.begin_effect_attempt(queued[0].activation_id, 0)
+        assert retried is not None
+        assert retried.attempts == 2
+        assert retried.next_retry_ms == now[0] + 2_000
+
+    def test_queued_effect_survives_rule_deactivation_and_definition_change(self) -> None:
+        from intentional.yaml_loader import load_rules_from_string
+
+        engine = Engine(clock_fn=lambda: 1_000)
+        original = load_rules_from_string("""
+- id: notify
+  observe: {binary_sensor.door: on}
+  effect: {service: notify.phone, data: {message: old}}
+""")
+        engine.load_rules(original)
+        engine.update_state("binary_sensor.door", "on")
+        engine.evaluate_all()
+        old = engine.due_effects()[0]
+
+        engine.update_state("binary_sensor.door", "off")
+        engine.evaluate_all()
+        changed = load_rules_from_string("""
+- id: notify
+  observe: {binary_sensor.door: on}
+  effect: {service: notify.phone, data: {message: new}}
+""")
+        engine.load_rules(changed)
+        assert engine.due_effects() == [old]
+
+        engine.update_state("binary_sensor.door", "on")
+        engine.evaluate_all()
+        queued = engine.due_effects()
+        assert [record.data["message"] for record in queued] == ["old", "new"]
+        assert queued[0].rule_fingerprint != queued[1].rule_fingerprint
+
+    def test_acknowledged_effects_compact_and_restart_keeps_activation_suppressed(self) -> None:
+        from intentional.yaml_loader import load_rules_from_string
+
+        rules = load_rules_from_string("""
+- id: notify
+  observe: {binary_sensor.door: on}
+  effect: {service: notify.phone}
+""")
+        engine = Engine(clock_fn=lambda: 1_000)
+        engine.load_rules(rules)
+        for _ in range(250):
+            engine.update_state("binary_sensor.door", "on")
+            engine.evaluate_all()
+            record = engine.due_effects()[0]
+            assert engine.acknowledge_effect(record.activation_id, record.effect_index)
+            engine.update_state("binary_sensor.door", "off")
+            engine.evaluate_all()
+
+        engine.update_state("binary_sensor.door", "on")
+        engine.evaluate_all()
+        record = engine.due_effects()[0]
+        engine.acknowledge_effect(record.activation_id, record.effect_index)
+        assert engine.list_effect_outbox() == []
+
+        restarted = Engine(clock_fn=lambda: 1_000)
+        restarted.load_rules(rules)
+        restarted.import_lifecycle_records(engine.export_lifecycle_records())
+        restarted.update_state("binary_sensor.door", "on")
+        restarted.evaluate_all()
+        assert restarted.due_effects() == []
+
+    def test_effect_failures_dead_letter_at_bounded_retry_ceiling(self) -> None:
+        from intentional.engine import EFFECT_MAX_ATTEMPTS
+        from intentional.yaml_loader import load_rules_from_string
+
+        now = [0]
+        engine = Engine(clock_fn=lambda: now[0])
+        engine.load_rules(
+            load_rules_from_string("""
+- id: notify
+  observe: {binary_sensor.door: on}
+  effect: {service: notify.phone}
+""")
+        )
+        engine.update_state("binary_sensor.door", "on")
+        engine.evaluate_all()
+        record = engine.due_effects()[0]
+        for attempt in range(EFFECT_MAX_ATTEMPTS):
+            attempted = engine.begin_effect_attempt(record.activation_id, record.effect_index)
+            assert attempted is not None
+            terminal = engine.fail_effect(record.activation_id, record.effect_index, "x" * 1000)
+            assert terminal is (attempt == EFFECT_MAX_ATTEMPTS - 1)
+            now[0] = attempted.next_retry_ms
+
+        assert engine.due_effects() == []
+        dead = engine.list_effect_outbox()[0]
+        assert dead.dead_lettered_at_ms is not None
+        assert len(dead.last_error or "") == 500
 
     def test_world_model_exposes_desired_records_and_conditions(self) -> None:
         engine = Engine(clock_fn=lambda: 1000)
-        engine.load_rules([
-            _rule(
-                "desk-on",
-                'input_boolean.work == "on"',
-                target="light.desk",
-                set={"state": "on", "brightness_pct": 60},
-                reason="Work mode",
-            )
-        ])
+        engine.load_rules(
+            [
+                _rule(
+                    "desk-on",
+                    'input_boolean.work == "on"',
+                    target="light.desk",
+                    set={"state": "on", "brightness_pct": 60},
+                    reason="Work mode",
+                )
+            ]
+        )
         engine.update_state("input_boolean.work", "on")
         engine.evaluate_all()
 
@@ -952,14 +1204,16 @@ rules:
         from intentional.yaml_loader import load_rules_from_string
 
         engine = Engine(clock_fn=lambda: 1000)
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 - id: adaptive-brightness
   observe:
     input_boolean.work: on
   intent:
     light.desk:
       brightness_pct: "{{ states('input_number.target_brightness') | int }}"
-'''))
+""")
+        )
         engine.update_state("input_boolean.work", "on")
         engine.update_state("input_number.target_brightness", "42")
         engine.evaluate_all()
@@ -970,7 +1224,8 @@ rules:
         from intentional.yaml_loader import load_rules_from_string
 
         engine = Engine(clock_fn=lambda: 1000)
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 - id: notify-temp
   observe:
     binary_sensor.temp_alarm: on
@@ -978,13 +1233,14 @@ rules:
     service: notify.mobile_app_phone
     data:
       message: "Temp is {{ states('sensor.room_temp') }}"
-'''))
+""")
+        )
         engine.update_state("binary_sensor.temp_alarm", "on")
         engine.update_state("sensor.room_temp", "24")
         engine.evaluate_all()
 
-        effects = engine.drain_pending_effects()
-        assert effects[0][1].data == {"message": "Temp is 24"}
+        effects = engine.due_effects()
+        assert effects[0].data == {"message": "Temp is 24"}
 
     def test_evaluate_emits_intent_when_trigger_fires(self) -> None:
         engine = Engine()
@@ -1135,29 +1391,29 @@ rules:
 
     def test_blocks_suppresses_firing_rule(self) -> None:
         engine = Engine()
-        engine.load_rules([
-            _rule(
-                "movie-mode",
-                'input_boolean.movie == "on"',
-                target="light.room",
-                set={"brightness_pct": 20},
-                blocks=("ambient",),
-            ),
-            _rule(
-                "ambient",
-                'sensor.dark == "on"',
-                target="light.room",
-                set={"brightness_pct": 80},
-            ),
-        ])
+        engine.load_rules(
+            [
+                _rule(
+                    "movie-mode",
+                    'input_boolean.movie == "on"',
+                    target="light.room",
+                    set={"brightness_pct": 20},
+                    blocks=("ambient",),
+                ),
+                _rule(
+                    "ambient",
+                    'sensor.dark == "on"',
+                    target="light.room",
+                    set={"brightness_pct": 80},
+                ),
+            ]
+        )
         engine.update_state("input_boolean.movie", "on")
         engine.update_state("sensor.dark", "on")
 
         engine.evaluate_all()
 
-        active_rule_ids = {
-            intent.rule_id for intent in engine.list_active_intents("light.room")
-        }
+        active_rule_ids = {intent.rule_id for intent in engine.list_active_intents("light.room")}
         assert active_rule_ids == {"movie-mode"}
         resolved = engine.resolve("light.room")
         assert resolved is not None
@@ -1167,7 +1423,8 @@ rules:
         from intentional.yaml_loader import load_rules_from_string
 
         engine = Engine()
-        engine.load_rules(load_rules_from_string('''
+        engine.load_rules(
+            load_rules_from_string("""
 - id: movie-mode
   while:
     input_boolean.active: on
@@ -1196,7 +1453,8 @@ rules:
   intent:
     light.manual:
       state: on
-'''))
+""")
+        )
         engine.update_state("input_boolean.active", "on")
 
         engine.evaluate_all()
@@ -1208,33 +1466,35 @@ rules:
 
     def test_blocks_withdraws_previously_active_intent(self) -> None:
         engine = Engine()
-        engine.load_rules([
-            _rule(
-                "movie-mode",
-                'input_boolean.movie == "on"',
-                target="light.room",
-                set={"brightness_pct": 20},
-                blocks=("ambient",),
-            ),
-            _rule(
-                "ambient",
-                'sensor.dark == "on"',
-                target="light.room",
-                set={"brightness_pct": 80},
-            ),
-        ])
+        engine.load_rules(
+            [
+                _rule(
+                    "movie-mode",
+                    'input_boolean.movie == "on"',
+                    target="light.room",
+                    set={"brightness_pct": 20},
+                    blocks=("ambient",),
+                ),
+                _rule(
+                    "ambient",
+                    'sensor.dark == "on"',
+                    target="light.room",
+                    set={"brightness_pct": 80},
+                ),
+            ]
+        )
         engine.update_state("sensor.dark", "on")
         engine.evaluate_all()
-        assert {
-            intent.rule_id for intent in engine.list_active_intents("light.room")
-        } == {"ambient"}
+        assert {intent.rule_id for intent in engine.list_active_intents("light.room")} == {
+            "ambient"
+        }
 
         engine.update_state("input_boolean.movie", "on")
         engine.evaluate_all()
 
-        assert {
-            intent.rule_id for intent in engine.list_active_intents("light.room")
-        } == {"movie-mode"}
+        assert {intent.rule_id for intent in engine.list_active_intents("light.room")} == {
+            "movie-mode"
+        }
 
 
 # ── Resolution ───────────────────────────────────────────────────────
@@ -1243,10 +1503,12 @@ rules:
 class TestResolution:
     def test_resolve_combines_active_intents(self) -> None:
         engine = Engine()
-        engine.load_rules([
-            _rule("dark", 'sensor.x.state == "on"', set={"brightness_pct": 80}),
-            _rule("focus", 'sensor.y.state == "on"', cap={"brightness_pct": 40}),
-        ])
+        engine.load_rules(
+            [
+                _rule("dark", 'sensor.x.state == "on"', set={"brightness_pct": 80}),
+                _rule("focus", 'sensor.y.state == "on"', cap={"brightness_pct": 40}),
+            ]
+        )
         engine.update_state("sensor.x", "on")
         engine.update_state("sensor.y", "on")
         engine.evaluate_all()
@@ -1261,20 +1523,22 @@ class TestResolution:
 class TestStructuredDiagnostics:
     def test_explain_target_reports_compositor_winner_not_insertion_order(self) -> None:
         engine = Engine(clock_fn=lambda: 1000)
-        engine.load_rules([
-            _rule(
-                "low-priority",
-                'sensor.low == "on"',
-                set={"brightness_pct": 20},
-                confidence=0.2,
-            ),
-            _rule(
-                "high-priority",
-                'sensor.high == "on"',
-                set={"brightness_pct": 80},
-                confidence=0.9,
-            ),
-        ])
+        engine.load_rules(
+            [
+                _rule(
+                    "low-priority",
+                    'sensor.low == "on"',
+                    set={"brightness_pct": 20},
+                    confidence=0.2,
+                ),
+                _rule(
+                    "high-priority",
+                    'sensor.high == "on"',
+                    set={"brightness_pct": 80},
+                    confidence=0.9,
+                ),
+            ]
+        )
         engine.update_state("sensor.low", "on")
         engine.update_state("sensor.high", "on")
         engine.evaluate_all()
@@ -1288,21 +1552,23 @@ class TestStructuredDiagnostics:
 
     def test_explain_target_reports_blocked_firing_rules(self) -> None:
         engine = Engine(clock_fn=lambda: 0)
-        engine.load_rules([
-            _rule(
-                "movie-mode",
-                'input_boolean.movie == "on"',
-                target="light.room",
-                set={"brightness_pct": 20},
-                blocks=("ambient",),
-            ),
-            _rule(
-                "ambient",
-                'sensor.dark == "on"',
-                target="light.room",
-                set={"brightness_pct": 80},
-            ),
-        ])
+        engine.load_rules(
+            [
+                _rule(
+                    "movie-mode",
+                    'input_boolean.movie == "on"',
+                    target="light.room",
+                    set={"brightness_pct": 20},
+                    blocks=("ambient",),
+                ),
+                _rule(
+                    "ambient",
+                    'sensor.dark == "on"',
+                    target="light.room",
+                    set={"brightness_pct": 80},
+                ),
+            ]
+        )
         engine.update_state("input_boolean.movie", "on")
         engine.update_state("sensor.dark", "on")
         engine.evaluate_all()
@@ -1341,15 +1607,17 @@ class TestStructuredDiagnostics:
 
     def test_explain_target_reports_for_remaining(self) -> None:
         engine = Engine(clock_fn=lambda: 0)
-        engine.load_rules([
-            _rule(
-                "motion-held",
-                'binary_sensor.motion == "on"',
-                target="light.hall",
-                for_ms=5_000,
-                set={"state": "on"},
-            )
-        ])
+        engine.load_rules(
+            [
+                _rule(
+                    "motion-held",
+                    'binary_sensor.motion == "on"',
+                    target="light.hall",
+                    for_ms=5_000,
+                    set={"state": "on"},
+                )
+            ]
+        )
         engine.update_state("binary_sensor.motion", "on")
         engine.evaluate_all()
         engine.advance_clock(2_000)
@@ -1375,17 +1643,19 @@ class TestStructuredDiagnostics:
 
     def test_list_rule_statuses_reports_rule_entity_attributes(self) -> None:
         engine = Engine()
-        engine.load_rules([
-            _rule(
-                "office-light",
-                'binary_sensor.office == "on"',
-                target="light.office",
-                set={"state": "on", "brightness_pct": 40},
-                confidence=0.6,
-                reason="Office occupied",
-                labels=("office", "light"),
-            )
-        ])
+        engine.load_rules(
+            [
+                _rule(
+                    "office-light",
+                    'binary_sensor.office == "on"',
+                    target="light.office",
+                    set={"state": "on", "brightness_pct": 40},
+                    confidence=0.6,
+                    reason="Office occupied",
+                    labels=("office", "light"),
+                )
+            ]
+        )
         engine.update_state("binary_sensor.office", "on")
         engine.evaluate_all()
 
@@ -1523,24 +1793,26 @@ class TestManualIntents:
 
         assert engine.clear_user_intents("light.x") == 1
 
-        assert [
-            intent.authority for intent in engine.list_active_intents("light.x")
-        ] == [Authority.AUTOMATION]
+        assert [intent.authority for intent in engine.list_active_intents("light.x")] == [
+            Authority.AUTOMATION
+        ]
         assert len(engine.list_active_intents("light.y")) == 1
 
         assert engine.clear_user_intents() == 1
 
-        assert [
-            intent.authority for intent in engine.list_active_intents("light.x")
-        ] == [Authority.AUTOMATION]
+        assert [intent.authority for intent in engine.list_active_intents("light.x")] == [
+            Authority.AUTOMATION
+        ]
         assert engine.list_active_intents("light.y") == []
 
     def test_paused_rule_does_not_emit_or_keep_intents(self) -> None:
         engine = Engine()
-        engine.load_rules([
-            _rule("living-room", 'binary_sensor.presence.state == "on"'),
-            _rule("kitchen", 'binary_sensor.presence.state == "on"', target="light.kitchen"),
-        ])
+        engine.load_rules(
+            [
+                _rule("living-room", 'binary_sensor.presence.state == "on"'),
+                _rule("kitchen", 'binary_sensor.presence.state == "on"', target="light.kitchen"),
+            ]
+        )
         engine.update_state("binary_sensor.presence", "on")
         engine.evaluate_all()
 
@@ -1587,14 +1859,16 @@ class TestRuleReload:
         engine.evaluate_all()
         assert engine.resolve("light.old").value == {}
 
-        engine.load_rules([
-            _rule(
-                "r1",
-                'sensor.x.state == "on"',
-                target="light.new",
-                set={"brightness_pct": 40},
-            )
-        ])
+        engine.load_rules(
+            [
+                _rule(
+                    "r1",
+                    'sensor.x.state == "on"',
+                    target="light.new",
+                    set={"brightness_pct": 40},
+                )
+            ]
+        )
         engine.evaluate_all()
 
         assert engine.resolve("light.old") is None
@@ -1607,10 +1881,12 @@ class TestRuleReload:
 class TestDiagnostics:
     def test_public_counts_and_target_lists_exclude_expired_intents(self) -> None:
         engine = Engine(clock_fn=lambda: 1000)
-        engine.load_rules([
-            _rule("light-rule", 'sensor.x.state == "on"', target="light.x"),
-            _rule("switch-rule", 'sensor.y.state == "on"', target="switch.y"),
-        ])
+        engine.load_rules(
+            [
+                _rule("light-rule", 'sensor.x.state == "on"', target="light.x"),
+                _rule("switch-rule", 'sensor.y.state == "on"', target="switch.y"),
+            ]
+        )
         engine.update_state("sensor.x", "on")
         engine.evaluate_all()
         engine.emit_user_intent(
@@ -1634,10 +1910,16 @@ class TestDiagnostics:
 
     def test_explain_returns_reason_chain(self) -> None:
         engine = Engine()
-        engine.load_rules([
-            _rule("dark", 'sensor.x.state == "on"', reason="Dark outside",
-                  set={"brightness_pct": 80}),
-        ])
+        engine.load_rules(
+            [
+                _rule(
+                    "dark",
+                    'sensor.x.state == "on"',
+                    reason="Dark outside",
+                    set={"brightness_pct": 80},
+                ),
+            ]
+        )
         engine.update_state("sensor.x", "on")
         engine.evaluate_all()
         explanation = engine.explain("light.x")
@@ -1648,6 +1930,7 @@ class TestDiagnostics:
 
 def _make_pulse_anim(repeat: int = 1) -> Any:
     from intentional.animation import AnimationSpec
+
     return AnimationSpec(
         kind="pulse",
         parameter="brightness_pct",

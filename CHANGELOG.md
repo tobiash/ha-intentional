@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-07-11
+
+### Added
+- **Target safety policies** control ownership, allowed fields, forbidden automatic states, unavailable behavior, retry ceilings, and user-Authority requirements.
+- **Reconciliation-aware simulation** models selectors, actual state, Service plans, Drift, Manual overrides, transitions, retries, pause state, and restart checkpoints.
+- **Deep Target explanations** expose field provenance, modifiers, actual-state matching, ownership, pending Drift, retry state, transitions, and revealed winners.
+- **Document policy preflight** detects unsafe durable domains, suppression errors and cycles, contradictory constraints, and ineffective modifiers before Rules are stored.
+- **Durable Effect outbox** provides at-least-once delivery, bounded retries, restart recovery, dead-letter diagnostics, and bounded lifecycle storage.
+
+### Changed
+- **Intentional entity publication** is change-driven and entity-scoped, eliminating the 10 Hz HA event and entity-write fan-out during stable operation.
+- **Lifecycle persistence** is mutation-driven, coalesced, failure-backed-off, and capped at one write per second during continuously generated values.
+- **Tick runtime mutation ordering** now serializes Rule, listener, service, reload, selector, and unload changes while rejecting stale reconciliation commits.
+- **Rule mutations and reloads** validate completely and commit transactionally with optimistic concurrency and exact rollback on persistence or application failure.
+- **Selector ingest** is registry-aware, supports state-only entities, reacts to registry membership changes, and no longer requires periodic whole-install state sweeps.
+- **Reconciliation retries** use bounded Target-level exponential backoff, resumable multi-call progress, safety-plan supersession, and transition-only diagnostics.
+- **Inspection APIs** redact sensitive desired-state fields, while raw documents, history, diagnostics, simulation, and replay require administrator access.
+
+### Fixed
+- Stable ticks now produce no Intentional HA events, entity writes, Recorder state changes, Store writes, registry mutations, service calls, Effect calls, or diagnostic growth.
+- Reload preserves managed Target ownership until removed or changed Rules complete normal withdrawal.
+- Selector-generated Targets now receive the same Target safety policy enforcement as explicit Targets.
+
 ## [0.7.37] - 2026-07-11
 
 ### Fixed

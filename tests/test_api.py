@@ -39,6 +39,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.dependencies import require_test_dependency
+
 # conftest.py handles sys.path setup (adds both src/ and custom_components/).
 # This is here for documentation only — if you run this test in isolation
 # (without conftest), the imports below will fail.
@@ -48,8 +50,8 @@ INTEGRATION_DIR = REPO_ROOT / "custom_components" / "intentional"
 # The api module imports homeassistant, which is a heavy dep. Skip
 # the API unit tests if it's not available; the integration tests
 # in test_integration.py cover the same code paths with a real HA.
-pytest.importorskip("homeassistant", reason="homeassistant not installed")
-pytest.importorskip("aiohttp", reason="aiohttp not installed")
+require_test_dependency("homeassistant", reason="homeassistant not installed")
+require_test_dependency("aiohttp", reason="aiohttp not installed")
 
 
 # ── View class structure ───────────────────────────────────────────
@@ -182,14 +184,16 @@ async def test_explain_view_reports_rule_firing_status() -> None:
     from custom_components.intentional.const import CONF_RULE_DIR, DOMAIN
 
     engine = Engine(clock_fn=lambda: 1000)
-    engine.load_rules([
-        Rule(
-            id="rule-on",
-            when="input_boolean.test == 'on'",
-            target="light.test",
-            set={"state": "on"},
-        )
-    ])
+    engine.load_rules(
+        [
+            Rule(
+                id="rule-on",
+                when="input_boolean.test == 'on'",
+                target="light.test",
+                set={"state": "on"},
+            )
+        ]
+    )
     engine.update_state("input_boolean.test", "on")
     engine.evaluate_all()
 
@@ -251,9 +255,7 @@ def test_all_views_require_auth() -> None:
         IntentionalExplainView,
         IntentionalDiagnosticsView,
     ]:
-        assert view_cls.requires_auth is True, (
-            f"{view_cls.__name__} must require auth"
-        )
+        assert view_cls.requires_auth is True, f"{view_cls.__name__} must require auth"
 
 
 def test_rule_document_response_has_no_file_semantics() -> None:
@@ -286,14 +288,14 @@ def test_validation_warns_for_presence_light_without_stability() -> None:
     from custom_components.intentional.api import _validation_warnings
 
     hass = SimpleNamespace(states=SimpleNamespace(get=lambda _target: None))
-    rules = load_rules_from_string('''
+    rules = load_rules_from_string("""
 - id: flaky-presence
   observe:
     binary_sensor.living_room_presence: on
   intent:
     light.sofa:
       state: on
-''')
+""")
 
     warnings = _validation_warnings(hass, rules)
 
@@ -311,7 +313,7 @@ def test_validation_accepts_hold_until_as_presence_stability() -> None:
     from custom_components.intentional.api import _validation_warnings
 
     hass = SimpleNamespace(states=SimpleNamespace(get=lambda _target: None))
-    rules = load_rules_from_string('''
+    rules = load_rules_from_string("""
 - id: stable-presence
   while:
     binary_sensor.living_room_presence: on
@@ -322,7 +324,7 @@ def test_validation_accepts_hold_until_as_presence_stability() -> None:
   intent:
     light.sofa:
       state: on
-''')
+""")
 
     assert _validation_warnings(hass, rules) == []
 
@@ -332,8 +334,10 @@ def test_validation_warns_for_unsupported_light_capabilities() -> None:
     from custom_components.intentional.api import _validation_warnings
 
     state = SimpleNamespace(attributes={"supported_color_modes": ["brightness"]})
-    hass = SimpleNamespace(states=SimpleNamespace(get=lambda target: state if target == "light.sofa" else None))
-    rules = load_rules_from_string('''
+    hass = SimpleNamespace(
+        states=SimpleNamespace(get=lambda target: state if target == "light.sofa" else None)
+    )
+    rules = load_rules_from_string("""
 - id: sofa-color
   observe:
     input_boolean.test: on
@@ -342,7 +346,7 @@ def test_validation_warns_for_unsupported_light_capabilities() -> None:
       state: on
       color_temp_k: 2700
       rgb_color: [255, 120, 80]
-''')
+""")
 
     warnings = _validation_warnings(hass, rules)
 
@@ -399,8 +403,7 @@ def test_register_api_registers_history_before_filename_route() -> None:
 
     registered = []
     hass = SimpleNamespace(
-        data={},
-        http=SimpleNamespace(register_view=lambda view: registered.append(view.url))
+        data={}, http=SimpleNamespace(register_view=lambda view: registered.append(view.url))
     )
 
     register_api(hass)
@@ -455,6 +458,64 @@ async def test_mutating_endpoints_require_admin(
 
     with pytest.raises(Unauthorized):
         await method(request, *args)
+
+
+@pytest.mark.parametrize(
+    ("view_name", "args"),
+    [
+        ("IntentionalRuleDocumentView", ()),
+        ("IntentionalRuleView", ("rules.yaml",)),
+        ("IntentionalRuleHistoryView", ()),
+        ("IntentionalRuleHistoryGenerationView", ("generation",)),
+        ("IntentionalDiagnosticsView", ()),
+    ],
+)
+async def test_raw_inspection_endpoints_require_admin(
+    view_name: str, args: tuple[str, ...]
+) -> None:
+    from homeassistant.exceptions import Unauthorized
+
+    from custom_components.intentional import api
+
+    request = {"hass_user": SimpleNamespace(is_admin=False)}
+    with pytest.raises(Unauthorized):
+        await getattr(api, view_name)().get(request, *args)
+
+
+async def test_explain_and_state_responses_never_serialize_desired_secret() -> None:
+    from custom_components.intentional._engine import Engine
+    from custom_components.intentional._engine.yaml_loader import Rule
+    from custom_components.intentional.api import IntentionalExplainView, IntentionalStateView
+    from custom_components.intentional.const import CONF_RULE_DIR, DOMAIN
+
+    secret = "api-secret-9815"
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(
+        [
+            Rule(
+                id="secure",
+                when="true",
+                target="lock.front",
+                set={"state": "unlocked", "code": secret},
+            )
+        ]
+    )
+    engine.evaluate_all()
+    entry = SimpleNamespace(entry_id="entry-1", data={CONF_RULE_DIR: "/tmp/rules"})
+    hass = SimpleNamespace(
+        config_entries=SimpleNamespace(async_entries=lambda domain: [entry]),
+        data={DOMAIN: {"entry-1": engine}},
+        states=SimpleNamespace(get=lambda _target: None),
+    )
+    request = SimpleNamespace(app={"hass": hass})
+
+    responses = [
+        await IntentionalExplainView().get(request, "lock.front"),
+        await IntentionalStateView().get(request),
+    ]
+
+    assert all(secret not in response.body.decode() for response in responses)
+    assert all("[redacted]" in response.body.decode() for response in responses)
 
 
 async def test_json_object_endpoints_reject_non_object_json() -> None:
@@ -538,6 +599,5 @@ def test_all_urls_under_api_intentional() -> None:
         IntentionalExplainView,
     ]:
         assert view_cls.url.startswith("/api/intentional/"), (
-            f"{view_cls.__name__}.url = {view_cls.url!r} "
-            f"is not under /api/intentional/"
+            f"{view_cls.__name__}.url = {view_cls.url!r} is not under /api/intentional/"
         )

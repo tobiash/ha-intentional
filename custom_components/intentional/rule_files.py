@@ -27,6 +27,7 @@ import yaml
 
 from ._engine import RuleLoadError
 from ._engine.yaml_loader import load_rules_from_string
+from .document_validation import load_and_preflight_document
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -46,11 +47,13 @@ class RuleWorkspace:
             files = []
             for entry in sorted(self.path.glob("*.yaml")):
                 if entry.is_file():
-                    files.append({
-                        "filename": entry.name,
-                        "size": str(entry.stat().st_size),
-                        "generation": sha256(entry.read_bytes()).hexdigest(),
-                    })
+                    files.append(
+                        {
+                            "filename": entry.name,
+                            "size": str(entry.stat().st_size),
+                            "generation": sha256(entry.read_bytes()).hexdigest(),
+                        }
+                    )
             return files
         except OSError as err:
             _LOGGER.warning("Could not list rule files in %s: %s", self.rule_dir, err)
@@ -77,7 +80,7 @@ class RuleWorkspace:
         if not filename.endswith(".yaml") and not filename.endswith(".yml"):
             return "Filename must end in .yaml or .yml"
         try:
-            load_rules_from_string(contents)
+            load_and_preflight_document(self._candidate_document(filename, contents))
         except RuleLoadError as err:
             return f"Rule validation failed: {err}"
         try:
@@ -87,6 +90,18 @@ class RuleWorkspace:
         except OSError as err:
             return f"Could not write file: {err}"
 
+    def _candidate_document(self, filename: str, contents: str) -> str:
+        """Return the complete workspace with one candidate file replaced."""
+        documents = []
+        for info in self.list_files():
+            current_name = info["filename"]
+            current = contents if current_name == filename else self.read(current_name)
+            if current is not None:
+                documents.append(current)
+        if not any(info["filename"] == filename for info in self.list_files()):
+            documents.append(contents)
+        return "\n---\n".join(documents)
+
     def delete(self, filename: str) -> str | None:
         """Delete one safe rule file."""
         if not _is_safe_filename(filename):
@@ -95,6 +110,16 @@ class RuleWorkspace:
             path = self.path / filename
             if not path.exists():
                 return None
+            remaining = [
+                contents
+                for info in self.list_files()
+                if info["filename"] != filename
+                if (contents := self.read(info["filename"])) is not None
+            ]
+            try:
+                load_and_preflight_document("\n---\n".join(remaining) or "[]\n")
+            except RuleLoadError as err:
+                return f"Rule validation failed: {err}"
             path.unlink()
             return None
         except OSError as err:
@@ -140,7 +165,14 @@ class RuleWorkspace:
             generation = self.generation(filename)
             if generation != expected_generation:
                 return {"error": "generation_mismatch"}
-            err = self.write(filename, contents)
+            candidate = _replace_authored_rule_in_yaml(current, rule_id, contents)
+            if "error" in candidate:
+                return candidate
+            try:
+                load_and_preflight_document(candidate["contents"])
+            except RuleLoadError as err:
+                return {"error": "validation_failed", "message": str(err)}
+            err = self.write(filename, candidate["contents"])
             if err:
                 return {"error": "write_failed", "message": err}
             return {"filename": filename, "generation": self.generation(filename)}
@@ -163,12 +195,14 @@ class RuleWorkspace:
                 rule_id = rule.get("id")
                 if not isinstance(rule_id, str):
                     continue
-                rules.append({
-                    "id": rule_id,
-                    "filename": filename,
-                    "enabled": rule.get("enabled", True) is not False,
-                    "generation": file_info.get("generation"),
-                })
+                rules.append(
+                    {
+                        "id": rule_id,
+                        "filename": filename,
+                        "enabled": rule.get("enabled", True) is not False,
+                        "generation": file_info.get("generation"),
+                    }
+                )
         return rules
 
     def set_rule_enabled(self, rule_id: str, enabled: bool) -> dict[str, Any]:
@@ -221,9 +255,7 @@ def _is_safe_filename(filename: str) -> bool:
     helper later.
     """
     return bool(filename) and (
-        not filename.startswith(".")
-        and "/" not in filename
-        and "\\" not in filename
+        not filename.startswith(".") and "/" not in filename and "\\" not in filename
     )
 
 
@@ -337,9 +369,7 @@ def _set_rule_enabled_in_yaml(contents: str, rule_id: str, enabled: bool) -> str
     if not changed:
         return None
     return "---\n".join(
-        yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
-        for doc in docs
-        if doc is not None
+        yaml.safe_dump(doc, sort_keys=False, allow_unicode=True) for doc in docs if doc is not None
     )
 
 
@@ -380,12 +410,10 @@ def _replace_authored_rule_in_yaml(
         return {"error": "not_found"}
 
     updated = "---\n".join(
-        yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
-        for doc in docs
-        if doc is not None
+        yaml.safe_dump(doc, sort_keys=False, allow_unicode=True) for doc in docs if doc is not None
     )
     try:
-        load_rules_from_string(updated)
+        load_and_preflight_document(updated)
     except RuleLoadError as err:
         return {"error": "validation_failed", "message": str(err)}
     return {"contents": updated}

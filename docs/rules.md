@@ -501,6 +501,8 @@ intent:
 
 Generated values persist across restarts and avoid immediate repeats when alternatives exist. They are intended for slow ambient behavior, not fast effects.
 
+Lifecycle persistence is rate-limited to at most once per second during continuous generated or animated changes. Each write captures the latest state at that boundary; a crash can therefore lose up to roughly one second of recent lifecycle progress, after which generation resumes from the last recoverable snapshot. Explicit shutdown and Effect durability boundaries still force a write.
+
 Supported strategy fields:
 
 - `kind: sample`: choose one value from `from`.
@@ -567,7 +569,11 @@ Effects are service calls, not desired state:
       message: Doorbell
 ```
 
-Effects run once per observation activation. Use effects for notifications, announcements, one-shot scripts, or other side effects that cannot be represented as durable target state.
+Effects are durably enqueued once per observation activation and delivered to Home Assistant at least once. Delivery uses a blocking service call and is acknowledged after Home Assistant accepts it. Failed calls retry with bounded exponential backoff, and unacknowledged Effects resume after restart. Once queued, the rendered payload survives Rule deactivation, deletion, and definition changes.
+
+At-least-once delivery permits duplicates. In particular, Home Assistant may accept a call immediately before Intentional crashes or fails to persist its acknowledgement; the restored outbox then retries that Effect. Effect service handlers should be idempotent when duplicates would be harmful.
+
+The durable queue record is the pre-delivery crash boundary. Attempt counters are coalesced with the forced post-delivery acknowledgement rather than forced before every call: a crash before acceptance replays the queued Effect, while a crash after acceptance but before acknowledgement may duplicate it. This avoids a second Store write for successful delivery of an already-durable Effect without weakening the at-least-once obligation.
 
 ## Templates
 
@@ -703,3 +709,25 @@ Duration fields accept:
 - `1h30m15s`
 
 An integer is interpreted as milliseconds.
+# Target Safety Policies
+
+The optional document-level `targets` mapping declares how Reconciliation may control each Target. Omitting a declaration preserves existing behavior. Safety-sensitive domains (`lock`, `alarm_control_panel`, `cover`, `valve`, and `climate`) produce a preflight warning when undeclared, but legacy Rules remain valid.
+
+```yaml
+targets:
+  lock.front_door:
+    ownership: managed
+    allowed_fields: [state]
+    forbidden_automatic_states: [unlocked]
+    unavailable: skip
+    max_retries: 2
+    user_authority:
+      fields: [state]
+      states: [unlocked]
+```
+
+`ownership` is `managed`, `opportunistic`, or `observe_only`. Managed Targets participate in dispatch, Drift promotion, and withdrawal. Opportunistic Targets may receive Service plans but are neither withdrawn nor promoted from Drift. Observe-only Targets never receive Service plans.
+
+`allowed_fields` is an allowlist for resolved fields. `forbidden_automatic_states` blocks the listed `state` values unless their winning provider has `user` Authority. `user_authority.fields` and `user_authority.states` impose the same Authority requirement selectively. `unavailable: skip` prevents calls while the Target is missing, `unknown`, or `unavailable`; `allow` preserves legacy dispatch. `max_retries` limits retries after the initial failed Service plan (`0` disables retries).
+
+Policy denials are reported as `service_denied_target_policy` Reconciliation events and are included in Target explanations, previews, and simulation steps.

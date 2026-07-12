@@ -13,12 +13,14 @@ from .generation import (
     generated_field_state_to_record,
 )
 from .intent import Authority, Intent
+from .records import EffectOutboxRecord
 
 
 def export_lifecycle_records(
     intents: list[Intent],
     active_effect_rule_ids: set[str],
     generated_fields: dict[tuple[str, str], GeneratedFieldState] | None = None,
+    effect_outbox: list[EffectOutboxRecord] | None = None,
     *,
     now_ms: int,
 ) -> dict[str, Any]:
@@ -29,7 +31,11 @@ def export_lifecycle_records(
             intent_to_lifecycle_record(intent)
             for intent in intents
             if not intent.is_expired(into_the_future_ms=now_ms)
-            and (intent.ttl_ms is not None or intent.ignore_when or intent.authority is Authority.USER)
+            and (
+                intent.ttl_ms is not None
+                or intent.ignore_when
+                or intent.authority is Authority.USER
+            )
         ],
         "active_effect_rule_ids": sorted(active_effect_rule_ids),
         "generated_fields": [
@@ -37,6 +43,7 @@ def export_lifecycle_records(
             for (rule_id, field_name), state in sorted((generated_fields or {}).items())
             if state.next_due_ms > now_ms
         ],
+        "effect_outbox": [asdict(record) for record in (effect_outbox or [])],
     }
 
 
@@ -58,7 +65,8 @@ def restore_lifecycle_intents(
             continue
         restored.append(intent)
     active_effect_rule_ids = {
-        rule_id for rule_id in records.get("active_effect_rule_ids", [])
+        rule_id
+        for rule_id in records.get("active_effect_rule_ids", [])
         if rule_id in known_rule_ids
     }
     generated_fields: dict[tuple[str, str], GeneratedFieldState] = {}
@@ -71,6 +79,44 @@ def restore_lifecycle_intents(
         if rule_id in known_rule_ids and state.next_due_ms > now_ms:
             generated_fields[key] = state
     return restored, active_effect_rule_ids, generated_fields
+
+
+def restore_effect_outbox(records: dict[str, Any] | None) -> list[EffectOutboxRecord]:
+    """Restore valid Effect records, including entries from removed Rules."""
+    if not records:
+        return []
+    restored: list[EffectOutboxRecord] = []
+    for raw in records.get("effect_outbox", []):
+        if not isinstance(raw, dict):
+            continue
+        try:
+            record = EffectOutboxRecord(
+                activation_id=str(raw["activation_id"]),
+                rule_id=str(raw["rule_id"]),
+                rule_fingerprint=str(raw["rule_fingerprint"]),
+                effect_index=int(raw["effect_index"]),
+                domain=str(raw["domain"]),
+                service=str(raw["service"]),
+                target=dict(raw.get("target") or {}),
+                data=dict(raw.get("data") or {}),
+                attempts=max(0, int(raw.get("attempts") or 0)),
+                next_retry_ms=max(0, int(raw.get("next_retry_ms") or 0)),
+                acknowledged_at_ms=_optional_int(raw.get("acknowledged_at_ms")),
+                dead_lettered_at_ms=_optional_int(raw.get("dead_lettered_at_ms")),
+                last_error=str(raw["last_error"])[:500]
+                if raw.get("last_error") is not None
+                else None,
+            )
+            if record.acknowledged_at_ms is None:
+                restored.append(record)
+        except (KeyError, TypeError, ValueError):
+            continue
+    live = [record for record in restored if record.dead_lettered_at_ms is None]
+    dead = sorted(
+        (record for record in restored if record.dead_lettered_at_ms is not None),
+        key=lambda record: record.dead_lettered_at_ms or 0,
+    )[-100:]
+    return live + dead
 
 
 def intent_to_lifecycle_record(intent: Intent) -> dict[str, Any]:
@@ -97,10 +143,7 @@ def intent_to_lifecycle_record(intent: Intent) -> dict[str, Any]:
         "selector_generated": intent.selector_generated,
         "created_at_ms": intent.created_at_ms,
         "animation": asdict(intent.animation) if intent.animation is not None else None,
-        "generators": {
-            field_name: asdict(spec)
-            for field_name, spec in intent.generators.items()
-        },
+        "generators": {field_name: asdict(spec) for field_name, spec in intent.generators.items()},
     }
 
 

@@ -7,6 +7,7 @@ while detaching the source of truth from files on disk.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any
@@ -17,6 +18,7 @@ from homeassistant.helpers.storage import Store
 
 from ._engine import RuleLoadError
 from ._engine.yaml_loader import Rule, load_rules_from_string
+from .document_validation import load_and_preflight_document
 from .rule_files import (
     _raw_rule_items_from_yaml,
     _read_rule_dir_as_yaml,
@@ -49,24 +51,37 @@ class StorageRuleStore:
         if isinstance(data, dict) and isinstance(data.get("contents"), str):
             self._contents = data["contents"]
             self._history = _valid_history(data.get("history"))
-            return load_rules_from_string(self._contents)
+            rules, _findings = load_and_preflight_document(self._contents)
+            return rules
 
         imported = await self._hass.async_add_executor_job(
             _read_rule_dir_as_yaml,
             rule_dir,
         )
         self._contents = imported or "[]\n"
-        load_rules_from_string(self._contents)
+        load_and_preflight_document(self._contents)
         await self.async_save()
-        return load_rules_from_string(self._contents)
+        rules, _findings = load_and_preflight_document(self._contents)
+        return rules
 
     async def async_save(self) -> None:
         """Persist current YAML contents."""
-        await self._store.async_save({
-            "contents": self._contents,
-            "generation": self.generation,
-            "history": self._history,
-        })
+        await self._store.async_save(
+            {
+                "contents": self._contents,
+                "generation": self.generation,
+                "history": self._history,
+            }
+        )
+
+    def snapshot(self) -> tuple[str, list[dict[str, Any]]]:
+        """Capture the exact durable document state for transaction rollback."""
+        return self._contents, deepcopy(self._history)
+
+    async def async_restore(self, snapshot: tuple[str, list[dict[str, Any]]]) -> None:
+        """Restore and persist a previously captured document state."""
+        self._contents, self._history = snapshot
+        await self.async_save()
 
     @property
     def contents(self) -> str:
@@ -80,12 +95,14 @@ class StorageRuleStore:
 
     def list_files(self) -> list[dict[str, Any]]:
         """Return a synthetic YAML file descriptor for compatibility."""
-        return [{
-            "filename": RULE_STORE_FILENAME,
-            "size": str(len(self._contents.encode("utf-8"))),
-            "generation": self.generation,
-            "source": "storage",
-        }]
+        return [
+            {
+                "filename": RULE_STORE_FILENAME,
+                "size": str(len(self._contents.encode("utf-8"))),
+                "generation": self.generation,
+                "source": "storage",
+            }
+        ]
 
     def read(self, filename: str) -> str | None:
         """Read the synthetic rule file."""
@@ -98,9 +115,11 @@ class StorageRuleStore:
         if filename != RULE_STORE_FILENAME:
             return f"Storage-backed rules must be written as {RULE_STORE_FILENAME}"
         try:
-            load_rules_from_string(contents)
+            load_and_preflight_document(contents)
         except RuleLoadError as err:
             return f"Rule validation failed: {err}"
+        if contents == self._contents:
+            return None
         self._record_history("write")
         self._contents = contents
         await self.async_save()
@@ -110,6 +129,8 @@ class StorageRuleStore:
         """Clear all stored rules through the synthetic file API."""
         if filename != RULE_STORE_FILENAME:
             return f"Storage-backed rules must be deleted as {RULE_STORE_FILENAME}"
+        if not load_rules_from_string(self._contents):
+            return None
         self._record_history("delete")
         self._contents = "[]\n"
         await self.async_save()
@@ -138,6 +159,12 @@ class StorageRuleStore:
         updated = _replace_authored_rule_in_yaml(self._contents, rule_id, contents)
         if "error" in updated:
             return updated
+        try:
+            load_and_preflight_document(updated["contents"])
+        except RuleLoadError as err:
+            return {"error": "validation_failed", "message": str(err)}
+        if updated["contents"] == self._contents:
+            return {"filename": RULE_STORE_FILENAME, "generation": self.generation}
         self._record_history(f"patch:{rule_id}")
         self._contents = updated["contents"]
         await self.async_save()
@@ -166,12 +193,18 @@ class StorageRuleStore:
         """Restore a previous rule document generation."""
         if self.generation != expected_generation:
             return {"error": "generation_mismatch"}
+        if generation == self.generation:
+            return {
+                "filename": RULE_STORE_FILENAME,
+                "generation": self.generation,
+                "restored_generation": generation,
+            }
         record = self.read_history(generation)
         if record is None:
             return {"error": "history_not_found"}
         contents = record["contents"]
         try:
-            load_rules_from_string(contents)
+            load_and_preflight_document(contents)
         except RuleLoadError as err:
             return {"error": "validation_failed", "message": str(err)}
         self._record_history(f"rollback:{generation}")
@@ -195,24 +228,49 @@ class StorageRuleStore:
             rule_id = rule.get("id")
             if not isinstance(rule_id, str):
                 continue
-            rules.append({
-                "id": rule_id,
-                "filename": RULE_STORE_FILENAME,
-                "enabled": rule.get("enabled", True) is not False,
-                "generation": self.generation,
-                "source": "storage",
-            })
+            rules.append(
+                {
+                    "id": rule_id,
+                    "filename": RULE_STORE_FILENAME,
+                    "enabled": rule.get("enabled", True) is not False,
+                    "generation": self.generation,
+                    "source": "storage",
+                }
+            )
         return rules
 
     async def async_set_rule_enabled(self, rule_id: str, enabled: bool) -> dict[str, Any]:
         """Persist one rule's enabled flag."""
+        authored_rule = next(
+            (
+                rule
+                for rule in _raw_rule_items_from_yaml(self._contents)
+                if rule.get("id") == rule_id
+            ),
+            None,
+        )
+        if (
+            authored_rule is not None
+            and (authored_rule.get("enabled", True) is not False) == enabled
+        ):
+            return {
+                "filename": RULE_STORE_FILENAME,
+                "generation": self.generation,
+                "enabled": enabled,
+            }
         updated = _set_rule_enabled_in_yaml(self._contents, rule_id, enabled)
         if updated is None:
             return {"error": "not_found"}
         try:
-            load_rules_from_string(updated)
+            load_and_preflight_document(updated)
         except RuleLoadError as err:
             return {"error": "validation_failed", "message": str(err)}
+        if updated == self._contents:
+            return {
+                "filename": RULE_STORE_FILENAME,
+                "generation": self.generation,
+                "enabled": enabled,
+            }
         self._record_history(f"enabled:{rule_id}:{enabled}")
         self._contents = updated
         await self.async_save()
@@ -223,8 +281,9 @@ class StorageRuleStore:
         }
 
     async def async_rules(self) -> list[Rule]:
-        """Return parsed stored rules."""
-        return load_rules_from_string(self._contents)
+        """Return completely validated stored rules."""
+        rules, _findings = load_and_preflight_document(self._contents)
+        return rules
 
     def _record_history(self, reason: str) -> None:
         """Record the current document before replacing it."""
@@ -274,11 +333,13 @@ def _valid_history(raw: Any) -> list[dict[str, Any]]:
         generation = item.get("generation")
         if not isinstance(contents, str) or not isinstance(generation, str):
             continue
-        history.append({
-            **item,
-            "generation": generation,
-            "contents": contents,
-        })
+        history.append(
+            {
+                **item,
+                "generation": generation,
+                "contents": contents,
+            }
+        )
     return history[:RULE_HISTORY_LIMIT]
 
 
