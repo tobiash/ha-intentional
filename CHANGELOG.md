@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.2] - 2026-07-12
+
+### Fixed
+- **Home Assistant 2026.7 semantic fixtures** register config entries before device association and force attribute-only device-class state updates.
+
 ## [0.9.1] - 2026-07-12
 
 ### Fixed

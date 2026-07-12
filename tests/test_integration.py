@@ -218,7 +218,11 @@ def _write_semantic_rule(rule_dir: Path, observation: str) -> None:
 async def _setup_and_wait(
     hass: HomeAssistant, config_entry: MockConfigEntry
 ) -> object:
-    config_entry.add_to_hass(hass)
+    if not any(
+        entry.entry_id == config_entry.entry_id
+        for entry in hass.config_entries.async_entries(DOMAIN)
+    ):
+        config_entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(config_entry.entry_id)
     await asyncio.sleep(0.15)
     await hass.async_block_till_done()
@@ -494,6 +498,7 @@ async def test_semantic_selector_prefers_entity_area_and_filters_device(
     areas = ar.async_get(hass)
     device_area = areas.async_create("Device Area")
     entity_area = areas.async_create("Entity Area")
+    config_entry.add_to_hass(hass)
     device_registry = dr.async_get(hass)
     device = device_registry.async_get_or_create(
         config_entry_id=config_entry.entry_id,
@@ -550,7 +555,12 @@ async def test_registered_state_device_class_change_removal_and_recreation(
     engine = await _setup_and_wait(hass, config_entry)
     assert engine.resolve("light.semantic_result") is None
 
-    hass.states.async_set(entity.entity_id, "on", {"device_class": "motion"})
+    hass.states.async_set(
+        entity.entity_id,
+        "on",
+        {"device_class": "motion"},
+        force_update=True,
+    )
     for _ in range(20):
         await hass.async_block_till_done()
         if engine.resolve("light.semantic_result") is not None:
@@ -566,7 +576,12 @@ async def test_registered_state_device_class_change_removal_and_recreation(
         await asyncio.sleep(0.05)
     assert engine.resolve("light.semantic_result") is None
 
-    hass.states.async_set(entity.entity_id, "on", {"device_class": "motion"})
+    hass.states.async_set(
+        entity.entity_id,
+        "on",
+        {"device_class": "motion"},
+        force_update=True,
+    )
     for _ in range(20):
         await hass.async_block_till_done()
         if engine.resolve("light.semantic_result") is not None:
