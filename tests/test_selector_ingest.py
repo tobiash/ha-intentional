@@ -132,9 +132,9 @@ def test_domain_selector_includes_state_only_entities() -> None:
         "light.state_only",
     }
 
-    change = planner.state_changed("light.late", exists=True)
+    change = planner.state_changed("light.late", exists=True, device_class_changed=False)
     assert change.added == {"light.late"}
-    change = planner.state_changed("light.state_only", exists=False)
+    change = planner.state_changed("light.state_only", exists=False, device_class_changed=False)
     assert change.removed == {"light.state_only"}
 
 
@@ -195,7 +195,7 @@ def test_existing_state_only_device_class_change_recomputes_semantic_membership(
     assert planner.relevant == set()
 
     metadata["binary_sensor.dynamic"]["device_class"] = "motion"
-    assert planner.state_changed("binary_sensor.dynamic", exists=True).added == {
+    assert planner.state_changed("binary_sensor.dynamic", exists=True, device_class_changed=True).added == {
         "binary_sensor.dynamic"
     }
 
@@ -222,17 +222,19 @@ def test_registered_live_device_class_fallback_changes_membership_and_cache() ->
     scans = calls
     assert planner.relevant == set()
 
-    assert planner.state_changed("binary_sensor.dynamic", exists=True).added == frozenset()
+    assert planner.state_changed("binary_sensor.dynamic", exists=True, device_class_changed=False).added == frozenset()
     assert calls == scans
 
     metadata["binary_sensor.dynamic"]["device_class"] = "motion"
-    assert planner.state_changed("binary_sensor.dynamic", exists=True).added == {
+    assert planner.state_changed("binary_sensor.dynamic", exists=True, device_class_changed=False).added == frozenset()
+    assert calls == scans
+    assert planner.state_changed("binary_sensor.dynamic", exists=True, device_class_changed=True).added == {
         "binary_sensor.dynamic"
     }
     assert calls == scans + 1
 
     metadata["binary_sensor.dynamic"].pop("device_class")
-    assert planner.state_changed("binary_sensor.dynamic", exists=True).removed == {
+    assert planner.state_changed("binary_sensor.dynamic", exists=True, device_class_changed=True).removed == {
         "binary_sensor.dynamic"
     }
     assert calls == scans + 2
@@ -253,12 +255,12 @@ def test_registered_live_device_class_fallback_invalidates_on_removal_and_recrea
     assert planner.relevant == {"binary_sensor.dynamic"}
 
     metadata.clear()
-    assert planner.state_changed("binary_sensor.dynamic", exists=False).removed == {
+    assert planner.state_changed("binary_sensor.dynamic", exists=False, device_class_changed=True).removed == {
         "binary_sensor.dynamic"
     }
 
     metadata["binary_sensor.dynamic"] = {"device_class": "motion"}
-    assert planner.state_changed("binary_sensor.dynamic", exists=True).added == {
+    assert planner.state_changed("binary_sensor.dynamic", exists=True, device_class_changed=True).added == {
         "binary_sensor.dynamic"
     }
 
@@ -288,18 +290,45 @@ def test_ordinary_state_changes_do_not_invalidate_semantic_membership_cache() ->
     generation = planner.generation
     scans = calls
 
-    planner.state_changed("binary_sensor.registered", exists=True)
-    planner.state_changed("sensor.unrelated", exists=True)
-    planner.state_changed("binary_sensor.state_only", exists=True)
-    planner.state_changed("switch.unrelated_arrival", exists=True)
-    planner.state_changed("switch.unrelated_arrival", exists=False)
+    planner.state_changed("binary_sensor.registered", exists=True, device_class_changed=False)
+    planner.state_changed("sensor.unrelated", exists=True, device_class_changed=False)
+    planner.state_changed("binary_sensor.state_only", exists=True, device_class_changed=False)
+    planner.state_changed("switch.unrelated_arrival", exists=True, device_class_changed=False)
+    planner.state_changed("switch.unrelated_arrival", exists=False, device_class_changed=False)
 
     assert planner.generation == generation
     assert calls == scans
 
     metadata["binary_sensor.state_only"]["device_class"] = "motion"
-    assert planner.state_changed("binary_sensor.state_only", exists=True).added == {
+    assert planner.state_changed("binary_sensor.state_only", exists=True, device_class_changed=True).added == {
         "binary_sensor.state_only"
     }
     assert planner.generation == generation + 1
+    assert calls == scans + 1
+
+
+def test_authoritative_device_class_change_recomputes_after_cache_saw_new_metadata() -> None:
+    calls = 0
+    entry = SimpleNamespace(
+        entity_id="binary_sensor.dynamic", area_id=None, device_id=None,
+        labels=set(), device_class=None, original_device_class=None,
+    )
+    metadata = {"binary_sensor.dynamic": {"device_class": "door"}}
+
+    def get_entries():
+        nonlocal calls
+        calls += 1
+        return [entry]
+
+    planner = SelectorMembershipPlanner(
+        get_entries, state_entity_ids=lambda: metadata, state_metadata=metadata.get
+    )
+    planner.configure([rule(selector(domain="binary_sensor", purpose="motion"))], ())
+    metadata["binary_sensor.dynamic"]["device_class"] = "motion"
+
+    assert planner.registry_changed().added == {"binary_sensor.dynamic"}
+    scans = calls
+    assert planner.state_changed(
+        "binary_sensor.dynamic", exists=True, device_class_changed=True
+    ).added == frozenset()
     assert calls == scans + 1

@@ -45,7 +45,6 @@ class SelectorMembershipPlanner:
         self._state_metadata = state_metadata or (lambda _entity_id: None)
         self._registry_entity_ids: set[str] = set()
         self._live_device_class_candidates: set[str] = set()
-        self._state_device_classes: dict[str, Any] = {}
         self._generation = 0
         self._cache: dict[tuple[SelectorKey, int], frozenset[str]] = {}
         self._selectors: tuple[SelectorKey, ...] = ()
@@ -96,7 +95,6 @@ class SelectorMembershipPlanner:
         ))
         self._static = frozenset(static)
         self._live_device_class_candidates.clear()
-        self._state_device_classes.clear()
         return self._recompute()
 
     def registry_changed(self) -> MembershipChange:
@@ -104,33 +102,29 @@ class SelectorMembershipPlanner:
         self._generation += 1
         self._cache.clear()
         self._live_device_class_candidates.clear()
-        self._state_device_classes.clear()
         return self._recompute()
 
-    def state_changed(self, entity_id: str, *, exists: bool) -> MembershipChange:
+    def state_changed(
+        self, entity_id: str, *, exists: bool, device_class_changed: bool
+    ) -> MembershipChange:
         """Update state-machine membership for entities without registry metadata."""
         if exists == (entity_id in self._state_entities):
-            if not exists or entity_id not in self._live_device_class_candidates:
-                return MembershipChange(frozenset(), frozenset())
-            device_class = (self._state_metadata(entity_id) or {}).get("device_class")
-            if self._state_device_classes.get(entity_id) == device_class:
-                return MembershipChange(frozenset(), frozenset())
-            self._state_device_classes[entity_id] = device_class
-            self._generation += 1
-            self._cache.clear()
-            return self._recompute()
+            if device_class_changed and any(selector.purpose for selector in self._selectors):
+                self._generation += 1
+                self._cache.clear()
+                self._live_device_class_candidates.clear()
+                return self._recompute()
+            return MembershipChange(frozenset(), frozenset())
         live_device_class_candidate = entity_id in self._live_device_class_candidates
         if exists:
             self._state_entities.add(entity_id)
         else:
             self._state_entities.discard(entity_id)
-            self._state_device_classes.pop(entity_id, None)
         if not live_device_class_candidate and not self._is_state_only_selector_candidate(entity_id):
             return MembershipChange(frozenset(), frozenset())
         self._generation += 1
         self._cache.clear()
         self._live_device_class_candidates.clear()
-        self._state_device_classes.clear()
         return self._recompute()
 
     def update_owned(self, entity_ids: Iterable[str]) -> MembershipChange:
@@ -178,10 +172,6 @@ class SelectorMembershipPlanner:
         for entity_id in self._state_entities - registry_ids:
             if _state_only_entity_matches_without_purpose(entity_id, selector):
                 self._live_device_class_candidates.add(entity_id)
-        for entity_id in self._live_device_class_candidates:
-            self._state_device_classes[entity_id] = (
-                self._state_metadata(entity_id) or {}
-            ).get("device_class")
 
 
 def _selector_key(selector: Any) -> SelectorKey:

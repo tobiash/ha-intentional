@@ -902,10 +902,24 @@ def _on_ha_state_change_factory(
                 else (old_state.entity_id if old_state is not None else None)
             )
             if selector_planner is not None and entity_id is not None:
+                old_device_class = (
+                    old_state.attributes.get("device_class")
+                    if old_state is not None
+                    else None
+                )
+                new_device_class = (
+                    new_state.attributes.get("device_class")
+                    if new_state is not None
+                    else None
+                )
                 _apply_membership_change(
                     hass,
                     engine,
-                    selector_planner.state_changed(entity_id, exists=new_state is not None),
+                    selector_planner.state_changed(
+                        entity_id,
+                        exists=new_state is not None,
+                        device_class_changed=old_device_class != new_device_class,
+                    ),
                 )
             if selector_planner is not None and entity_id not in selector_planner.relevant:
                 return
