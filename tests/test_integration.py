@@ -438,6 +438,7 @@ async def test_room_registry_cleanup_removes_only_stale_entries(
         f"custom_components.intentional.{domain}", fromlist=[cleanup_name]
     )
     cleanup = getattr(module, cleanup_name)
+    config_entry.add_to_hass(hass)
     registry = er.async_get(hass)
     prefix = f"{config_entry.entry_id}_area_"
     current = registry.async_get_or_create(
