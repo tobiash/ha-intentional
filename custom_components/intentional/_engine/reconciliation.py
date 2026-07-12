@@ -29,6 +29,12 @@ from .adapter.matcher import (
 from .adapter.signer import _freeze_signature_value, service_plan_signature
 from .adapter.translator import service_calls_for_resolved_target
 
+
+def reconciliation_key(entry_id: str) -> str:
+    """Return the hass.data key for one config entry's Reconciliation state."""
+    return f"{entry_id}:reconciliation"
+
+
 # --------------------------------------------------------------------------- #
 # Collaborators injected by the integration
 # --------------------------------------------------------------------------- #
