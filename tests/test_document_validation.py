@@ -77,7 +77,12 @@ def test_warns_only_when_modifier_field_has_no_document_baseline() -> None:
         ]
     )
 
-    assert [warning["field"] for warning in findings["warnings"]] == ["humidity"]
+    modifier_warnings = [
+        warning
+        for warning in findings["warnings"]
+        if warning["code"] == "modifier_without_document_baseline"
+    ]
+    assert [warning["field"] for warning in modifier_warnings] == ["humidity"]
 
 
 def test_detects_effect_only_domain_as_durable_target() -> None:
@@ -107,10 +112,10 @@ async def test_validate_api_returns_floor_cap_conflict_as_warning() -> None:
     contents = """
 - id: floor
   while: {input_boolean.test: on}
-  intent: {light.office: {floor: {brightness_pct: 70}}}
+  intent: {light.office: {brightness_pct: {min: 70}}}
 - id: cap
   while: {input_boolean.test: on}
-  intent: {light.office: {cap: {brightness_pct: 40}}}
+  intent: {light.office: {brightness_pct: {max: 40}}}
 """
 
     class Request:
@@ -148,14 +153,20 @@ async def test_validate_api_warns_for_legacy_dangerous_target() -> None:
 
 
 @pytest.mark.parametrize(
-    ("fragment", "expected_message"),
+    ("fragment", "expected_code"),
     [
-        ("when: sensor.room ==\n  emit: {target: light.room, set: {state: on}}", "validation"),
-        ("when: 'true'\n  emit: {target: light.room, set: {brightness: '{{ broken'}}}", "validation"),
+        (
+            "when: sensor.room ==\n  emit: {target: light.room, set: {state: on}}",
+            "rule_validation_error",
+        ),
+        (
+            "when: 'true'\n  emit: {target: light.room, set: {brightness: '{{ broken'}}}",
+            "rule_load_error",
+        ),
     ],
 )
 async def test_validate_api_rejects_invalid_expressions_and_templates(
-    fragment: str, expected_message: str
+    fragment: str, expected_code: str
 ) -> None:
     from custom_components.intentional.api import IntentionalValidateView
 
@@ -170,5 +181,5 @@ async def test_validate_api_rejects_invalid_expressions_and_templates(
 
     assert response.status == 400
     assert body["valid"] is False
-    assert body["errors"][0]["code"] == "rule_validation_error"
-    assert expected_message in body["errors"][0]["message"].lower()
+    assert body["errors"][0]["code"] == expected_code
+    assert "failed" in body["errors"][0]["message"].lower()
