@@ -128,6 +128,7 @@ class Intent:
 
     target: str
     set: dict[str, Any] = field(default_factory=dict)
+    withdraw: dict[str, Any] = field(default_factory=dict)
     merge: bool = False
     cap: dict[str, Any] = field(default_factory=dict)
     floor: dict[str, Any] = field(default_factory=dict)
@@ -154,6 +155,7 @@ class Intent:
         # frozen=True prevents attribute reassignment, but mutable values in
         # fields can still be mutated in place. We copy them here.
         object.__setattr__(self, "set", _copy_field_dict(self.set))
+        object.__setattr__(self, "withdraw", _copy_field_dict(self.withdraw))
         object.__setattr__(self, "cap", _copy_field_dict(self.cap))
         object.__setattr__(self, "floor", _copy_field_dict(self.floor))
         object.__setattr__(self, "offset", _copy_field_dict(self.offset))

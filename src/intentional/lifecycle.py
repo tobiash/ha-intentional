@@ -141,6 +141,7 @@ def intent_to_lifecycle_record(
     record = {
         "target": intent.target,
         "set": dict(intent.set),
+        "withdraw": dict(intent.withdraw),
         "merge": intent.merge,
         "cap": dict(intent.cap),
         "floor": dict(intent.floor),
@@ -197,6 +198,7 @@ def intent_from_lifecycle_record(raw: Any) -> Intent | None:
         return Intent(
             target=_string(raw.get("target", "")),
             set=_string_dict(raw.get("set", {})),
+            withdraw=_string_dict(raw.get("withdraw", {})),
             merge=_bool(raw.get("merge", False)),
             cap=_string_dict(raw.get("cap", {})),
             floor=_string_dict(raw.get("floor", {})),

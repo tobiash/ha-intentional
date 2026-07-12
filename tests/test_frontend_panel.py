@@ -10,6 +10,17 @@ from intentional.yaml_loader import load_rules_from_string
 
 REPO_ROOT = Path(__file__).parent.parent
 PANEL_PATH = REPO_ROOT / "custom_components" / "intentional" / "frontend" / "intentional-panel.js"
+
+
+def test_panel_exposes_read_only_ha_migration_workflow() -> None:
+    source = PANEL_PATH.read_text()
+    assert 'data-action="migration-discover"' in source
+    assert 'data-action="migration-propose"' in source
+    assert 'data-action="migration-add"' in source
+    assert "Source automation stays unchanged" in source
+    assert 'data-action="migration-disable"' not in source
+
+
 INTEGRATION_INIT = REPO_ROOT / "custom_components" / "intentional" / "__init__.py"
 
 
@@ -111,6 +122,13 @@ def test_all_effects_and_nested_json_are_serialized() -> None:
     assert result.count("service:") == 2
     assert "metadata:\n          tags:\n            - a\n            - b" in result
     assert "entity_id:\n          - light.one\n          - light.two" in result
+
+
+def test_frontend_non_finite_number_guard_checks_nested_parsed_values() -> None:
+    result = _run_panel_js(
+        "[containsNonFiniteNumber({value: 1}), containsNonFiniteNumber({value: NaN}), containsNonFiniteNumber([Infinity])]"
+    )
+    assert result == [False, True, True]
 
 
 def test_normalized_effects_with_empty_mappings_round_trip_to_loader_valid_yaml() -> None:

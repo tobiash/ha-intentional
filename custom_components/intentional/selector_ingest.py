@@ -268,6 +268,7 @@ _PURPOSES = {
     "door": ("binary_sensor", "door"), "window": ("binary_sensor", "window"),
     "moisture": ("binary_sensor", "moisture"), "temperature": ("sensor", "temperature"),
     "illuminance": ("sensor", "illuminance"),
+    "power": ("sensor", "power"),
 }
 
 

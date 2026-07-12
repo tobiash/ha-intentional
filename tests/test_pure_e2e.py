@@ -1096,7 +1096,7 @@ def test_scene_and_target_modifier_scenario_resolves_to_scene_and_target_calls()
         (
             "light",
             "turn_on",
-            {"entity_id": "light.living_room", "brightness_pct": 50},
+            {"entity_id": "light.living_room"},
         ),
     )
 

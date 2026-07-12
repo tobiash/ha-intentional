@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from yaml.constructor import ConstructorError
 
 from .animation import AnimationSpec
 from .capabilities import vnext_intent_policy_error
@@ -60,6 +61,7 @@ from .records import (
     Effect,
     HoldAfterAdjustment,
     HoldAfterTier,
+    HysteresisObservation,
     IntentSelector,
     ObservationGroup,
     ObserveSelector,
@@ -76,7 +78,7 @@ _RULE_TOP_LEVEL = {
 }
 # Recognized fields in the emit block
 _EMIT_FIELDS = {
-    "target", "scene", "set", "cap", "floor", "offset", "multiply", "merge", "generate",
+    "target", "scene", "set", "withdraw", "cap", "floor", "offset", "multiply", "merge", "generate",
     "transition", "easing", "ttl", "linger", "animation", "apply",
 }
 # Recognized animation fields
@@ -89,6 +91,57 @@ _VALID_EASINGS = {"linear", "ease-in", "ease-out", "ease-in-out", "sine"}
 _MERGED_EMIT_DICTS = {"set", "cap", "floor", "offset", "multiply"}
 _FOR_FIELDS = {"entity", "unit", "default"}
 _FOR_UNITS = {"ms", "s", "m", "h"}
+MAX_DOCUMENT_BYTES = 1_000_000
+MAX_AUTHORING_DEFINITIONS = 256
+
+
+_DUPLICATE_CHECKED_DECLARATIONS = {"retention_profiles", "time_windows"}
+
+
+def _reject_declaration_duplicates(text: str) -> None:
+    """Reject duplicates only in new declarations, preserving legacy YAML behavior."""
+    for document in yaml.compose_all(text, Loader=yaml.SafeLoader):
+        if not isinstance(document, yaml.MappingNode):
+            continue
+        seen_declarations: set[str] = set()
+        for key_node, value_node in document.value:
+            if not isinstance(key_node, yaml.ScalarNode):
+                continue
+            declaration = key_node.value
+            if declaration not in _DUPLICATE_CHECKED_DECLARATIONS:
+                continue
+            if declaration in seen_declarations:
+                raise ConstructorError(
+                    "while constructing a declaration",
+                    document.start_mark,
+                    f"found duplicate key {declaration!r}",
+                    key_node.start_mark,
+                )
+            seen_declarations.add(declaration)
+            _reject_mapping_duplicates(value_node)
+
+
+def _reject_mapping_duplicates(node: yaml.Node) -> None:
+    """Recursively validate exact mappings owned by a checked declaration."""
+    if isinstance(node, yaml.SequenceNode):
+        for item in node.value:
+            _reject_mapping_duplicates(item)
+        return
+    if not isinstance(node, yaml.MappingNode):
+        return
+    seen: set[tuple[str, str]] = set()
+    for key_node, value_node in node.value:
+        if isinstance(key_node, yaml.ScalarNode):
+            key = (key_node.tag, key_node.value)
+            if key in seen:
+                raise ConstructorError(
+                    "while constructing a declaration mapping",
+                    node.start_mark,
+                    f"found duplicate key {key_node.value!r}",
+                    key_node.start_mark,
+                )
+            seen.add(key)
+        _reject_mapping_duplicates(value_node)
 
 
 @dataclass(frozen=True)
@@ -99,6 +152,8 @@ class _RawRuleDef:
     scenes: dict[str, Any] = field(default_factory=dict)
     authored_rule_id: str | None = None
     target_policies: dict[str, TargetPolicy] = field(default_factory=dict)
+    retention_profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
+    time_windows: dict[str, tuple[str, str]] = field(default_factory=dict)
 
 
 class RuleSet(list[Rule]):
@@ -122,6 +177,8 @@ def _validate_rule(
     line: int | None = None,
     authored_rule_id: str | None = None,
     target_policies: dict[str, TargetPolicy] | None = None,
+    retention_profiles: dict[str, dict[str, Any]] | None = None,
+    time_windows: dict[str, tuple[str, str]] | None = None,
 ) -> Rule:
     """Validate a single rule dict and return a Rule object.
 
@@ -132,6 +189,8 @@ def _validate_rule(
             f"Each rule must be a mapping, got {type(raw).__name__}",
             file=file, line=line,
         )
+
+    raw = _expand_authoring_references(raw, retention_profiles or {}, time_windows or {}, file=file, line=line)
 
     # Unknown top-level fields
     unknown = set(raw.keys()) - _RULE_TOP_LEVEL
@@ -148,6 +207,7 @@ def _validate_rule(
         file=file,
         line=line,
     )
+    hysteresis = _parse_hysteresis(raw.get("while", raw.get("observe")), file=file, line=line)
     hold_raw = raw.get("hold") if isinstance(raw.get("hold"), dict) else {}
     hold_observation_groups = _parse_semantic_groups(
         hold_raw.get("while"), clause_path="hold.while", file=file, line=line, allow_for=False
@@ -336,6 +396,7 @@ def _validate_rule(
         target="" if effect_only else target or "",
         scene=scene,
         set=emit_mappings["set"],
+        withdraw=_normalize_emit_mapping(emit.get("withdraw", {})),
         cap=emit_mappings["cap"],
         floor=emit_mappings["floor"],
         offset=emit_mappings["offset"],
@@ -363,6 +424,7 @@ def _validate_rule(
         observe_selectors=observe_selectors,
         observe_selector_mode=observe_selector_mode,
         observation_groups=observation_groups,
+        hysteresis=hysteresis,
         hold_observation_groups=hold_observation_groups,
         hold_until_observation_groups=hold_until_observation_groups,
         edge_created=bool(raw.get("edge_created", False)),
@@ -500,9 +562,69 @@ def _normalize_hold_linger(
 
 
 _CLOCK_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+_AUTHORING_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 _MAX_HOLD_MS = 365 * 24 * 60 * 60 * 1_000
 MAX_HOLD_AFTER_TIERS = 64
 MAX_HOLD_AFTER_ADJUSTMENTS = 64
+
+
+def _expand_authoring_references(authored: dict[str, Any], profiles: dict[str, dict[str, Any]], windows: dict[str, tuple[str, str]], *, file: Path | None, line: int | None) -> dict[str, Any]:
+    raw = deepcopy(authored)
+    hold = raw.get("hold")
+    if isinstance(hold, dict) and "use" in hold:
+        name = hold["use"]
+        if not isinstance(name, str) or name not in profiles:
+            raise RuleLoadError(f"Unknown retention profile {name!r}", file=file, line=line)
+        local = {key: value for key, value in hold.items() if key != "use"}
+        hold = deepcopy(profiles[name])
+        hold.update(local)
+        raw["hold"] = hold
+
+    def expand_observation(value: Any, path: str) -> None:
+        if not isinstance(value, dict) or "time_window" not in value:
+            return
+        clause = value.pop("time_window")
+        if not isinstance(clause, dict) or len(clause) != 1 or next(iter(clause)) not in {"in", "not_in"}:
+            raise RuleLoadError(f"`{path}.time_window` must be exactly `in` or `not_in`", file=file, line=line)
+        operator, name = next(iter(clause.items()))
+        if not isinstance(name, str) or name not in windows:
+            raise RuleLoadError(f"Unknown time window {name!r} in `{path}`", file=file, line=line)
+        start, end = windows[name]
+        if start == end:
+            expression: dict[str, Any] = {"time_of_day": {"gte": "00:00"}}
+        elif start < end:
+            expression = {"all": [{"time_of_day": {"gte": start}}, {"time_of_day": {"lt": end}}]}
+        else:
+            expression = {"any": [{"time_of_day": {"gte": start}}, {"time_of_day": {"lt": end}}]}
+        if operator == "not_in":
+            expression = {"not": expression}
+        existing = deepcopy(value)
+        value.clear()
+        if any(key in _SEMANTIC_PURPOSES for key in existing):
+            value.update(existing)
+            value.update(expression)
+        else:
+            value.update({"all": [existing, expression]} if existing else expression)
+
+    expand_observation(raw.get("while", raw.get("observe")), "while")
+    hold = raw.get("hold")
+    if isinstance(hold, dict):
+        expand_observation(hold.get("while"), "hold.while")
+        expand_observation(hold.get("until"), "hold.until")
+        dynamic = hold.get("after", hold.get("after_when_stops"))
+        if isinstance(dynamic, dict) and isinstance(dynamic.get("adjustments"), list):
+            for index, adjustment in enumerate(dynamic["adjustments"]):
+                if not isinstance(adjustment, dict) or "window" not in adjustment:
+                    continue
+                if set(adjustment) != {"window", "add"}:
+                    raise RuleLoadError(f"hold.after.adjustments[{index}] named form requires exactly `window` and `add`", file=file, line=line)
+                name, add = adjustment["window"], adjustment["add"]
+                if not isinstance(name, str) or name not in windows:
+                    raise RuleLoadError(f"Unknown time window {name!r} in hold.after.adjustments[{index}]", file=file, line=line)
+                start, end = windows[name]
+                adjustment.clear()
+                adjustment.update({"from": start, "until": end, "add": add, "window_name": name})
+    return raw
 
 
 def _parse_dynamic_hold_after(
@@ -541,12 +663,12 @@ def _parse_dynamic_hold_after(
         tiers.append(HoldAfterTier(threshold, duration))
     adjustments = []
     for index, item in enumerate(adjustments_raw):
-        if not isinstance(item, dict) or set(item) != {"from", "until", "add"}:
-            raise RuleLoadError(f"Rule {rule_id!r}: hold.after.adjustments[{index}] requires exactly `from`, `until`, and `add`", file=file, line=line)
+        if not isinstance(item, dict) or set(item) not in ({"from", "until", "add"}, {"from", "until", "add", "window_name"}):
+            raise RuleLoadError(f"Rule {rule_id!r}: hold.after.adjustments[{index}] requires a window and `add`", file=file, line=line)
         start = _strict_clock(item["from"], f"hold.after.adjustments[{index}].from", rule_id, file, line)
         end = _strict_clock(item["until"], f"hold.after.adjustments[{index}].until", rule_id, file, line)
         add = _signed_duration(item["add"], f"hold.after.adjustments[{index}].add", rule_id, file, line)
-        adjustments.append(HoldAfterAdjustment(start, end, add, item["from"], item["until"]))
+        adjustments.append(HoldAfterAdjustment(start, end, add, item["from"], item["until"], item.get("window_name")))
     maximum = _strict_duration(raw["max"], "hold.after.max", rule_id, file, line)
     if maximum <= 0:
         raise RuleLoadError(f"Rule {rule_id!r}: `hold.after.max` must be positive", file=file, line=line)
@@ -684,6 +806,12 @@ def _observe_to_when(
     """Convert a compact level observation to the current when expression."""
     if not isinstance(observe, dict):
         raise RuleLoadError("`observe` must be a mapping", file=file, line=line)
+    hysteresis = _parse_hysteresis(observe, file=file, line=line)
+    if hysteresis is not None:
+        operator = _observe_operator_to_when(
+            hysteresis.enter_operator, file=file, line=line
+        )
+        return f"{hysteresis.entity} {operator} {_when_literal(hysteresis.enter_value)}"
     if _parse_semantic_groups(observe, clause_path="while", file=file, line=line):
         ordinary = {
             key: value
@@ -716,6 +844,40 @@ def _observe_to_when(
         _observe_field_to_when(field, observe[field], file=file, line=line)
         for field in fields
     )
+
+
+def _parse_hysteresis(
+    observe: Any, *, file: Path | None, line: int | None
+) -> HysteresisObservation | None:
+    if not isinstance(observe, dict):
+        return None
+    candidates = [
+        (entity, spec)
+        for entity, spec in observe.items()
+        if isinstance(spec, dict) and ("enter" in spec or "exit" in spec)
+    ]
+    if not candidates:
+        return None
+    if len(observe) != 1 or len(candidates) != 1:
+        raise RuleLoadError("Hysteresis `while` must contain exactly one entity", file=file, line=line)
+    entity, spec = candidates[0]
+    if set(spec) != {"enter", "exit"}:
+        raise RuleLoadError("Hysteresis requires exactly `enter` and `exit`", file=file, line=line)
+    parsed: list[tuple[str, Any]] = []
+    for phase in ("enter", "exit"):
+        condition = spec[phase]
+        if not isinstance(condition, dict) or len(condition) != 1:
+            raise RuleLoadError(f"Hysteresis `{phase}` requires exactly one comparison", file=file, line=line)
+        operator, value = next(iter(condition.items()))
+        if operator not in {"gt", "gte", "lt", "lte"} or isinstance(value, bool) or not isinstance(value, int | float):
+            raise RuleLoadError(f"Hysteresis `{phase}` requires gt, gte, lt, or lte with a number", file=file, line=line)
+        parsed.append((operator, value))
+    enter, exit = parsed
+    if (enter[0] in {"gt", "gte"}) == (exit[0] in {"gt", "gte"}):
+        raise RuleLoadError("Hysteresis enter and exit comparisons must face opposite directions", file=file, line=line)
+    if enter[0] in {"gt", "gte"} and enter[1] <= exit[1] or enter[0] in {"lt", "lte"} and enter[1] >= exit[1]:
+        raise RuleLoadError("Hysteresis enter threshold must leave a non-empty deadband", file=file, line=line)
+    return HysteresisObservation(str(entity), enter[0], enter[1], exit[0], exit[1])
 
 
 def _observe_group_to_when(
@@ -886,7 +1048,7 @@ def _intent_fields_to_emit(
 ) -> dict[str, Any]:
     """Normalize VNext target fields to the current emit schema."""
 
-    emit: dict[str, Any] = {"target": target, "set": {}, "cap": {}, "floor": {}, "offset": {}, "multiply": {}, "generate": {}}
+    emit: dict[str, Any] = {"target": target, "set": {}, "withdraw": {}, "cap": {}, "floor": {}, "offset": {}, "multiply": {}, "generate": {}}
     for intent_field, value in fields.items():
         if intent_field == "apply":
             emit["apply"] = value
@@ -895,7 +1057,16 @@ def _intent_fields_to_emit(
         if intent_field in {"ttl", "linger", "transition", "easing"}:
             emit[intent_field] = value
             continue
-        if isinstance(value, dict) and set(value) & {"value", "min", "max", "offset", "multiply", "animate", "generate"}:
+        if isinstance(value, dict) and set(value) & {"value", "withdraw", "min", "max", "offset", "multiply", "animate", "generate"}:
+            unknown = set(value) - {"value", "withdraw", "min", "max", "offset", "multiply", "animate", "generate"}
+            if unknown:
+                raise RuleLoadError(f"Unknown intent field wrapper keys: {sorted(unknown)}", file=file, line=line)
+            if "withdraw" in value:
+                withdrawal = value["withdraw"]
+                if withdrawal is not None and withdrawal != "adopt":
+                    emit["withdraw"][intent_field] = withdrawal
+                elif withdrawal == "adopt":
+                    emit["withdraw"][intent_field] = "adopt"
             if "animate" in value:
                 if "animation" in emit:
                     raise RuleLoadError("One animated field per VNext target is supported", file=file, line=line)
@@ -1362,6 +1533,7 @@ _SEMANTIC_PURPOSES = {
     "moisture": ("binary_sensor", "moisture"),
     "temperature": ("sensor", "temperature"),
     "illuminance": ("sensor", "illuminance"),
+    "power": ("sensor", "power"),
 }
 _BINARY_COMPARISONS = {
     "motion": {"detected": "on", "clear": "off"},
@@ -1442,7 +1614,7 @@ def _parse_semantic_groups(
                 file=file,
                 line=line,
             )
-        if purpose in {"temperature", "illuminance"}:
+        if purpose in {"temperature", "illuminance", "power"}:
             operator = _SEMANTIC_OPERATORS.get(comparison)
             if operator is None or "value" not in spec:
                 raise RuleLoadError(f"Semantic `{purpose}` requires above/below/is/is_not/lt/lte/gt/gte with a numeric value", file=file, line=line)
@@ -1469,7 +1641,7 @@ def _parse_semantic_groups(
                 file=file,
                 line=line,
             )
-        if edge and purpose in {"temperature", "illuminance"}:
+        if edge and purpose in {"temperature", "illuminance", "power"}:
             raise RuleLoadError(
                 "Semantic `changed` is only supported for binary observations",
                 file=file,
@@ -1569,7 +1741,10 @@ def _load_raw_rule_defs_from_string(
     file: Path | None = None,
 ) -> list[_RawRuleDef]:
     """Parse YAML into raw rule definitions without schema resolution."""
+    if len(text.encode("utf-8")) > MAX_DOCUMENT_BYTES:
+        raise RuleLoadError(f"Rule document may not exceed {MAX_DOCUMENT_BYTES} bytes", file=file)
     try:
+        _reject_declaration_duplicates(text)
         docs = list(yaml.safe_load_all(text))
     except yaml.YAMLError as e:
         line = getattr(e, "problem_mark", None)
@@ -1579,17 +1754,21 @@ def _load_raw_rule_defs_from_string(
     raw_rules = _RawRuleDefs()
     all_scenes: dict[str, Any] = {}
     all_target_policies: dict[str, TargetPolicy] = {}
+    all_profiles: dict[str, dict[str, Any]] = {}
+    all_windows: dict[str, tuple[str, str]] = {}
     for doc in docs:
         if doc is None:
             continue  # empty document
         if isinstance(doc, dict):
-            unknown = set(doc) - {"rules", "scenes", "targets"}
+            unknown = set(doc) - {"rules", "scenes", "targets", "retention_profiles", "time_windows"}
             if unknown:
                 raise RuleLoadError(
                     f"Unknown top-level document fields: {sorted(unknown)}. "
-                    "Allowed: ['rules', 'scenes', 'targets']",
+                    "Allowed: ['rules', 'scenes', 'targets', 'retention_profiles', 'time_windows']",
                     file=file,
                 )
+            _merge_retention_profiles(all_profiles, doc.get("retention_profiles", {}), file=file)
+            _merge_time_windows(all_windows, doc.get("time_windows", {}), file=file)
             doc_scenes = doc.get("scenes", {})
             if doc_scenes is None:
                 doc_scenes = {}
@@ -1631,16 +1810,64 @@ def _load_raw_rule_defs_from_string(
             raw_rules.append(_RawRuleDef(
                 raw=raw, file=file, line=line_num, scenes=all_scenes,
                 target_policies=dict(all_target_policies),
+                retention_profiles=deepcopy(all_profiles), time_windows=dict(all_windows),
             ))
 
     for raw_def in raw_rules:
         raw_def.target_policies.update(all_target_policies)
+        raw_def.retention_profiles.update(all_profiles)
+        raw_def.time_windows.update(all_windows)
 
     return raw_rules
 
 
+def _valid_authoring_name(name: Any, kind: str, file: Path | None) -> str:
+    if not isinstance(name, str) or not _AUTHORING_NAME_RE.fullmatch(name):
+        raise RuleLoadError(f"Invalid {kind} name {name!r}", file=file)
+    return name
+
+
+def _merge_retention_profiles(result: dict[str, dict[str, Any]], value: Any, *, file: Path | None) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise RuleLoadError("Document `retention_profiles` must be a mapping", file=file)
+    if len(result) + len(value) > MAX_AUTHORING_DEFINITIONS:
+        raise RuleLoadError(f"Document supports at most {MAX_AUTHORING_DEFINITIONS} retention profiles", file=file)
+    for raw_name, profile in value.items():
+        name = _valid_authoring_name(raw_name, "retention profile", file)
+        if name in result:
+            raise RuleLoadError(f"Duplicate retention profile {name!r}", file=file)
+        if not isinstance(profile, dict):
+            raise RuleLoadError(f"Retention profile {name!r} must be a hold mapping", file=file)
+        if "use" in profile:
+            raise RuleLoadError(f"Retention profile {name!r} cannot contain `use`", file=file)
+        unknown = set(profile) - {"while", "until", "after", "after_when_stops"}
+        if unknown:
+            raise RuleLoadError(f"Retention profile {name!r} has unknown fields {sorted(unknown)}", file=file)
+        result[name] = deepcopy(profile)
+
+
+def _merge_time_windows(result: dict[str, tuple[str, str]], value: Any, *, file: Path | None) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise RuleLoadError("Document `time_windows` must be a mapping", file=file)
+    if len(result) + len(value) > MAX_AUTHORING_DEFINITIONS:
+        raise RuleLoadError(f"Document supports at most {MAX_AUTHORING_DEFINITIONS} time windows", file=file)
+    for raw_name, window in value.items():
+        name = _valid_authoring_name(raw_name, "time window", file)
+        if name in result:
+            raise RuleLoadError(f"Duplicate time window {name!r}", file=file)
+        if not isinstance(window, dict) or set(window) != {"from", "until"}:
+            raise RuleLoadError(f"Time window {name!r} must contain exactly `from` and `until`", file=file)
+        _strict_clock(window["from"], f"time_windows.{name}.from", "document", file, None)
+        _strict_clock(window["until"], f"time_windows.{name}.until", "document", file, None)
+        result[name] = (window["from"], window["until"])
+
+
 _TARGET_POLICY_FIELDS = {
-    "default", "ownership", "allowed_fields", "forbidden_automatic_states",
+    "default", "ownership", "dispatch", "allowed_fields", "forbidden_automatic_states",
     "unavailable", "max_retries", "user_authority",
 }
 
@@ -1668,6 +1895,9 @@ def _target_policies_from_document(raw_targets: Any, *, file: Path | None) -> di
         unavailable = raw.get("unavailable", "allow")
         if unavailable not in {"allow", "skip"}:
             raise RuleLoadError(f"Target {target!r}: `unavailable` must be allow or skip", file=file)
+        dispatch = raw.get("dispatch", "apply")
+        if dispatch not in {"apply", "shadow"}:
+            raise RuleLoadError(f"Target {target!r}: `dispatch` must be apply or shadow", file=file)
         allowed_fields = _string_set(raw.get("allowed_fields"), target, "allowed_fields", file, optional=True)
         forbidden = _string_set(raw.get("forbidden_automatic_states", []), target, "forbidden_automatic_states", file)
         user = raw.get("user_authority", {})
@@ -1678,6 +1908,7 @@ def _target_policies_from_document(raw_targets: Any, *, file: Path | None) -> di
             raise RuleLoadError(f"Target {target!r}: `max_retries` must be a non-negative integer", file=file)
         result[target] = TargetPolicy(
             ownership=ownership,
+            dispatch=dispatch,
             allowed_fields=allowed_fields,
             forbidden_automatic_states=forbidden or frozenset(),
             unavailable=unavailable,
@@ -1813,6 +2044,8 @@ def _resolve_rule_inheritance(raw_rules: list[_RawRuleDef]) -> list[_RawRuleDef]
                 line=raw_def.line,
                 authored_rule_id=raw_def.authored_rule_id,
                 target_policies=raw_def.target_policies,
+                retention_profiles=raw_def.retention_profiles,
+                time_windows=raw_def.time_windows,
             ))
         else:
             output.append(raw_def)
@@ -1871,6 +2104,8 @@ def _validate_raw_rule_defs(raw_rules: list[_RawRuleDef]) -> list[Rule]:
             line=raw_def.line,
             authored_rule_id=raw_def.authored_rule_id,
             target_policies=raw_def.target_policies,
+            retention_profiles=raw_def.retention_profiles,
+            time_windows=raw_def.time_windows,
         )
         for raw_def in expanded_rules
     ]
@@ -1910,6 +2145,8 @@ def _expand_vnext_scene_includes(
         scenes=raw_def.scenes,
             authored_rule_id=raw_def.authored_rule_id,
             target_policies=raw_def.target_policies,
+            retention_profiles=raw_def.retention_profiles,
+            time_windows=raw_def.time_windows,
     )
 
 
@@ -2012,6 +2249,8 @@ def _expand_vnext_multi_target_rule(raw_def: _RawRuleDef) -> list[_RawRuleDef]:
             line=raw_def.line,
             authored_rule_id=rule_id if isinstance(rule_id, str) else None,
             target_policies=raw_def.target_policies,
+            retention_profiles=raw_def.retention_profiles,
+            time_windows=raw_def.time_windows,
         ))
     return expanded
 

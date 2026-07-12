@@ -11,6 +11,7 @@ class TargetPolicy:
     """Canonical dispatch and ownership constraints for one Target."""
 
     ownership: str = "managed"
+    dispatch: str = "apply"
     allowed_fields: frozenset[str] | None = None
     forbidden_automatic_states: frozenset[str] = frozenset()
     unavailable: str = "allow"
@@ -22,6 +23,7 @@ class TargetPolicy:
         """Return a stable JSON-friendly representation."""
         return {
             "ownership": self.ownership,
+            "dispatch": self.dispatch,
             "allowed_fields": None if self.allowed_fields is None else sorted(self.allowed_fields),
             "forbidden_automatic_states": sorted(self.forbidden_automatic_states),
             "unavailable": self.unavailable,

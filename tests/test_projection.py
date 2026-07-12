@@ -234,6 +234,28 @@ async def test_simulated_restart_uses_fresh_engine_without_duplicate_intents() -
     assert engine.active_intent_count() == 3
 
 
+@pytest.mark.asyncio
+async def test_simulation_effects_dispatch_once_per_activation_across_restart() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string("""
+- id: announce
+  while: {binary_sensor.ready: on}
+  effect: {service: notify.phone, data: {message: ready}}
+"""))
+
+    steps = await simulate_timeline(engine, [
+        {"states": {"binary_sensor.ready.state": "on"}},
+        {},
+        {"restart": True},
+        {"states": {"binary_sensor.ready.state": "off"}},
+        {"states": {"binary_sensor.ready.state": "on"}},
+    ])
+
+    assert [len(step["effects"]) for step in steps] == [1, 0, 0, 0, 1]
+    assert steps[0]["effects"][0]["service"] == "phone"
+    assert steps[4]["effects"][0]["data"] == {"message": "ready"}
+
+
 @pytest.mark.parametrize(
     "timeline,options,message",
     [
@@ -385,6 +407,43 @@ def test_schema_describes_semantic_simulation_and_replay_inputs() -> None:
     assert dynamic["required_exact_fields"] == ["tiers", "adjustments", "max"]
     assert dynamic["tiers"]["max_items"] == 64
     assert dynamic["adjustments"]["selection"].startswith("first matching")
+
+
+def test_schema_completely_describes_new_authoring_and_safety_contracts() -> None:
+    from intentional.schema import dsl_schema
+
+    schema = dsl_schema()
+    assert schema["retention_profiles"]["allowed_fields"] == [
+        "while", "until", "after", "after_when_stops",
+    ]
+    assert schema["retention_profiles"]["overlay"]["fingerprint_uses_expanded_rule"] is True
+    assert schema["time_windows"]["value_required_exact_fields"] == ["from", "until"]
+    assert schema["time_windows"]["observation_reference"]["required_exactly_one_operator"] == ["in", "not_in"]
+    assert schema["time_windows"]["adjustment_reference"]["required_exact_fields"] == ["window", "add"]
+    assert schema["hysteresis"]["operators"] == ["gt", "gte", "lt", "lte"]
+    assert schema["hysteresis"]["persistence"].startswith("latch and dwell survive restart")
+    assert schema["field_withdrawal"]["adopt_semantics"].startswith("restore")
+    assert schema["shadow_target_policy"]["shadow"]["calls_home_assistant_services"] is False
+    assert schema["semantic_observations"]["power"]["effective_device_class"] == "power"
+    assert schema["capabilities"]["preview"]["horizons_ms"]["max_items"] == 32
+    assert schema["capabilities"]["diagnostics"]["runtime_event_retention"]["max_items"] == 200
+    assert schema["capabilities"]["ha_migration"]["read_only_source"] is True
+    assert schema["capabilities"]["rollback"]["history_limit"] == 25
+
+
+def test_bundled_machine_schema_matches_pure_engine_schema() -> None:
+    import importlib.util
+    from pathlib import Path
+
+    from intentional.schema import dsl_schema
+
+    path = Path(__file__).parents[1] / "custom_components/intentional/_engine/schema.py"
+    spec = importlib.util.spec_from_file_location("bundled_schema", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module.dsl_schema() == dsl_schema()
 
 
 def test_simulation_rejects_duplicate_semantic_metadata_entities() -> None:

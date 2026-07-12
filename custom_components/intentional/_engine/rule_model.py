@@ -12,6 +12,7 @@ from .intent import Authority
 from .records import (
     DynamicHoldAfter,
     Effect,
+    HysteresisObservation,
     IntentSelector,
     ObservationGroup,
     ObserveSelector,
@@ -54,6 +55,7 @@ class Rule:
     target: str = ""
     scene: str | None = None
     set: dict[str, Any] = field(default_factory=dict)
+    withdraw: dict[str, Any] = field(default_factory=dict)
     cap: dict[str, Any] = field(default_factory=dict)
     floor: dict[str, Any] = field(default_factory=dict)
     offset: dict[str, Any] = field(default_factory=dict)
@@ -81,6 +83,7 @@ class Rule:
     observe_selectors: tuple[ObserveSelector, ...] = field(default_factory=tuple)
     observe_selector_mode: str = "any"
     observation_groups: tuple[ObservationGroup, ...] = field(default_factory=tuple)
+    hysteresis: HysteresisObservation | None = None
     hold_observation_groups: tuple[ObservationGroup, ...] = field(default_factory=tuple)
     hold_until_observation_groups: tuple[ObservationGroup, ...] = field(default_factory=tuple)
     edge_created: bool = False

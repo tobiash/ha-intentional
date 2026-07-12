@@ -12,6 +12,7 @@ from .rule_store import StorageRuleStore
 PreparedRules = Any
 PrepareRules = Callable[[str], PreparedRules]
 CommitRules = Callable[[PreparedRules], Awaitable[None]]
+ArmRollback = Callable[[str, str], Awaitable[None]]
 
 
 def mutation_coordinator_key(entry_id: str) -> str:
@@ -27,10 +28,12 @@ class RuleMutationCoordinator:
         store: StorageRuleStore,
         prepare: PrepareRules,
         commit: CommitRules,
+        arm_rollback: ArmRollback | None = None,
     ) -> None:
         self._store = store
         self._prepare = prepare
         self._commit = commit
+        self._arm_rollback = arm_rollback
         self._lock = asyncio.Lock()
 
     async def async_reload(self) -> None:
@@ -44,12 +47,14 @@ class RuleMutationCoordinator:
         mutation: Callable[[], Awaitable[dict[str, Any] | str | None]],
         *,
         expected_generation: str,
+        arm_rollback: bool = True,
     ) -> tuple[dict[str, Any] | str | None, Exception | None]:
         """Persist and apply one mutation, restoring durable state if apply fails."""
         async with self._lock:
             if self._store.generation != expected_generation:
                 return {"error": "generation_mismatch"}, None
             snapshot = self._store.snapshot()
+            previous_generation = self._store.generation
             try:
                 result = await mutation()
             except Exception as err:
@@ -69,6 +74,15 @@ class RuleMutationCoordinator:
                     prepared = self._prepare(self._store.contents)
                     await self._commit(prepared)
                 return result, err
+            if (
+                arm_rollback
+                and self._arm_rollback is not None
+                and self._store.generation != previous_generation
+            ):
+                # Journal persistence is a safeguard, not part of the authored
+                # document transaction. Its failure must not undo a valid edit.
+                with contextlib.suppress(Exception):
+                    await self._arm_rollback(self._store.generation, previous_generation)
             return result, None
 
 

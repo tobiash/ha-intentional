@@ -4,6 +4,8 @@
 
 `ha-intentional` is a HACS-installable custom component that turns Home Assistant automation into reconciliation: rules describe **while** situations in the home, produce durable **intents** for how entities should be, and the engine reconciles actual state toward the resolved desired state.
 
+Rule documents support reusable retention profiles, named local-clock windows, and metadata-aware semantic observations such as power. See [Rule authoring](docs/rules.md).
+
 Core vocabulary:
 
 ```text

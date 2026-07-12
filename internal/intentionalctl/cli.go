@@ -31,6 +31,10 @@ Commands:
                                   Preview desired-vs-actual target diffs.
   dashboard                      Print suggested Lovelace room cards.
   diagnostics [--limit N]         Print recent runtime diagnostics.
+  migrate-ha list                 List loaded HA automations available for migration.
+  migrate-ha inspect ENTITY       Inspect support and diagnostics without raw config.
+  migrate-ha propose ENTITY [--output json|yaml]
+                                  Generate and validate a read-only proposal.
   rules-list                     List rule files exposed by the API.
   rules-get [--contents]          Read storage-backed authored rule document.
   rules-save --file FILE [--expected-generation GEN]
@@ -129,6 +133,8 @@ func executeCommand(ctx context.Context, client *Client, config Config, command 
 			return err
 		}
 		return getJSON(ctx, client, config, stdout, fmt.Sprintf("/api/intentional/diagnostics?limit=%d", *limit))
+	case "migrate-ha":
+		return migrateHA(ctx, client, config, args, stdout, stderr)
 	case "rules-list":
 		return getJSON(ctx, client, config, stdout, "/api/intentional/rules")
 	case "rules-get":
@@ -181,6 +187,71 @@ func executeCommand(ctx context.Context, client *Client, config Config, command 
 		return writeJSON(stdout, response, config.Compact)
 	default:
 		return fmt.Errorf("unknown command %q", command)
+	}
+}
+
+func migrateHA(ctx context.Context, client *Client, config Config, args []string, stdout io.Writer, stderr io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: intentionalctl migrate-ha list|inspect|propose")
+	}
+	switch args[0] {
+	case "list":
+		if len(args) != 1 {
+			return fmt.Errorf("usage: intentionalctl migrate-ha list")
+		}
+		return getJSON(ctx, client, config, stdout, "/api/intentional/migrate-ha")
+	case "inspect":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: intentionalctl migrate-ha inspect ENTITY")
+		}
+		return getJSON(ctx, client, config, stdout, "/api/intentional/migrate-ha/"+url.PathEscape(args[1]))
+	case "propose":
+		if len(args) < 2 || strings.HasPrefix(args[1], "-") {
+			return fmt.Errorf("usage: intentionalctl migrate-ha propose ENTITY [--output json|yaml]")
+		}
+		flags := flag.NewFlagSet("migrate-ha propose", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		output := flags.String("output", "json", "output format: json or yaml")
+		reordered := append([]string{}, args[2:]...)
+		if err := flags.Parse(reordered); err != nil {
+			return err
+		}
+		if len(flags.Args()) != 0 || (*output != "json" && *output != "yaml") {
+			return fmt.Errorf("usage: intentionalctl migrate-ha propose ENTITY [--output json|yaml]")
+		}
+		response, err := client.Post(ctx, "/api/intentional/migrate-ha/propose", map[string]any{"entity_id": args[1]})
+		if err != nil {
+			return err
+		}
+		if *output == "yaml" {
+			var proposal struct {
+				Supported   bool   `json:"supported"`
+				YAML        string `json:"yaml"`
+				Diagnostics []struct {
+					Message string `json:"message"`
+				} `json:"diagnostics"`
+			}
+			if err := json.Unmarshal(response, &proposal); err != nil {
+				return err
+			}
+			if !proposal.Supported || strings.TrimSpace(proposal.YAML) == "" {
+				messages := make([]string, 0, len(proposal.Diagnostics))
+				for _, diagnostic := range proposal.Diagnostics {
+					if diagnostic.Message != "" {
+						messages = append(messages, diagnostic.Message)
+					}
+				}
+				if len(messages) == 0 {
+					messages = append(messages, "automation is not supported")
+				}
+				return fmt.Errorf("migration proposal unsupported: %s", strings.Join(messages, "; "))
+			}
+			_, err = fmt.Fprint(stdout, proposal.YAML)
+			return err
+		}
+		return writeJSON(stdout, response, config.Compact)
+	default:
+		return fmt.Errorf("unknown migrate-ha command %q", args[0])
 	}
 }
 

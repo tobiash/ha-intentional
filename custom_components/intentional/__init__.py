@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import logging
 import shutil
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,7 @@ from ._engine.reconciliation import Reconciliation, ReconciliationEvent, reconci
 from ._engine.runtime import StateChangePulseQueue, TickRuntime, monotonic_ms, runtime_key
 from ._engine.when_parser import referenced_entities
 from ._engine.yaml_loader import Rule
+from .automatic_rollback import AutomaticRollback, automatic_rollback_key
 from .const import (
     ATTR_TARGET,
     ATTR_TICK_INTERVAL_MS,
@@ -156,6 +158,10 @@ def _apply_reconciliation_events(
                 record_diagnostic(hass, event.kind, target=event.target, **event.details)
         elif event.kind == "withdraw_cancelled_user_change":
             record_diagnostic(hass, "withdraw_cancelled_user_change", target=event.target)
+        elif event.kind in {"rule_fully_shadowed", "rule_visible"}:
+            diagnostic_key = (event.kind, str(event.details.get("rule_id", "")))
+            if rate_limiter is None or rate_limiter.allow(diagnostic_key, now_ms=now_ms):
+                record_diagnostic(hass, event.kind, **event.details)
 
 
 # Declaring http as a dependency tells HA to ensure API helpers are available.
@@ -370,6 +376,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as err:
         raise ConfigEntryNotReady(f"Failed to load rules: {err}") from err
 
+    automatic_rollback = AutomaticRollback(
+        hass,
+        entry.entry_id,
+        rule_store,
+        lambda event_type, **data: record_diagnostic(hass, event_type, **data),
+    )
+    await automatic_rollback.async_load()
+    hass.data[DOMAIN][automatic_rollback_key(entry.entry_id)] = automatic_rollback
+
     store: Store = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}_{entry.entry_id}")
     lifecycle_records = await store.async_load()
     if lifecycle_records is None:
@@ -433,7 +448,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     def _lifecycle_snapshot() -> dict[str, Any]:
         snapshot = engine.export_lifecycle_records()
-        snapshot["pending_withdraws"] = _reconciler.export_pending_withdraws(engine)
+        snapshot["reconciliation"] = _reconciler.export_runtime_state(engine)
         return snapshot
 
     lifecycle_writer = LifecycleWriter(
@@ -479,9 +494,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _reconciler.retain_targets(retained_targets)
             _runtime.advance_revision()
             lifecycle_writer.mutated()
-        publication.publish_if_changed()
+        if publication.publish_if_changed():
+            _reconciler.record_publication_dispatch(engine.now_ms())
 
-    mutation_coordinator = RuleMutationCoordinator(rule_store, _prepare_rules, _commit_rules)
+    async def _arm_automatic_rollback(current: str, previous: str) -> None:
+        await automatic_rollback.async_arm(current, previous, _runtime.revision)
+
+    mutation_coordinator = RuleMutationCoordinator(
+        rule_store, _prepare_rules, _commit_rules, _arm_automatic_rollback
+    )
+    automatic_rollback.set_coordinator(mutation_coordinator)
     hass.data[DOMAIN][mutation_coordinator_key(entry.entry_id)] = mutation_coordinator
 
     async def _tick_loop() -> None:
@@ -496,6 +518,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     pass  # normal tick interval
                 if _runtime.unloading:
                     continue
+                cycle_revision = _runtime.revision
                 async with _runtime.mutation_lock:
                     if stop_event.is_set():
                         _runtime.tick_idle.set()
@@ -529,6 +552,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     except Exception as err:  # noqa: BLE001
                         now_ms = _monotonic_ms()
                         _runtime.mark_failure(err, now_ms=now_ms)
+                        # Rollback commits acquire mutation_lock; run after this
+                        # failed cycle releases it rather than deadlocking here.
+                        hass.async_create_task(
+                            automatic_rollback.async_failure(
+                                err,
+                                stage="evaluation",
+                                generation=rule_store.generation,
+                                revision=cycle_revision,
+                            )
+                        )
                         if _runtime.should_report_failure(now_ms=now_ms):
                             _LOGGER.exception("Intentional tick failed; continuing")
                             record_diagnostic(hass, "tick_failed", error=str(err))
@@ -548,6 +581,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         now_ms,
                         revision_is_current=lambda revision=tick_revision: _runtime.is_revision(
                             revision
+                        ),
+                        before_dispatch=lambda: automatic_rollback.async_disqualify(
+                            "service_call_attempted"
                         ),
                     )
                     async with _runtime.mutation_lock:
@@ -571,6 +607,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         lifecycle_writer,
                         previous_scenes,
                         tick_revision,
+                        before_dispatch=lambda: automatic_rollback.async_disqualify(
+                            "effect_or_scene_call_attempted"
+                        ),
                     )
                     if active_scenes is None:
                         _runtime.tick_idle.set()
@@ -587,8 +626,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             engine.evaluate_all()
                             _reconciler.drop_inactive_applied(set(engine.list_active_targets()))
                         _runtime.mark_success(now_ms=_monotonic_ms())
+                        await automatic_rollback.async_success(
+                            generation=rule_store.generation,
+                            revision=cycle_revision,
+                            next_revision=_runtime.revision,
+                        )
                         lifecycle_writer.mutated()
-                    publication.publish_if_changed()
+                    if publication.publish_if_changed():
+                        _reconciler.record_publication_dispatch(engine.now_ms())
                     _runtime.tick_idle.set()
                 except Exception as err:  # noqa: BLE001
                     now_ms = _monotonic_ms()
@@ -676,7 +721,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     engine.evaluate_all()
                     _runtime.advance_revision()
                     lifecycle_writer.mutated()
-                publication.publish_if_changed()
+                if publication.publish_if_changed():
+                    _reconciler.record_publication_dispatch(engine.now_ms())
         finally:
             _runtime.registry_task = None
 
@@ -747,6 +793,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN].pop(rule_store_key(entry.entry_id), None)
     hass.data[DOMAIN].pop(runtime_key(entry.entry_id), None)
     hass.data[DOMAIN].pop(lifecycle_writer_key(entry.entry_id), None)
+    hass.data[DOMAIN].pop(automatic_rollback_key(entry.entry_id), None)
     hass.data[DOMAIN].pop(publication_key(entry.entry_id), None)
     hass.data[DOMAIN].pop(reconciliation_key(entry.entry_id), None)
     hass.data[DOMAIN].pop(mutation_coordinator_key(entry.entry_id), None)
@@ -1003,6 +1050,7 @@ async def _activate_scene_rules(
     engine: Engine,
     already_activated: set[str],
     intentional_contexts: IntentionalContextTracker | None = None,
+    before_dispatch: Callable[[], Awaitable[None]] | None = None,
 ) -> set[str]:
     """Fire scene.turn_on for any newly-active scene rules.
 
@@ -1031,6 +1079,8 @@ async def _activate_scene_rules(
             service_data.get("transition"),
         )
         try:
+            if before_dispatch is not None:
+                await before_dispatch()
             await hass.services.async_call(
                 domain,
                 service,
@@ -1056,6 +1106,7 @@ async def _dispatch_effect_outbox(
     intentional_contexts: IntentionalContextTracker | None = None,
     runtime: TickRuntime | None = None,
     lifecycle_writer: LifecycleWriter | None = None,
+    before_dispatch: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     """Deliver durable outbox records and force their acknowledgement."""
     lock = runtime.mutation_lock if runtime is not None else asyncio.Lock()
@@ -1078,6 +1129,8 @@ async def _dispatch_effect_outbox(
         service_data = {**effect.target, **effect.data}
         context = new_intentional_context(intentional_contexts)
         try:
+            if before_dispatch is not None:
+                await before_dispatch()
             await hass.services.async_call(
                 effect.domain,
                 effect.service,
@@ -1143,13 +1196,18 @@ async def _activate_scenes_and_dispatch_effects(
     lifecycle_writer: LifecycleWriter,
     previous_scenes: set[str],
     tick_revision: int,
+    before_dispatch: Callable[[], Awaitable[None]] | None = None,
 ) -> set[str] | None:
     """Dispatch Effects only if scene calls did not make the tick stale."""
-    active_scenes = await _activate_scene_rules(hass, engine, previous_scenes, intentional_contexts)
+    active_scenes = await _activate_scene_rules(
+        hass, engine, previous_scenes, intentional_contexts, before_dispatch
+    )
     async with runtime.mutation_lock:
         if not runtime.is_revision(tick_revision):
             return None
-    await _dispatch_effect_outbox(hass, engine, intentional_contexts, runtime, lifecycle_writer)
+    await _dispatch_effect_outbox(
+        hass, engine, intentional_contexts, runtime, lifecycle_writer, before_dispatch
+    )
     return active_scenes
 
 

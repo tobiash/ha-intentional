@@ -64,9 +64,9 @@ missing resources, 500 for internal errors).
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
+import math
 from collections.abc import Callable
 from datetime import datetime
 from functools import partial
@@ -83,7 +83,6 @@ from ._engine.projection import (  # noqa: TID252
     explain_card,
     preview_targets,
     redact_sensitive,
-    simulation_step,
     target_projection,
 )
 from ._engine.reconciliation import (  # noqa: TID252
@@ -96,15 +95,20 @@ from ._engine.schema import dsl_schema  # noqa: TID252
 from ._engine.simulation import (  # noqa: TID252
     _simulation_selector_resolver,
     simulate_timeline,
+    validate_preview_horizons,
     validate_simulation_input,
 )
-from ._engine.yaml_loader import RuleLoadError  # noqa: TID252
+from ._engine.yaml_loader import MAX_DOCUMENT_BYTES, RuleLoadError  # noqa: TID252
+from .automatic_rollback import AutomaticRollback, automatic_rollback_key  # noqa: TID252
 from .const import CONF_RULE_DIR, DEFAULT_RULE_DIR, DOMAIN  # noqa: TID252
 from .diagnostics import list_diagnostics  # noqa: TID252
 from .document_validation import (  # noqa: TID252
     load_and_preflight_document,
     validate_document,
 )
+from .ha_migration import MAX_SOURCE_BYTES, convert_automation, source_fingerprint  # noqa: TID252
+
+MAX_MIGRATION_AUTOMATIONS = 500
 from .lifecycle_writer import LifecycleWriter, lifecycle_writer_key  # noqa: TID252
 from .room_controls import area_for_target, room_controls_for_engine  # noqa: TID252
 from .rule_files import (  # noqa: TID252
@@ -214,6 +218,49 @@ def _persistence_health(hass: HomeAssistant) -> dict[str, Any]:
     return writer.health()
 
 
+def _rollback_health(hass: HomeAssistant, *, diagnostics: bool = False) -> dict[str, Any]:
+    entry = _entry_for_view(hass)
+    safeguard = (
+        None
+        if entry is None
+        else hass.data.get(DOMAIN, {}).get(automatic_rollback_key(entry.entry_id))
+    )
+    if not isinstance(safeguard, AutomaticRollback):
+        return {"state": "not_loaded"}
+    health = safeguard.health()
+    if diagnostics:
+        error = health.get("last_error")
+        if isinstance(error, str):
+            health["last_error"] = _sanitize_diagnostic_text(error)
+        return health
+    state = str(health.get("state", "unknown"))[:40]
+    return {
+        "state": state,
+        "status": "degraded" if state == "manual_intervention_required" else "ok",
+    }
+
+
+def _sanitize_diagnostic_text(value: str) -> str:
+    """Bound diagnostic text and suppress likely secret/template material."""
+    compact = " ".join(value.split())[:240]
+    lowered = compact.lower()
+    if "{{" in compact or "{%" in compact or any(
+        marker in lowered for marker in ("secret", "password", "token", "authorization", "credential")
+    ):
+        return "[redacted]"
+    return compact
+
+
+def _contains_non_finite(value: Any) -> bool:
+    if isinstance(value, float):
+        return not math.isfinite(value)
+    if isinstance(value, dict):
+        return any(_contains_non_finite(key) or _contains_non_finite(item) for key, item in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_non_finite(item) for item in value)
+    return False
+
+
 def _overall_status(runtime_health: dict[str, Any]) -> str:
     status = runtime_health.get("status")
     return "ok" if status in ("ok", "starting") else "degraded"
@@ -235,6 +282,8 @@ async def _json_object(request: web.Request) -> tuple[dict[str, Any] | None, web
         return None, _error(f"Invalid JSON: {err}", "bad_request", 400)
     if not isinstance(data, dict):
         return None, _error("Request body must be a JSON object", "bad_request", 400)
+    if _contains_non_finite(data):
+        return None, _error("Non-finite numeric values are not valid JSON", "bad_request", 400)
     return data, None
 
 
@@ -272,10 +321,14 @@ class IntentionalHealthView(HomeAssistantView):
             return _error("Integration not configured", "not_configured", 503)
         runtime_health = _runtime_health(hass)
         persistence_health = _persistence_health(hass)
+        user = request.get("hass_user") if hasattr(request, "get") else None
+        rollback_health = _rollback_health(hass, diagnostics=bool(user and user.is_admin))
         return web.json_response(
             {
                 "status": "ok"
-                if _overall_status(runtime_health) == "ok" and persistence_health["status"] == "ok"
+                if _overall_status(runtime_health) == "ok"
+                and persistence_health["status"] == "ok"
+                and rollback_health.get("state") != "manual_intervention_required"
                 else "degraded",
                 "version": __version__,
                 "rule_dir": entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR),
@@ -283,6 +336,7 @@ class IntentionalHealthView(HomeAssistantView):
                 "active_intent_count": engine.active_intent_count(),
                 "runtime": runtime_health,
                 "persistence": persistence_health,
+                "rollback": rollback_health,
             }
         )
 
@@ -950,19 +1004,43 @@ class IntentionalPreviewView(HomeAssistantView):
             return error
         assert data is not None
 
-        engine, error = _preview_engine(hass, data)
+        horizons = data.get("horizons_ms")
+        if horizons is not None:
+            try:
+                horizons = validate_preview_horizons(horizons)
+            except ValueError as err:
+                return _error(str(err), "bad_request", 400)
+        engine, error = _preview_engine(hass, data, isolate=horizons is not None)
         if error is not None:
             return error
         assert engine is not None
-        return web.json_response(
-            {
+        response = {
                 "valid": True,
                 "preview": preview_targets(
                     engine, actual_for_target=lambda target: _actual_for_target(hass, target)
                 ),
                 "errors": [],
             }
-        )
+        if horizons is not None:
+            timeline = []
+            previous = 0
+            for horizon in horizons:
+                timeline.append({"advance_ms": horizon - previous})
+                previous = horizon
+            try:
+                steps = await simulate_timeline(engine, timeline)
+            except (TypeError, ValueError) as err:
+                return _error(str(err), "bad_request", 400)
+            response["phases"] = [
+                {
+                    "horizon_ms": horizon,
+                    "active_rules": step["active_rules"],
+                    "service_plans": step["calls"],
+                    "effects": step.get("effects", []),
+                }
+                for horizon, step in zip(horizons, steps, strict=True)
+            ]
+        return web.json_response(redact_sensitive(response))
 
 
 class IntentionalCardView(HomeAssistantView):
@@ -1108,32 +1186,22 @@ class IntentionalReplayView(HomeAssistantView):
             )
         except (TypeError, ValueError) as err:
             return _error(str(err), "bad_request", 400)
-        steps = []
-        for index, step in enumerate(timeline):
-            pulses: set[str] = set()
-            if not isinstance(step, dict):
-                return _error(f"timeline[{index}] must be a mapping", "bad_request", 400)
-            advance_ms = step.get("advance_ms", 0)
-            if isinstance(advance_ms, int) and advance_ms > 0:
-                engine.advance_clock(advance_ms)
-            states = step.get("states", {})
-            if not isinstance(states, dict):
-                return _error(f"timeline[{index}].states must be a mapping", "bad_request", 400)
-            for key, value in states.items():
-                if not isinstance(key, str) or "." not in key:
-                    continue
-                entity_id, _sep, field = key.rpartition(".")
-                old_key = f"{entity_id}.{field}"
-                if field == "state" and old_key in engine.state and engine.state[old_key] != value:
-                    engine.update_state(entity_id, True, field="changed")
-                    pulses.add(entity_id)
-                engine.update_state(entity_id, value, field=field)
-            engine.evaluate_all()
-            steps.append(simulation_step(engine, index=index))
-            for entity_id in pulses:
-                engine.update_state(entity_id, False, field="changed")
-            if index % 10 == 9:
-                await asyncio.sleep(0)
+        try:
+            reconciled_steps = await simulate_timeline(
+                engine,
+                timeline,
+                selector_memberships=selectors,
+                semantic_metadata=semantic_metadata,
+            )
+        except (TypeError, ValueError) as err:
+            return _error(str(err), "bad_request", 400)
+        contract_fields = {
+            "index", "now_ms", "active_targets", "resolved_targets", "active_rules", "effects"
+        }
+        steps = [
+            {key: value for key, value in step.items() if key in contract_fields}
+            for step in reconciled_steps
+        ]
         return web.json_response({"valid": True, "steps": steps, "errors": []})
 
 
@@ -1164,14 +1232,18 @@ class IntentionalWorldView(HomeAssistantView):
 
         runtime_health = _runtime_health(hass)
         persistence_health = _persistence_health(hass)
+        rollback_health = _rollback_health(hass)
         world["health"] = {
             "status": "ok"
-            if _overall_status(runtime_health) == "ok" and persistence_health["status"] == "ok"
+            if _overall_status(runtime_health) == "ok"
+            and persistence_health["status"] == "ok"
+            and rollback_health.get("state") != "manual_intervention_required"
             else "degraded",
             "rule_count": engine.rule_count(),
             "active_intent_count": engine.active_intent_count(),
             "runtime": runtime_health,
             "persistence": persistence_health,
+            "rollback": rollback_health,
         }
         world["entities"] = entities
         reconciler = _reconciliation_for(hass)
@@ -1208,7 +1280,121 @@ class IntentionalDiagnosticsView(HomeAssistantView):
             except ValueError:
                 return _error("`limit` must be an integer", "bad_request", 400)
         events = list_diagnostics(hass, limit=limit)
-        return web.json_response({"count": len(events), "events": events})
+        reconciler = _reconciliation_for(hass)
+        return web.json_response(redact_sensitive({
+            "count": len(events), "events": events,
+            "service_plan_attempts": [] if reconciler is None else reconciler.recent_history(limit=50 if limit is None else limit),
+            "churn": None if reconciler is None else reconciler.churn_status(_engine_for(hass).now_ms()),
+            "rule_shadowing": None if reconciler is None else reconciler.rule_shadowing_status(_engine_for(hass).now_ms()),
+        }))
+
+
+def _loaded_automations(hass: HomeAssistant) -> dict[str, dict[str, Any]]:
+    """Copy raw configs from HA's loaded automation entities, read-only."""
+    component = hass.data.get("automation")
+    entities = getattr(component, "entities", ())
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    for entity in entities:
+        entity_id = getattr(entity, "entity_id", None)
+        raw = getattr(entity, "raw_config", None)
+        if isinstance(entity_id, str) and entity_id.startswith("automation.") and isinstance(raw, dict):
+            copied = dict(raw)
+            if len(json.dumps(copied, default=str).encode()) <= MAX_SOURCE_BYTES:
+                candidates.append((entity_id, copied))
+    return dict(sorted(candidates)[:MAX_MIGRATION_AUTOMATIONS])
+
+
+def _automation_summary(entity_id: str, config: dict[str, Any]) -> dict[str, Any]:
+    """Return bounded metadata without exposing action data or templates."""
+    triggers = config.get("trigger", config.get("triggers", []))
+    actions = config.get("action", config.get("actions", []))
+    return {
+        "entity_id": entity_id,
+        "alias": _sanitize_diagnostic_text(str(config.get("alias", "")))[:120],
+        "mode": str(config.get("mode", "single"))[:40],
+        "trigger_count": len(triggers) if isinstance(triggers, list) else int(triggers is not None),
+        "action_count": len(actions) if isinstance(actions, list) else int(actions is not None),
+        "source_fingerprint": source_fingerprint(config),
+        "source_mutated": False,
+    }
+
+
+class IntentionalHAMigrationListView(HomeAssistantView):
+    """GET /api/intentional/migrate-ha — discover loaded source automations."""
+
+    url = "/api/intentional/migrate-ha"
+    name = "api:intentional:migrate_ha"
+    requires_auth = True
+
+    @require_admin
+    async def get(self, request: web.Request) -> web.Response:
+        automations = _loaded_automations(request.app["hass"])
+        items = [_automation_summary(entity_id, automations[entity_id]) for entity_id in sorted(automations)]
+        return web.json_response({"count": len(items), "automations": items, "source_mutated": False})
+
+
+class IntentionalHAMigrationInspectView(HomeAssistantView):
+    """GET one loaded automation's redacted migration inspection."""
+
+    url = r"/api/intentional/migrate-ha/{entity_id:.+}"
+    name = "api:intentional:migrate_ha_inspect"
+    requires_auth = True
+
+    @require_admin
+    async def get(self, request: web.Request, entity_id: str) -> web.Response:
+        config = _loaded_automations(request.app["hass"]).get(entity_id)
+        if config is None:
+            return _error("Loaded automation not found", "not_found", 404)
+        proposal = convert_automation(config, source_entity_id=entity_id)
+        proposal.pop("yaml", None)
+        proposal.pop("starter_timeline", None)
+        return web.json_response({**_automation_summary(entity_id, config), **proposal})
+
+
+class IntentionalHAMigrationProposeView(HomeAssistantView):
+    """POST a read-only proposal, validated with the current Rule document."""
+
+    url = "/api/intentional/migrate-ha/propose"
+    name = "api:intentional:migrate_ha_propose"
+    requires_auth = True
+
+    @require_admin
+    async def post(self, request: web.Request) -> web.Response:
+        data, error = await _json_object(request)
+        if error is not None:
+            return error
+        assert data is not None
+        entity_id = data.get("entity_id")
+        if not isinstance(entity_id, str) or len(entity_id) > 255 or not entity_id.startswith("automation."):
+            return _error("`entity_id` must be a loaded automation entity ID", "bad_request", 400)
+        hass = request.app["hass"]
+        config = _loaded_automations(hass).get(entity_id)
+        if config is None:
+            return _error("Loaded automation not found", "not_found", 404)
+        proposal = convert_automation(config, source_entity_id=entity_id)
+        if proposal["supported"]:
+            store = _rule_store_for(hass)
+            current = store.contents.rstrip() if store is not None else ""
+            candidate = f"{current}\n{proposal['yaml']}" if current else proposal["yaml"]
+            if len(candidate.encode("utf-8")) > MAX_DOCUMENT_BYTES:
+                proposal["merged_candidate"] = ""
+                proposal["merged_validation"] = {
+                    "valid": False,
+                    "errors": [{"code": "document_too_large", "message": f"Merged document exceeds {MAX_DOCUMENT_BYTES} bytes"}],
+                    "warnings": [],
+                }
+            else:
+                _rules, findings = validate_document(candidate)
+                proposal["merged_candidate"] = candidate
+                proposal["merged_validation"] = {
+                    "valid": not findings["errors"],
+                    "errors": findings["errors"],
+                    "warnings": findings["warnings"],
+                }
+        else:
+            proposal["merged_candidate"] = ""
+            proposal["merged_validation"] = {"valid": False, "errors": proposal["diagnostics"], "warnings": []}
+        return web.json_response(redact_sensitive(proposal))
 
 
 def _rule_to_api_dict(rule: Any) -> dict[str, Any]:
@@ -1247,7 +1433,7 @@ def _rule_document_response(store: StorageRuleStore) -> dict[str, Any]:
 
 
 def _preview_engine(
-    hass: HomeAssistant, data: dict[str, Any]
+    hass: HomeAssistant, data: dict[str, Any], *, isolate: bool = False
 ) -> tuple[Any | None, web.Response | None]:
     contents = data.get("contents")
     state_overrides = data.get("state_overrides", {})
@@ -1278,6 +1464,19 @@ def _preview_engine(
         engine = _engine_for(hass)
         if engine is None:
             return None, _error("Integration not configured", "not_configured", 503)
+        if isolate:
+            source = engine
+            engine = Engine(
+                clock_fn=lambda: source.now_ms(),
+                selector_resolver=getattr(source, "_selector_resolver", lambda _selector: []),
+            )
+            engine.load_rules(source.loaded_rules(), target_policies=source.target_policies())
+            for key, value in source.state.items():
+                if isinstance(key, str) and "." in key:
+                    entity_id, _sep, field = key.rpartition(".")
+                    engine.update_state(entity_id, value, field=field)
+            engine.import_lifecycle_records(source.export_lifecycle_records())
+            engine.evaluate_all()
     return engine, None
 
 
@@ -1365,6 +1564,9 @@ def register_api(hass: HomeAssistant) -> None:
         IntentionalReplayView,
         IntentionalWorldView,
         IntentionalDiagnosticsView,
+        IntentionalHAMigrationListView,
+        IntentionalHAMigrationProposeView,
+        IntentionalHAMigrationInspectView,
     ]
     for view_cls in views:
         hass.http.register_view(view_cls())

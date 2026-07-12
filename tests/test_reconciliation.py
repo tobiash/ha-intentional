@@ -10,13 +10,16 @@ without the async HA harness.
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from intentional.engine import Engine
-from intentional.reconciliation import Reconciliation
+from intentional.reconciliation import Reconciliation, ReconciliationEvent
+from intentional.simulation import simulate_timeline, validate_preview_horizons
 from intentional.target_policy import TargetPolicy
 from intentional.yaml_loader import Rule
 
@@ -715,6 +718,278 @@ async def test_multicall_retry_resumes_after_successful_prefix() -> None:
 
 
 @pytest.mark.asyncio
+async def test_failed_initial_multicall_retains_successful_prefix_for_withdrawal() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules([
+        Rule(
+            id="player-on",
+            when="true",
+            target="media_player.office",
+            set={"state": "on", "volume_level": 0.4},
+            withdraw={"state": "off", "volume_level": 0.2},
+        )
+    ])
+    engine.evaluate_all()
+    adapter = _FakeAdapter()
+    adapter.set_state("media_player.office", "off", {"volume_level": 0.7})
+    adapter._fail_services.add("volume_set")
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=1, drift_confirmation_ms=0, service_failure_backoff_ms=10
+    )
+
+    await reconciler.apply(engine, adapter, now_ms=0)
+    engine.load_rules([])
+    adapter.set_state("media_player.office", "on", {"volume_level": 0.7})
+    adapter._fail_services.clear()
+    adapter.calls.clear()
+    await reconciler.apply(engine, adapter, now_ms=10)
+
+    assert [service for _domain, service, _data in adapter.calls] == ["turn_off"]
+    assert all("volume_level" not in data for _domain, _service, data in adapter.calls)
+
+
+@pytest.mark.asyncio
+async def test_failed_initial_prefix_retains_adopted_field_ownership() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules([
+        Rule(
+            id="player-on",
+            when="true",
+            target="media_player.office",
+            set={"state": "on", "volume_level": 0.4},
+            withdraw={"state": "adopt"},
+        )
+    ])
+    engine.evaluate_all()
+    adapter = _FakeAdapter()
+    adapter.set_state("media_player.office", "off", {"volume_level": 0.7})
+    adapter._fail_services.add("volume_set")
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=1, drift_confirmation_ms=0, service_failure_backoff_ms=10
+    )
+
+    await reconciler.apply(engine, adapter, now_ms=0)
+    records = json.loads(json.dumps(reconciler.export_runtime_state(engine)))
+    restored = Reconciliation(
+        drift_override_ttl_ms=1, drift_confirmation_ms=0, service_failure_backoff_ms=10
+    )
+    restored.restore_pending_withdraws({"reconciliation": records})
+    engine.load_rules([])
+    adapter.set_state("media_player.office", "on", {"volume_level": 0.7})
+    adapter._fail_services.clear()
+    adapter.calls.clear()
+    await restored.apply(engine, adapter, now_ms=10)
+
+    assert adapter.calls == [("media_player", "turn_off", {"entity_id": "media_player.office"})]
+
+
+@pytest.mark.asyncio
+async def test_restart_restores_backoff_and_completed_service_plan_prefix() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules([
+        Rule(
+            id="player-on",
+            when="true",
+            target="media_player.office",
+            set={"state": "on", "volume_level": 0.4, "source": "Desk"},
+        )
+    ])
+    engine.evaluate_all()
+    adapter = _FakeAdapter()
+    adapter._fail_services.add("volume_set")
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=1, drift_confirmation_ms=0, service_failure_backoff_ms=1_000
+    )
+    await reconciler.apply(engine, adapter, now_ms=0)
+    persisted = json.loads(json.dumps(reconciler.export_runtime_state(engine)))
+
+    restored = Reconciliation(
+        drift_override_ttl_ms=1, drift_confirmation_ms=0, service_failure_backoff_ms=1_000
+    )
+    restored.restore_pending_withdraws({"reconciliation": persisted})
+    adapter._fail_services.clear()
+    adapter.calls.clear()
+    await restored.apply(engine, adapter, now_ms=999)
+    assert adapter.calls == []
+
+    await restored.apply(engine, adapter, now_ms=1_000)
+    assert [service for _domain, service, _data in adapter.calls] == [
+        "volume_set",
+        "select_source",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_three_call_failures_accumulate_owned_prefixes_then_withdraw_all() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules([Rule(
+        id="player-on", when="true", target="media_player.office",
+        set={"state": "on", "volume_level": 0.4, "source": "Desk"},
+        withdraw={"state": "on", "volume_level": 0.2, "source": "TV"},
+    )])
+    engine.evaluate_all()
+
+    class SequencedFailureAdapter(_FakeAdapter):
+        failures = {2, 4}
+
+        async def async_call(self, domain, service, data, *, context):
+            attempt = len(self.calls) + 1
+            self.calls.append((domain, service, data))
+            if attempt in self.failures:
+                raise ValueError("service failed")
+
+    adapter = SequencedFailureAdapter()
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=1, drift_confirmation_ms=0, service_failure_backoff_ms=10
+    )
+
+    await reconciler.apply(engine, adapter, now_ms=0)
+    await reconciler.apply(engine, adapter, now_ms=10)
+    engine.load_rules([])
+    adapter.failures.clear()
+    adapter.calls.clear()
+    await reconciler.apply(engine, adapter, now_ms=30)
+
+    assert [service for _domain, service, _data in adapter.calls] == [
+        "turn_on", "volume_set",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_multi_failure_restart_preserves_earlier_adoption_and_progress() -> None:
+    now = [10_000]
+    engine = Engine(clock_fn=lambda: now[0])
+    engine.load_rules([Rule(
+        id="player-on", when="true", target="media_player.office",
+        set={"state": "on", "volume_level": 0.4, "source": "Desk"},
+        withdraw={"state": "adopt", "volume_level": "adopt", "source": "adopt"},
+    )])
+    engine.evaluate_all()
+    adapter = _FakeAdapter()
+    adapter.set_state("media_player.office", "on", {"volume_level": 0.7, "source": "TV"})
+    adapter._fail_services.add("volume_set")
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=1, drift_confirmation_ms=0, service_failure_backoff_ms=10
+    )
+    await reconciler.apply(engine, adapter, now_ms=10_000)
+    adapter._fail_services = {"select_source"}
+    now[0] = 10_010
+    await reconciler.apply(engine, adapter, now_ms=10_010)
+
+    persisted = json.loads(json.dumps(reconciler.export_runtime_state(engine)))
+    restored = Reconciliation(
+        drift_override_ttl_ms=1, drift_confirmation_ms=0, service_failure_backoff_ms=10
+    )
+    restored.restore_pending_withdraws({"reconciliation": persisted}, now_ms=5)
+    adapter._fail_services.clear()
+    adapter.calls.clear()
+    await restored.apply(engine, adapter, now_ms=25)
+    adapter.set_state("media_player.office", "on", {"volume_level": 0.4, "source": "Desk"})
+    engine.load_rules([])
+    await restored.apply(engine, adapter, now_ms=26)
+
+    assert adapter.calls == [
+        ("media_player", "select_source", {"entity_id": "media_player.office", "source": "Desk"}),
+        ("media_player", "turn_on", {"entity_id": "media_player.office"}),
+        ("media_player", "volume_set", {"entity_id": "media_player.office", "volume_level": 0.7}),
+        ("media_player", "select_source", {"entity_id": "media_player.office", "source": "TV"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_restart_rebases_bounded_retry_delay_after_monotonic_epoch_reset() -> None:
+    engine = _make_engine_with_light_rule()
+    adapter = _FakeAdapter()
+    adapter._fail_next = True
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=1, drift_confirmation_ms=0,
+        service_failure_backoff_ms=1_000, service_failure_backoff_max_ms=2_000,
+    )
+    await reconciler.apply(engine, adapter, now_ms=900_000)
+    persisted = json.loads(json.dumps(reconciler.export_runtime_state(
+        SimpleNamespace(now_ms=lambda: 900_000)
+    )))
+    assert persisted["service_failure_backoff"][0]["remaining_ms"] <= 2_000
+    assert "retry_at_ms" not in persisted["service_failure_backoff"][0]
+
+    restored = Reconciliation(
+        drift_override_ttl_ms=1, drift_confirmation_ms=0,
+        service_failure_backoff_ms=1_000, service_failure_backoff_max_ms=2_000,
+    )
+    restored.restore_pending_withdraws({"reconciliation": persisted}, now_ms=5)
+    await restored.apply(engine, adapter, now_ms=1_004)
+    assert adapter.calls == []
+    await restored.apply(engine, adapter, now_ms=1_005)
+    assert len(adapter.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_export_uses_live_reconciliation_monotonic_clock_not_engine_epoch() -> None:
+    engine = Engine(clock_fn=lambda: 1_700_000_000_000)
+    engine.load_rules([Rule(id="on", when="true", target="light.desk", set={"state": "on"})])
+    engine.evaluate_all()
+    adapter = _FakeAdapter()
+    adapter._fail_next = True
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=1, drift_confirmation_ms=0,
+        service_failure_backoff_ms=1_000, service_failure_backoff_max_ms=2_000,
+    )
+
+    await reconciler.apply(engine, adapter, now_ms=100)
+    await reconciler.apply(engine, adapter, now_ms=400)
+    persisted = json.loads(json.dumps(reconciler.export_runtime_state(engine)))
+
+    assert persisted["service_failure_backoff"][0]["remaining_ms"] == 700
+    restored = Reconciliation(
+        drift_override_ttl_ms=1, drift_confirmation_ms=0,
+        service_failure_backoff_ms=1_000, service_failure_backoff_max_ms=2_000,
+    )
+    restored.restore_pending_withdraws({"reconciliation": persisted}, now_ms=5)
+    await restored.apply(engine, adapter, now_ms=704)
+    assert adapter.calls == []
+    await restored.apply(engine, adapter, now_ms=705)
+    assert len(adapter.calls) == 1
+
+
+def test_restore_reconciliation_state_rejects_unknown_version_and_bad_records() -> None:
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=1, drift_confirmation_ms=0, service_failure_backoff_ms=10
+    )
+    reconciler.restore_pending_withdraws({
+        "reconciliation": {
+            "version": 999,
+            "service_failure_backoff": [{"target": "light.x", "failures": 1, "retry_at_ms": 10, "signature": []}],
+            "service_plan_progress": [{"target": "light.x", "next_call_index": 1, "signature": []}],
+        }
+    })
+    assert reconciler._service_failure_backoff == {}
+    assert reconciler._service_plan_progress == {}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_hook_completes_immediately_before_adapter_call() -> None:
+    engine = _make_engine_with_light_rule()
+    order: list[str] = []
+
+    class OrderedAdapter(_FakeAdapter):
+        async def async_call(self, domain, service, data, *, context):
+            order.append("adapter")
+            await super().async_call(domain, service, data, context=context)
+
+    async def before_dispatch() -> None:
+        order.append("hook")
+
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=1, drift_confirmation_ms=0, service_failure_backoff_ms=10
+    )
+    await reconciler.tick(
+        engine, OrderedAdapter(), _NoContextTracker(), 0,
+        before_dispatch=before_dispatch,
+    )
+    assert order[:2] == ["hook", "adapter"]
+
+
+@pytest.mark.asyncio
 async def test_revision_change_during_service_call_discards_stale_bookkeeping() -> None:
     engine = _make_engine_with_light_rule()
     entered = asyncio.Event()
@@ -945,3 +1220,159 @@ async def test_tick_confirms_pending_drift_candidate() -> None:
     assert len(promoted) == 1
     assert len(_events_of(events, "service_skipped_drift_promoted")) == 1
     assert len(adapter.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_attempt_history_is_bounded_redacted_and_correlated() -> None:
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=1, drift_confirmation_ms=0, service_failure_backoff_ms=0
+    )
+    for now_ms in range(260):
+        reconciler._record_events([
+            ReconciliationEvent("service_applied", "lock.front", {
+                "domain": "lock", "service": "unlock",
+                "service_data": {"entity_id": "lock.front", "code": "1234"},
+            })
+        ], now_ms)
+
+    history = reconciler.recent_history(limit=300)
+    assert len(history) == 256
+
+    assert reconciler.recent_history(limit=0) == []
+    assert history[0]["time_ms"] == 4
+    assert len({record["plan_id"] for record in history}) == 1
+    assert all(record["call"]["data"]["code"] == "[redacted]" for record in history)
+
+
+@pytest.mark.asyncio
+async def test_stable_matching_skip_does_not_increment_churn_and_windows_expire() -> None:
+    engine = _make_engine_with_light_rule()
+    adapter = _FakeAdapter()
+    adapter.set_state("light.desk", "on", {"brightness": 153})
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=1, drift_confirmation_ms=0, service_failure_backoff_ms=10
+    )
+    await reconciler.apply(engine, adapter, 0)
+
+    assert reconciler.churn_status(0)["five_minute"] == {}
+    reconciler.record_publication_dispatch(1)
+    assert reconciler.churn_status(1)["five_minute"] == {"publication_dispatch": 1}
+    assert reconciler.churn_status(3_600_002)["hour"] == {}
+
+
+@pytest.mark.asyncio
+async def test_rule_shadowing_emits_transitions_and_tracks_durations() -> None:
+    now = 0
+    engine = Engine(clock_fn=lambda: now)
+    engine.load_rules([
+        Rule(id="low", when="true", target="light.desk", set={"state": "on"}),
+        Rule(id="high", when="input_boolean.override == 'on'", target="light.desk", set={"state": "off"}),
+    ])
+    engine.evaluate_all()
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=1, drift_confirmation_ms=0, service_failure_backoff_ms=10
+    )
+    adapter = _FakeAdapter()
+    await reconciler.apply(engine, adapter, 0)
+
+    now = 100
+    engine.update_state("input_boolean.override", "on")
+    engine.evaluate_all()
+    events = await reconciler.apply(engine, adapter, 100)
+    assert _events_of(events, "rule_fully_shadowed")[0].details == {
+        "rule_id": "low", "previous_duration_ms": 100,
+    }
+    assert reconciler.rule_shadowing_status(150)["low"] == {
+        "fully_shadowed": True, "active_duration_ms": 150, "winning_duration_ms": 100,
+    }
+
+    now = 200
+    engine.update_state("input_boolean.override", "off")
+    engine.evaluate_all()
+    events = await reconciler.apply(engine, adapter, 200)
+    assert _events_of(events, "rule_visible")[0].details["rule_id"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_large_repeated_reconciliation_stays_within_tick_budget_and_resolves_once() -> None:
+    target_count = 128
+    iterations = 20
+    engine = Engine(clock_fn=lambda: 0)
+    rules = []
+    for index in range(target_count):
+        target = f"light.load_{index}"
+        rules.extend((
+            Rule(id=f"base-{index}", when="true", target=target, set={"state": "on"}),
+            Rule(id=f"shadow-{index}", when="input_boolean.churn == 'on'", target=target, set={"state": "off"}),
+        ))
+    engine.load_rules(rules)
+    adapter = _FakeAdapter()
+    for index in range(target_count):
+        adapter.set_state(f"light.load_{index}", "on")
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=1, drift_confirmation_ms=0, service_failure_backoff_ms=10
+    )
+    resolve_calls = 0
+    original_resolve = engine.resolve
+
+    def counted_resolve(target: str):
+        nonlocal resolve_calls
+        resolve_calls += 1
+        return original_resolve(target)
+
+    engine.resolve = counted_resolve  # type: ignore[method-assign]
+    started = time.perf_counter()
+    for iteration in range(iterations):
+        engine.update_state("input_boolean.churn", "on" if iteration % 2 else "off")
+        engine.evaluate_all()
+        await reconciler.apply(engine, adapter, iteration * 100)
+    elapsed = time.perf_counter() - started
+
+    assert resolve_calls == target_count * iterations
+    assert elapsed / iterations < 0.1
+    assert len(reconciler._churn_events) <= 4096
+    assert len(reconciler._churn_targets) <= 256
+
+
+@pytest.mark.parametrize("horizons", [[0] * 33, [86_400_001], [100, 99], [True]])
+def test_preview_horizon_bounds(horizons: list[int]) -> None:
+    with pytest.raises(ValueError, match="horizons_ms"):
+        validate_preview_horizons(horizons)
+
+
+def test_churn_target_cardinality_is_bounded() -> None:
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=1, drift_confirmation_ms=0, service_failure_backoff_ms=10
+    )
+    for index in range(300):
+        reconciler._record_churn(index, "call", f"light.target_{index}", None)
+
+    assert len(reconciler._churn_targets) == 256
+    assert len({event[2] for event in reconciler._churn_events}) == 256
+    assert "light.target_0" not in reconciler._churn_targets
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_preview_is_reconciliation_aware_and_does_not_mutate_source() -> None:
+    source = Engine(clock_fn=lambda: 0)
+    source.load_rules([
+        Rule(
+            id="delayed", when="input_boolean.ready == 'on'", for_ms=1_000,
+            target="light.desk", set={"state": "on"},
+        )
+    ])
+    source.update_state("input_boolean.ready", "on")
+    source.evaluate_all()
+    before = source.export_lifecycle_records()
+    preview = Engine(clock_fn=lambda: source.now_ms())
+    preview.load_rules(source.loaded_rules())
+    preview.update_state("input_boolean.ready", "on")
+    preview.import_lifecycle_records(before)
+    preview.evaluate_all()
+
+    phases = await simulate_timeline(preview, [{"advance_ms": 500}, {"advance_ms": 500}])
+
+    assert phases[0]["calls"] == []
+    assert phases[1]["calls"][0]["service"] == "turn_on"
+    assert source.list_active_targets() == ()
+    assert source.export_lifecycle_records() == before

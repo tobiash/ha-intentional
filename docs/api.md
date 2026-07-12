@@ -2,6 +2,11 @@
 
 Intentional exposes a JSON-over-HTTP API on Home Assistant's existing web server. All endpoints require the normal Home Assistant bearer token.
 
+Rule-document request bodies are limited to 1,000,000 UTF-8 bytes. HA migration
+discovery returns at most 500 automations; each source and generated proposal is
+limited to 256,000 bytes, and an oversized merged document is rejected without
+returning its contents.
+
 Non-admin inspection responses recursively replace credentials, lock/alarm codes,
 tokens, passwords, secrets, opaque sensitive fields, and Service plan data with
 `"[redacted]"`. Raw authored documents, history snapshots, runtime diagnostics,
@@ -39,6 +44,35 @@ Long-lived tokens are created in Home Assistant under Profile -> Long-Lived Acce
 | `POST` | `/api/intentional/dry-run` | Evaluate proposed YAML with optional state overrides. |
 | `GET` | `/api/intentional/world` | Agent-friendly desired/actual world model. |
 | `GET` | `/api/intentional/diagnostics` | Recent runtime events for rule firing, service calls, failures, and drift promotions (admin). |
+| `GET` | `/api/intentional/migrate-ha` | Discover loaded HA automations using bounded, redacted metadata (admin). |
+| `GET` | `/api/intentional/migrate-ha/{entity_id}` | Inspect migration support and diagnostics without exposing raw config (admin). |
+| `POST` | `/api/intentional/migrate-ha/propose` | Generate and merged-validate a deterministic Rule proposal (admin). |
+
+## HA Automation Migration
+
+Migration is proposal-only. It reads copied `raw_config` from loaded automation
+entities and never edits, disables, or calls the source automation. Every response
+states `source_mutated: false` and includes a stable source fingerprint.
+
+The first release accepts state triggers with explicit literal `to`, numeric-state
+triggers with literal `above` and/or `below`, fixed `for`, and flat explicit
+`light`/`switch` `turn_on`/`turn_off` actions. Multiple triggers become deterministic
+Rules and distinct actions become targets in each Rule. Conditions, templates,
+blueprints, device actions, delays, choose, scripts, scenes, dynamic targets, and
+conflicting target values are rejected with diagnostics. Proposals warn that an HA
+trigger edge becomes a durable level and that Intent withdrawal differs from an HA
+action that remains applied.
+
+```http
+POST /api/intentional/migrate-ha/propose
+```
+
+```json
+{"entity_id":"automation.hall_lights"}
+```
+
+The response includes `yaml`, `merged_candidate`, `merged_validation`,
+`starter_timeline`, `source_fingerprint`, diagnostics, and `source_mutated:false`.
 
 ## Health
 
@@ -53,6 +87,7 @@ GET /api/intentional/health
   "rule_dir": "/config/intentional/rules",
   "rule_count": 4,
   "active_intent_count": 2,
+  "rollback": {"state": "disarmed"},
   "runtime": {
     "status": "ok",
     "tick_interval_ms": 100,
@@ -68,6 +103,20 @@ GET /api/intentional/health
   }
 }
 ```
+
+After a successful storage-backed Rule mutation, Intentional arms the current
+generation against its immediate predecessor. It rolls back only after three
+consecutive, identically fingerprinted Rule-evaluation failures at the same
+generation/revision fence and before any Effect, scene, or Service plan dispatch.
+Other internal phases are not advertised as rollback-eligible until the runtime
+can classify them without confusing adapter, storage, or environmental failures.
+The safeguard disarms at whichever occurs first: 10 successful ticks or five
+stable minutes. Service failures, unavailable Targets, storage/network errors,
+Drift, stale revisions, policy denials, and user activity are ineligible. The
+separate versioned journal survives restart; rollback failures become
+`manual_intervention_required` and are never retried automatically.
+After any rollback, a five-minute cooldown prevents a newly edited generation
+from being armed. Automatic rollback history reasons start with `auto_rollback:`.
 
 The top-level `status` becomes `degraded` when the reconciliation tick runtime
 has not completed successfully within its liveness window or is currently failing.

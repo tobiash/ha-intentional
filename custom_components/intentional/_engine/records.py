@@ -48,6 +48,7 @@ class HoldAfterAdjustment:
     add_ms: int
     from_time: str
     until_time: str
+    window_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,7 @@ class IntentSelector:
     label: str | None = None
     exclude: tuple[str, ...] = field(default_factory=tuple)
     set: dict[str, Any] = field(default_factory=dict)
+    withdraw: dict[str, Any] = field(default_factory=dict)
     cap: dict[str, Any] = field(default_factory=dict)
     floor: dict[str, Any] = field(default_factory=dict)
     offset: dict[str, Any] = field(default_factory=dict)
@@ -116,3 +118,14 @@ class ObservationGroup:
 
     selector: ObserveSelector
     behavior: str = "any"
+
+
+@dataclass(frozen=True)
+class HysteresisObservation:
+    """Two-threshold level observation with a durable latch."""
+
+    entity: str
+    enter_operator: str
+    enter_value: Any
+    exit_operator: str
+    exit_value: Any

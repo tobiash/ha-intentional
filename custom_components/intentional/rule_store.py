@@ -189,6 +189,7 @@ class StorageRuleStore:
         generation: str,
         *,
         expected_generation: str,
+        reason: str | None = None,
     ) -> dict[str, Any]:
         """Restore a previous rule document generation."""
         if self.generation != expected_generation:
@@ -207,7 +208,7 @@ class StorageRuleStore:
             load_and_preflight_document(contents)
         except RuleLoadError as err:
             return {"error": "validation_failed", "message": str(err)}
-        self._record_history(f"rollback:{generation}")
+        self._record_history(reason or f"rollback:{generation}")
         self._contents = contents
         await self.async_save()
         return {

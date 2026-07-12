@@ -166,6 +166,74 @@ def test_high_leverage_views_have_correct_urls() -> None:
     assert hasattr(IntentionalReplayView, "post")
 
 
+async def test_migration_discovery_and_proposal_are_read_only() -> None:
+    from custom_components.intentional.api import (
+        IntentionalHAMigrationListView,
+        IntentionalHAMigrationProposeView,
+    )
+
+    raw = {
+        "id": "hall",
+        "trigger": {"platform": "state", "entity_id": "binary_sensor.hall", "to": "on"},
+        "action": {"service": "light.turn_on", "target": {"entity_id": "light.hall"}},
+    }
+    entity = SimpleNamespace(entity_id="automation.hall", raw_config=raw)
+    hass = SimpleNamespace(
+        data={"automation": SimpleNamespace(entities=[entity])},
+        config_entries=SimpleNamespace(async_entries=lambda _domain: []),
+    )
+
+    class Request(dict):
+        app = {"hass": hass}
+
+        async def json(self):
+            return {"entity_id": "automation.hall"}
+
+    request = Request(hass_user=SimpleNamespace(is_admin=True))
+    listed = json.loads((await IntentionalHAMigrationListView().get(request)).body)
+    proposed = json.loads((await IntentionalHAMigrationProposeView().post(request)).body)
+
+    assert listed["automations"][0]["entity_id"] == "automation.hall"
+    assert "raw_config" not in listed["automations"][0]
+    assert proposed["supported"] is True
+    assert proposed["source_mutated"] is False
+    assert raw["action"]["service"] == "light.turn_on"
+
+
+def test_migration_summary_sanitizes_aliases() -> None:
+    from custom_components.intentional.api import _automation_summary
+
+    base = {"trigger": [], "action": []}
+    assert _automation_summary("automation.x", {**base, "alias": "{{ states('sensor.secret') }}"})["alias"] == "[redacted]"
+    assert _automation_summary("automation.x", {**base, "alias": "password=hidden"})["alias"] == "[redacted]"
+    assert len(_automation_summary("automation.x", {**base, "alias": "a" * 500})["alias"]) == 120
+
+
+def test_rollback_health_hides_diagnostics_from_non_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+    import custom_components.intentional.api as api
+    from custom_components.intentional.const import DOMAIN
+
+    entry = SimpleNamespace(entry_id="entry-1")
+    safeguard = SimpleNamespace(health=lambda: {
+        "state": "manual_intervention_required",
+        "current_generation": "secret-generation",
+        "last_error": "authorization token=secret",
+    })
+    hass = SimpleNamespace(
+        config_entries=SimpleNamespace(async_entries=lambda _domain: [entry]),
+        data={DOMAIN: {"entry-1:automatic_rollback": safeguard}},
+    )
+    monkeypatch.setattr(api, "AutomaticRollback", type(safeguard))
+
+    assert api._rollback_health(hass) == {
+        "state": "manual_intervention_required",
+        "status": "degraded",
+    }
+    admin = api._rollback_health(hass, diagnostics=True)
+    assert admin["current_generation"] == "secret-generation"
+    assert admin["last_error"] == "[redacted]"
+
+
 async def test_replay_resolves_semantic_metadata_like_simulation() -> None:
     from custom_components.intentional.api import IntentionalReplayView
 
@@ -178,6 +246,7 @@ async def test_replay_resolves_semantic_metadata_like_simulation() -> None:
 - id: motion
   while: {motion: {detected: {area: office}}}
   intent: {light.office: {state: on}}
+  effect: {service: notify.phone, data: {message: motion}}
 """,
                 "timeline": [{"states": {"binary_sensor.motion.state": "on"}}],
                 "semantic_metadata": [{
@@ -194,6 +263,13 @@ async def test_replay_resolves_semantic_metadata_like_simulation() -> None:
 
     assert response.status == 200
     assert body["steps"][0]["active_targets"] == ["light.office"]
+    assert body["steps"][0]["effects"] == [{
+        "rule_id": "motion",
+        "domain": "notify",
+        "service": "phone",
+        "target": {},
+        "data": {"message": "motion"},
+    }]
 
 
 def test_state_view_exposes_state() -> None:

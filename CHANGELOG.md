@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-07-12
+
+### Added
+- **Field-aware withdrawal and adoption** apply explicit withdrawal values only when a field becomes unowned, reveal lower providers first, and can restore the actual value captured at the start of ownership.
+- **Hysteretic observations** provide durable enter/exit thresholds with dwell, reload, restart, simulation, and replay support.
+- **Shadow dispatch** computes complete Service plans and diagnostics without calling Home Assistant services, detecting Drift, or creating Manual overrides.
+- **Reusable authoring declarations** add retention profiles and named local-time windows with deterministic expansion and fingerprinting.
+- **Semantic power observations** resolve Home Assistant power sensors by effective device class with area, device, and entity filters.
+- **Lifecycle preview and observability** add bounded future horizons, Service-plan history, churn counters, provider-shadow transitions, and richer health/explanation diagnostics.
+- **Home Assistant migration assistant** discovers supported automations and produces validated, simulated Intentional proposals without changing or disabling source automations.
+- **Automatic generation rollback** safely restores the previous Rule generation after repeated deterministic evaluation failures, with durable pre-dispatch fencing and loop prevention.
+
+### Changed
+- **Reconciliation ownership** persists field provenance, adopted values, partial Service-plan progress, and rebased retry delays across restart.
+- **Simulation and replay** share reconciliation-aware behavior, including one-shot Effect acknowledgement, withdrawals, shadow plans, and lifecycle persistence.
+- **Validation and schema** describe conflict certainty, recency ties, reusable declarations, withdrawal, hysteresis, shadow dispatch, semantic power, migration, diagnostics, and rollback limits.
+
+### Fixed
+- **YAML compatibility** preserves legacy last-value handling for duplicate keys in ordinary mappings while rejecting duplicates in new retention-profile and time-window declarations.
+- **Reconciliation performance** reuses each Target resolution for shadow-transition accounting and adds a bounded 10 Hz regression workload with shadowing and winner churn.
+- **Home Assistant publication coverage** guards stable ticks, registry bursts, shadow transitions, reloads, and restored lifecycle state against redundant entity updates.
+- **HA migration discovery** is contract-tested against loaded Home Assistant automation entities and their `raw_config` surface in HA-enabled CI.
+
 ## [0.10.2] - 2026-07-12
 
 ### Fixed

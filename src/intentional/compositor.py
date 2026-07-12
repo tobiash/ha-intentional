@@ -90,6 +90,7 @@ class ResolvedIntent:
     ttl_remaining_ms: int | None = None
     all_active_intents: tuple[Intent, ...] = field(default_factory=tuple)
     diagnostics: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    field_providers: dict[str, Intent] = field(default_factory=dict)
 
 
 def resolve_intents(
@@ -156,6 +157,7 @@ def resolve_intents(
 
         # For each field, find the highest-priority provider
         baseline = {}
+        field_providers: dict[str, Intent] = {}
         for field_name in all_fields:
             providers = [i for i in set_providers if field_name in i.set]
             if field_name in COLOR_FIELDS and color_winner is not None:
@@ -164,6 +166,10 @@ def resolve_intents(
                 providers = [color_winner]
             chosen = max(providers, key=lambda i: i.priority)
             baseline[field_name] = chosen.set[field_name]
+            field_providers[field_name] = chosen
+
+    if not set_providers:
+        field_providers = {}
 
     # Apply cap: smallest cap wins
     result = dict(baseline)
@@ -171,11 +177,6 @@ def resolve_intents(
         for field_name, cap_value in intent.cap.items():
             if field_name in result:
                 result[field_name] = _min_clamp(result[field_name], cap_value)
-            else:
-                # If the field doesn't exist yet, the cap seeds it as a value.
-                # This handles "ambient_max" rules that say "no value should
-                # exceed 60%" without themselves setting a value.
-                result[field_name] = cap_value
 
     # Apply floor: largest floor wins
     for intent in active:
@@ -246,6 +247,7 @@ def resolve_intents(
         ttl_remaining_ms=ttl_remaining_ms,
         all_active_intents=tuple(active),
         diagnostics=tuple(diagnostics),
+        field_providers=field_providers,
     )
 
 

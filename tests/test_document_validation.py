@@ -106,6 +106,70 @@ def test_warns_without_breaking_legacy_dangerous_targets() -> None:
     assert findings["warnings"][0]["code"] == "dangerous_target_without_policy"
 
 
+def test_composition_warnings_include_certainty_basis_and_authored_ids() -> None:
+    findings = document_policy_findings([
+        Rule(
+            id="base::light.office", authored_rule_id="base", when="true",
+            target="light.office", set={"state": "off", "brightness_pct": 50, "rgb_color": [1, 2, 3]},
+            offset={"brightness_pct": 5},
+        ),
+        Rule(
+            id="other", when="true", target="light.office",
+            set={"brightness_pct": 60, "xy_color": [0.1, 0.2]}, offset={"brightness_pct": 5},
+        ),
+    ])
+
+    selected = {
+        warning["code"]: warning for warning in findings["warnings"]
+        if warning["code"] in {
+            "same_target_field_shadowing", "equal_precedence_recency_tie",
+            "state_off_with_light_output", "exact_duplicate_modifier",
+        }
+    }
+    assert set(selected) == {
+        "same_target_field_shadowing", "equal_precedence_recency_tie",
+        "state_off_with_light_output", "exact_duplicate_modifier",
+    }
+    assert all(warning["certainty"] in {"definite", "possible"} for warning in selected.values())
+    assert all(warning["basis"] for warning in selected.values())
+    assert selected["same_target_field_shadowing"]["rule_ids"] == ["base", "other"]
+
+
+def test_unconditional_suppression_and_color_conflict_are_definite() -> None:
+    findings = document_policy_findings([
+        Rule(id="guard", when="true", blocks=("mood",)),
+        Rule(
+            id="mood", when="true", target="light.office",
+            set={"rgb_color": [1, 2, 3], "color_temp_k": 3000},
+        ),
+    ])
+
+    warnings = {warning["code"]: warning for warning in findings["warnings"]}
+    assert warnings["unconditional_suppression_shadowing"]["certainty"] == "definite"
+    assert warnings["mutually_exclusive_light_color"]["certainty"] == "definite"
+
+
+def test_mutually_exclusive_simple_conditions_do_not_warn_about_overlap() -> None:
+    findings = document_policy_findings([
+        Rule(id="home", when="sensor.mode == home", target="light.office", set={"state": "on"}),
+        Rule(id="away", when="sensor.mode == away", target="light.office", set={"state": "off"}),
+        Rule(id="cold", when="sensor.temp < 18", target="climate.office", set={"temperature": 21}),
+        Rule(id="hot", when="sensor.temp >= 18", target="climate.office", set={"temperature": 18}),
+    ])
+    assert not any(
+        warning["code"] in {"same_target_field_shadowing", "equal_precedence_recency_tie"}
+        for warning in findings["warnings"]
+    )
+
+
+def test_warning_output_is_strictly_capped() -> None:
+    rules = [
+        Rule(id=f"rule-{index}", when="sensor.value > 0", target="light.office", set={"state": "on"})
+        for index in range(300)
+    ]
+    assert len(document_policy_findings(rules)["warnings"]) <= 200
+
+
 async def test_validate_api_returns_floor_cap_conflict_as_warning() -> None:
     from custom_components.intentional.api import IntentionalValidateView
 

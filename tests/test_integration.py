@@ -629,6 +629,46 @@ async def test_stable_ticks_do_not_poll_whole_install(
     assert calls == 0
 
 
+async def test_registry_event_burst_coalesces_without_publication_spam(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import custom_components.intentional.publication as publication_module
+    from custom_components.intentional.selector_ingest import SelectorMembershipPlanner
+
+    config_entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    invalidations = publications = 0
+    original_registry_changed = SelectorMembershipPlanner.registry_changed
+
+    def count_registry_changed(self):
+        nonlocal invalidations
+        invalidations += 1
+        return original_registry_changed(self)
+
+    def count_publication(*_args, **_kwargs):
+        nonlocal publications
+        publications += 1
+
+    monkeypatch.setattr(SelectorMembershipPlanner, "registry_changed", count_registry_changed)
+    monkeypatch.setattr(publication_module, "async_dispatcher_send", count_publication)
+    for event_type in (
+        "entity_registry_updated",
+        "device_registry_updated",
+        "area_registry_updated",
+        "label_registry_updated",
+    ):
+        hass.bus.async_fire(event_type, {"action": "update", "id": "unrelated"})
+    await asyncio.sleep(0.12)
+    await hass.async_block_till_done()
+
+    assert invalidations == 1
+    assert publications == 0
+
+
 async def test_semantic_selector_uses_real_ha_area_membership(
     hass: HomeAssistant, config_entry: MockConfigEntry, rule_dir: Path
 ) -> None:

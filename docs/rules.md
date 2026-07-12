@@ -5,6 +5,31 @@ authoring, import, export, API, and Configure-panel format. On first setup, the
 integration imports existing YAML files from the configured rule directory if no
 stored rule document exists yet.
 
+Rule documents are limited to 1,000,000 UTF-8 bytes and may define at most 256
+retention profiles and 256 time windows. These limits apply consistently to
+parser, API validation, and storage writes. Existing Rule, scene, and Target
+mappings retain PyYAML's historical last-value behavior for duplicate keys. New
+`retention_profiles` and `time_windows` declarations reject duplicate blocks,
+names, and nested fields instead of silently changing a reference's meaning.
+
+## Diagnostics
+
+Document validation reports warning-only findings for likely composition mistakes, including
+same-field shadowing, equal-precedence recency ties, conflicting light color groups, off-state
+brightness/color combinations, unconditional suppression, and duplicate modifiers. Each such
+warning includes `certainty` (`definite` or `possible`), a machine-readable `basis`, and authored
+Rule IDs. These findings do not reject otherwise valid documents.
+
+Runtime diagnostics retain no raw persistent history. Each config entry keeps at most 256
+redacted Service-plan attempt records and one hour of bounded churn counters. Target explain
+projections include recent attempts; the admin diagnostics endpoint also exposes attempts,
+Rule shadowing durations, five-minute/hour churn totals, and high-churn Targets.
+
+`POST /api/intentional/preview` accepts an optional ascending `horizons_ms` list with at most 32
+values, each from 0 through 86400000. Horizon phases are reconciliation-aware and contain only
+active Rule phases, proposed Service plans, and Effects. Preview uses an isolated in-memory
+snapshot and never mutates the live engine or calls Home Assistant services.
+
 Rule YAML describes reconciliation rules:
 
 ```text
@@ -754,7 +779,7 @@ Duration fields accept:
 - `1h30m15s`
 
 An integer is interpreted as milliseconds.
-# Target Safety Policies
+## Target Safety Policies
 
 The optional document-level `targets` mapping declares how Reconciliation may control each Target. Omitting a declaration preserves existing behavior. Safety-sensitive domains (`lock`, `alarm_control_panel`, `cover`, `valve`, and `climate`) produce a preflight warning when undeclared, but legacy Rules remain valid.
 
@@ -776,7 +801,7 @@ targets:
 `allowed_fields` is an allowlist for resolved fields. `forbidden_automatic_states` blocks the listed `state` values unless their winning provider has `user` Authority. `user_authority.fields` and `user_authority.states` impose the same Authority requirement selectively. `unavailable: skip` prevents calls while the Target is missing, `unknown`, or `unavailable`; `allow` preserves legacy dispatch. `max_retries` limits retries after the initial failed Service plan (`0` disables retries).
 
 Policy denials are reported as `service_denied_target_policy` Reconciliation events and are included in Target explanations, previews, and simulation steps.
-# Semantic observations
+## Semantic Observations
 
 Purpose-specific observations select entities by Home Assistant metadata, never
 by entity names. The fixed purposes are `motion`, `occupancy`, `door`, `window`,
@@ -807,3 +832,51 @@ nested inside ordinary `any`, `all`, `none`, or `not`; use the purpose clause's
 Membership uses domain and effective device class: registry override, registry
 original device class, then the state's `device_class` attribute. State-only
 entities participate when that metadata is sufficient.
+## Field Ownership And Withdrawal
+
+An intent field can pair its desired value with a withdrawal policy:
+
+```yaml
+intent:
+  light.desk:
+    state: {value: on, withdraw: off}
+    brightness_pct: {value: 70, withdraw: adopt}
+```
+
+`withdraw: adopt` restores the actual normalized value observed when the field
+first became owned. Omit `withdraw` (or use `null`) for no explicit field
+withdrawal. A lower-authority provider is revealed instead of withdrawing, and
+modifier-only fields do not establish ownership.
+
+## Hysteresis
+
+Use opposite enter and exit thresholds to avoid chatter. Top-level `after`
+still controls entry dwell; `hold` begins only after the exit threshold fires.
+
+```yaml
+while:
+  sensor.room_temperature:
+    enter: {gte: 25}
+    exit: {lt: 22}
+after: 2m
+```
+
+Latch and dwell state survive restart when the Rule fingerprint is unchanged.
+
+## Shadow Dispatch
+
+Declare `dispatch: shadow` under a document Target policy to compute and expose
+would-apply/would-withdraw plans without calling Home Assistant services or
+creating applied-plan, Drift, or Manual override state. Changing it to
+`dispatch: apply` resumes normal reconciliation.
+## Reusable Retention And Time Windows
+
+Documents can define `retention_profiles` and strict `HH:MM` `time_windows`. Rules reference them with `hold: {use: NAME}` and `time_window: {in: NAME}` or `{not_in: NAME}`. Local `hold.while`, `hold.until`, and `hold.after` fields replace the corresponding profile field wholesale. Authored references remain in storage; the expanded effective Rule determines its fingerprint.
+
+Windows include `from`, exclude `until`, support overnight ranges, and match all day when endpoints are equal. Dynamic hold adjustments accept inline `{from, until, add}` or named `{window, add}` forms.
+
+Semantic `power` uses the same numeric operators as temperature and illuminance. It selects only `sensor` entities whose effective Home Assistant device class is exactly `power`, comparing raw native state units. Energy, apparent/reactive power, and power-factor sensors do not match.
+> **YAML compatibility:** Existing Rule, scene, and Target mappings retain PyYAML's
+> historical last-value behavior for duplicate keys. New `retention_profiles` and
+> `time_windows` declarations are stricter: duplicate declaration blocks, names, or
+> fields are rejected so authoring references cannot silently change meaning.

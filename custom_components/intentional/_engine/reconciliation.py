@@ -15,8 +15,11 @@ diagnostics without this module knowing about HA's diagnostic sink.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import json
+from collections import OrderedDict, deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from hashlib import sha256
 from typing import Any, Protocol, runtime_checkable
 
 from .adapter import FrozenValue, ServicePlanSignature
@@ -81,6 +84,10 @@ class _RetryState:
     signature: ServicePlanSignature
 
 
+_RECONCILIATION_STATE_VERSION = 2
+_MAX_PERSISTED_TARGETS = 256
+
+
 # --------------------------------------------------------------------------- #
 # Resolved target state (moved from the integration)
 # --------------------------------------------------------------------------- #
@@ -95,6 +102,8 @@ class ResolvedTargetState:
     transition_withdraw_ms: int | None
     withdraw_value: dict[str, Any] | None = None
     ownership: str = "managed"
+    field_ownership: dict[str, Any] = field(default_factory=dict)
+    dispatch: str = "apply"
 
 
 WITHDRAW_TO_OFF_DOMAINS = frozenset({"light", "switch", "input_boolean", "fan", "siren"})
@@ -155,6 +164,43 @@ def _default_withdraw_value(target: str, previous: ResolvedTargetState) -> dict[
     return {"state": "off"}
 
 
+def _normalized_actual_fields(state: Any | None) -> dict[str, Any]:
+    if state is None or _state_is_unavailable(state):
+        return {}
+    return manual_set_from_state_object(state)
+
+
+def _owned_withdrawals(previous: ResolvedTargetState | None) -> dict[str, Any]:
+    if previous is None:
+        return {}
+    result: dict[str, Any] = {}
+    for field_name, record in previous.field_ownership.items():
+        if not isinstance(record, dict):
+            continue
+        if record.get("policy") in {"literal", "adopt"} and "value" in record:
+            result[field_name] = record["value"]
+    return result
+
+
+def _has_explicit_withdrawal(previous: ResolvedTargetState) -> bool:
+    return any(
+        isinstance(record, dict) and record.get("policy") in {"literal", "adopt"}
+        for record in previous.field_ownership.values()
+    )
+
+
+def _orphaned_withdrawals(
+    previous: ResolvedTargetState | None, current_fields: set[str]
+) -> dict[str, Any]:
+    if previous is None:
+        return {}
+    return {
+        field_name: value
+        for field_name, value in _owned_withdrawals(previous).items()
+        if field_name not in current_fields
+    }
+
+
 def _withdraw_value_for_service_plan(
     target: str,
     calls: tuple[tuple[str, str, dict[str, Any]], ...] | None,
@@ -204,6 +250,52 @@ def _service_call_is_idempotent(service: str) -> bool:
     return service not in {"toggle", "media_next_track", "media_previous_track"}
 
 
+def _redact_call_data(data: Any) -> dict[str, Any]:
+    """Keep call diagnostics useful without retaining credentials or large payloads."""
+    if not isinstance(data, dict):
+        return {}
+    sensitive = {"auth", "authorization", "code", "key", "password", "pin", "secret", "token"}
+    remaining = 2048
+
+    def bounded(value: Any, *, key: str = "", depth: int = 0) -> Any:
+        nonlocal remaining
+        normalized = key.lower().replace("-", "_")
+        if any(part in normalized.split("_") for part in sensitive):
+            return "[redacted]"
+        if depth >= 6 or remaining <= 0:
+            return "[truncated]"
+        if isinstance(value, str):
+            encoded = value.encode("utf-8")[: min(200, remaining)]
+            remaining -= len(encoded)
+            return encoded.decode("utf-8", errors="ignore")
+        if isinstance(value, (bool, int, float)) or value is None:
+            remaining -= min(remaining, len(str(value).encode()))
+            return value
+        if isinstance(value, dict):
+            return {
+                str(child_key)[:80]: bounded(child, key=str(child_key), depth=depth + 1)
+                for child_key, child in list(value.items())[:32]
+                if remaining > 0
+            }
+        if isinstance(value, (list, tuple)):
+            return [bounded(child, depth=depth + 1) for child in value[:16] if remaining > 0]
+        return "[bounded]"
+
+    result = bounded(data)
+    encoded = json.dumps(result, ensure_ascii=True, separators=(",", ":")).encode()
+    if len(encoded) > 4096:
+        return {
+            "preview": encoded[:3000].decode("ascii", errors="ignore"),
+            "truncated": True,
+        }
+    return result
+
+
+def _truncate_utf8(value: Any, limit: int) -> str | None:
+    encoded = str(value or "").encode("utf-8")[:limit]
+    return encoded.decode("utf-8", errors="ignore") or None
+
+
 _SAFETY_REDUCING_SERVICES = frozenset(
     {
         "turn_off",
@@ -226,8 +318,23 @@ def _build_resolved_target_state(
     calls: tuple[tuple[str, str, dict[str, Any]], ...] | None = None,
     *,
     ownership: str = "managed",
+    previous: ResolvedTargetState | None = None,
+    actual: Any | None = None,
+    dispatch: str = "apply",
 ) -> ResolvedTargetState:
     winner = resolved.winning_intent
+    field_ownership: dict[str, Any] = {}
+    actual_fields = _normalized_actual_fields(actual)
+    for field_name, provider in getattr(resolved, "field_providers", {}).items():
+        old = (previous.field_ownership if previous is not None else {}).get(field_name)
+        policy = provider.withdraw.get(field_name)
+        if isinstance(old, dict) and old.get("policy") == "adopt":
+            field_ownership[field_name] = dict(old)
+        elif policy == "adopt":
+            if field_name in actual_fields:
+                field_ownership[field_name] = {"policy": "adopt", "value": actual_fields[field_name]}
+        else:
+            field_ownership[field_name] = {"policy": "literal", "value": policy} if field_name in provider.withdraw else {"policy": None}
     return ResolvedTargetState(
         value=dict(resolved.value),
         winner_key=(winner.rule_id, winner.created_at_ms) if winner is not None else None,
@@ -236,6 +343,40 @@ def _build_resolved_target_state(
         transition_withdraw_ms=winner.transition_withdraw_ms if winner is not None else None,
         withdraw_value=_withdraw_value_for_service_plan(resolved.target, calls),
         ownership=ownership,
+        field_ownership=field_ownership,
+        dispatch=dispatch,
+    )
+
+
+def _build_partially_applied_target_state(
+    resolved: Any,
+    calls: tuple[tuple[str, str, dict[str, Any]], ...],
+    *,
+    ownership: str,
+    previous: ResolvedTargetState | None,
+    actual: Any | None,
+) -> ResolvedTargetState:
+    """Retain only ownership established by the successful plan prefix."""
+    state = _build_resolved_target_state(
+        resolved, calls, ownership=ownership, previous=previous, actual=actual
+    )
+    applied_fields: set[str] = set()
+    for _domain, service, data in calls:
+        applied_fields.update(key for key in data if key not in {"entity_id", "transition"})
+        if service in {"turn_on", "turn_off", "lock", "unlock", "open_cover", "close_cover"}:
+            applied_fields.add("state")
+    return ResolvedTargetState(
+        value={key: value for key, value in state.value.items() if key in applied_fields},
+        winner_key=state.winner_key,
+        winner_confidence=state.winner_confidence,
+        transition_ms=state.transition_ms,
+        transition_withdraw_ms=state.transition_withdraw_ms,
+        withdraw_value=_withdraw_value_for_service_plan(resolved.target, calls),
+        ownership=state.ownership,
+        field_ownership={
+            key: value for key, value in state.field_ownership.items() if key in applied_fields
+        },
+        dispatch=state.dispatch,
     )
 
 
@@ -282,6 +423,10 @@ def _resolved_target_state_from_record(
             if isinstance(raw.get("withdraw_value"), dict)
             else None,
             ownership=str(raw.get("ownership", "managed")),
+            field_ownership=dict(raw.get("field_ownership", {}))
+            if isinstance(raw.get("field_ownership", {}), dict)
+            else {},
+            dispatch=str(raw.get("dispatch", "apply")),
         )
     except (TypeError, ValueError):
         return None
@@ -437,6 +582,19 @@ class Reconciliation:
         self._service_failure_backoff: dict[str, _RetryState] = {}
         self._service_plan_progress: dict[str, tuple[ServicePlanSignature, int]] = {}
         self._policy_denials: dict[str, dict[str, Any]] = {}
+        self._shadow_plans: dict[str, dict[str, Any]] = {}
+        self._attempt_history: deque[dict[str, Any]] = deque(maxlen=256)
+        self._churn_events: deque[tuple[int, str, str, str | None]] = deque(maxlen=4096)
+        self._churn_targets: OrderedDict[str, None] = OrderedDict()
+        self._churn_rules: OrderedDict[str, None] = OrderedDict()
+        self._desired_signatures: dict[str, ServicePlanSignature] = {}
+        self._target_winners: dict[str, tuple[str, int] | None] = {}
+        self._rule_visibility: dict[str, bool] = {}
+        self._rule_visibility_since: dict[str, int] = {}
+        self._rule_active_since: dict[str, int] = {}
+        self._rule_winning_ms: dict[str, int] = {}
+        self._rule_observed_at: dict[str, int] = {}
+        self._last_reconciliation_now_ms: int | None = None
 
     def projection_state(self, target: str, now_ms: int) -> dict[str, Any]:
         """Return read-only reconciliation facts for Target explanation."""
@@ -464,7 +622,49 @@ class Reconciliation:
             },
             "service_plan_progress": None if progress is None else {"next_call_index": progress[1]},
             "policy_denial": self._policy_denials.get(target),
+            "shadow": self._shadow_plans.get(target),
+            "recent_history": self.recent_history(target=target, limit=20),
         }
+
+    def recent_history(self, *, target: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        """Return bounded, already-redacted service-plan attempt records."""
+        records = [record for record in self._attempt_history if target is None or record["target"] == target]
+        bounded_limit = max(0, min(limit, 256))
+        return [] if bounded_limit == 0 else records[-bounded_limit:]
+
+    def churn_status(self, now_ms: int) -> dict[str, Any]:
+        """Return compact rolling 5 minute/hour churn counters."""
+        self._expire_churn(now_ms)
+        five_minute = self._summarize_churn(now_ms - 300_000)
+        hour = self._summarize_churn(now_ms - 3_600_000)
+        target_counts: dict[str, int] = {}
+        for timestamp, _kind, target, _rule_id in self._churn_events:
+            if timestamp >= now_ms - 300_000 and target:
+                target_counts[target] = target_counts.get(target, 0) + 1
+        high = [
+            {"target": target, "events_5m": count}
+            for target, count in sorted(target_counts.items(), key=lambda item: (-item[1], item[0]))[:10]
+            if count >= 10
+        ]
+        return {"status": "high_churn" if high else "ok", "five_minute": five_minute, "hour": hour, "high_churn_targets": high}
+
+    def rule_shadowing_status(self, now_ms: int) -> dict[str, dict[str, Any]]:
+        """Return active versus output-winning duration counters."""
+        return {
+            rule_id: {
+                "fully_shadowed": not self._rule_visibility[rule_id],
+                "active_duration_ms": max(0, now_ms - self._rule_active_since.get(rule_id, now_ms)),
+                "winning_duration_ms": self._rule_winning_ms.get(rule_id, 0) + (
+                    max(0, now_ms - self._rule_observed_at.get(rule_id, now_ms))
+                    if self._rule_visibility[rule_id] else 0
+                ),
+            }
+            for rule_id in sorted(self._rule_visibility)
+        }
+
+    def record_publication_dispatch(self, now_ms: int) -> None:
+        """Count one change-driven entity publication dispatch."""
+        self._record_churn(now_ms, "publication_dispatch", "", None)
 
     # ----- drift classification (shared by on_state_delta and tick) -----
 
@@ -511,7 +711,9 @@ class Reconciliation:
 
         Does not apply service plans; that is :meth:`tick`'s job.
         """
-        return self._classify_drift(engine, new_state, context_tracker, now_ms)
+        events = self._classify_drift(engine, new_state, context_tracker, now_ms)
+        self._record_events(events, now_ms)
+        return events
 
     # ----- entry point 2: the periodic path -----
 
@@ -523,9 +725,12 @@ class Reconciliation:
         now_ms: int,
         *,
         revision_is_current: Callable[[], bool] | None = None,
+        before_dispatch: Callable[[], Awaitable[None]] | None = None,
     ) -> list[ReconciliationEvent]:
         """Confirm pending drift, apply resolved targets, and withdraw stale ones."""
+        self._last_reconciliation_now_ms = now_ms
         events: list[ReconciliationEvent] = []
+        resolved_targets: dict[str, Any] = {}
         events.extend(self._confirm_pending_drift(engine, adapter, context_tracker, now_ms))
         promoted_targets = {event.target for event in events if event.kind == "drift_promoted"}
         events.extend(
@@ -535,15 +740,20 @@ class Reconciliation:
                 now_ms,
                 excluded_targets=promoted_targets,
                 revision_is_current=revision_is_current,
+                before_dispatch=before_dispatch,
+                resolved_targets=resolved_targets,
             )
         )
         if revision_is_current is not None and not revision_is_current():
             return events
         events.extend(
             await self._withdraw_stale_targets(
-                engine, adapter, now_ms, revision_is_current=revision_is_current
+                engine, adapter, now_ms, revision_is_current=revision_is_current,
+                before_dispatch=before_dispatch,
             )
         )
+        events.extend(self._shadowing_transitions(engine, now_ms, resolved_targets))
+        self._record_events(events, now_ms)
         return events
 
     async def apply(
@@ -553,9 +763,15 @@ class Reconciliation:
         now_ms: int,
     ) -> list[ReconciliationEvent]:
         """Apply resolved targets and withdraw stale ones (no drift confirmation)."""
+        self._last_reconciliation_now_ms = now_ms
         events: list[ReconciliationEvent] = []
-        events.extend(await self._apply_active_targets(engine, adapter, now_ms))
+        resolved_targets: dict[str, Any] = {}
+        events.extend(await self._apply_active_targets(
+            engine, adapter, now_ms, resolved_targets=resolved_targets
+        ))
         events.extend(await self._withdraw_stale_targets(engine, adapter, now_ms))
+        events.extend(self._shadowing_transitions(engine, now_ms, resolved_targets))
+        self._record_events(events, now_ms)
         return events
 
     def _confirm_pending_drift(
@@ -582,6 +798,8 @@ class Reconciliation:
         *,
         excluded_targets: set[str] | None = None,
         revision_is_current: Callable[[], bool] | None = None,
+        before_dispatch: Callable[[], Awaitable[None]] | None = None,
+        resolved_targets: dict[str, Any] | None = None,
     ) -> list[ReconciliationEvent]:
         events: list[ReconciliationEvent] = []
         active_targets = set(engine.list_active_targets())
@@ -591,10 +809,17 @@ class Reconciliation:
                 events.append(ReconciliationEvent("service_skipped_drift_promoted", target))
                 continue
             resolved = engine.resolve(target)
+            if resolved_targets is not None:
+                resolved_targets[target] = resolved
             if resolved is None:
                 self._last_resolved.pop(target, None)
                 continue
             resolved_value = dict(resolved.value)
+            winner = resolved.winning_intent
+            winner_key = None if winner is None else (winner.rule_id, winner.created_at_ms)
+            if target in self._target_winners and self._target_winners[target] != winner_key:
+                self._record_churn(now_ms, "winner_change", target, winner.rule_id if winner else None)
+            self._target_winners[target] = winner_key
             policy = getattr(engine, "target_policy", lambda _target: None)(target)
             ownership = policy.ownership if policy is not None else "managed"
             denial = target_policy_denial(engine, target, resolved_value, policy)
@@ -604,10 +829,39 @@ class Reconciliation:
                     events.append(ReconciliationEvent("service_denied_target_policy", target, denial))
                 continue
             previous = self._last_resolved.get(target)
+            current_state = adapter.get_state(target)
+            providers = getattr(resolved, "field_providers", {})
+            if policy is not None and policy.dispatch == "shadow":
+                self._last_resolved.pop(target, None)
+                self._last_applied.pop(target, None)
+                self._service_failure_backoff.pop(target, None)
+                self._service_plan_progress.pop(target, None)
+                clear_pending_state_drift(self._drift_candidates, target)
+                shadow = {"would_apply": resolved_value, "would_withdraw": {}}
+                if self._shadow_plans.get(target) != shadow:
+                    self._shadow_plans[target] = shadow
+                    events.append(ReconciliationEvent("service_would_apply", target, {"value": resolved_value, "withdraw": {}}))
+                continue
+            uncaptured_adoptions = [
+                field_name
+                for field_name, provider in providers.items()
+                if provider.withdraw.get(field_name) == "adopt"
+                and not (
+                    previous is not None
+                    and isinstance(previous.field_ownership.get(field_name), dict)
+                    and previous.field_ownership[field_name].get("policy") == "adopt"
+                )
+            ]
+            if uncaptured_adoptions and _state_is_unavailable(current_state):
+                events.append(ReconciliationEvent("adoption_deferred_unavailable", target, {"fields": sorted(uncaptured_adoptions)}))
+                continue
             transition_ms = _transition_ms_for_resolved_change(previous, resolved)
+            orphaned = _orphaned_withdrawals(previous, set(providers))
+            dispatch_value = dict(orphaned)
+            dispatch_value.update(resolved_value)
             calls = service_calls_for_resolved_target(
                 target,
-                resolved_value,
+                dispatch_value,
                 transition_ms=transition_ms,
             )
             if not calls:
@@ -619,10 +873,15 @@ class Reconciliation:
                         )
                     )
                 self._last_resolved[target] = _build_resolved_target_state(
-                    resolved, calls, ownership=ownership
+                    resolved, calls, ownership=ownership, previous=previous, actual=current_state,
+                    dispatch=policy.dispatch if policy is not None else "apply",
                 )
                 continue
             signature = service_plan_signature(calls)
+            old_signature = self._desired_signatures.get(target)
+            if old_signature is not None and old_signature != signature:
+                self._record_churn(now_ms, "plan_signature_change", target, getattr(resolved.winning_intent, "rule_id", None))
+            self._desired_signatures[target] = signature
             retry = self._service_failure_backoff.get(target)
             if (
                 retry is not None
@@ -642,7 +901,7 @@ class Reconciliation:
             has_pending_withdraw = _last_applied_is_withdraw_signature(
                 target, previous, self._last_applied
             )
-            current_state = adapter.get_state(target)
+            self._shadow_plans.pop(target, None)
             if (
                 policy is not None
                 and policy.unavailable == "skip"
@@ -687,7 +946,7 @@ class Reconciliation:
                 and now_ms < suppress_until
             ):
                 self._last_resolved[target] = _build_resolved_target_state(
-                    resolved, calls, ownership=ownership
+                    resolved, calls, ownership=ownership, previous=previous, actual=current_state
                 )
                 events.append(ReconciliationEvent("service_skipped_pending_transition", target))
                 continue
@@ -697,17 +956,17 @@ class Reconciliation:
                     or service_plan_match(signature, current_state) is not ServicePlanMatch.MISMATCH
                 ):
                     self._last_resolved[target] = _build_resolved_target_state(
-                        resolved, calls, ownership=ownership
+                        resolved, calls, ownership=ownership, previous=previous, actual=current_state
                     )
                     continue
                 if target in pending_drift_targets(self._drift_candidates):
                     self._last_resolved[target] = _build_resolved_target_state(
-                        resolved, calls, ownership=ownership
+                        resolved, calls, ownership=ownership, previous=previous, actual=current_state
                     )
                     continue
                 if suppress_until is not None and now_ms < suppress_until:
                     self._last_resolved[target] = _build_resolved_target_state(
-                        resolved, calls, ownership=ownership
+                        resolved, calls, ownership=ownership, previous=previous, actual=current_state
                     )
                     continue
             if (
@@ -717,7 +976,7 @@ class Reconciliation:
             ):
                 self._last_applied[target] = signature
                 self._last_resolved[target] = _build_resolved_target_state(
-                    resolved, calls, ownership=ownership
+                    resolved, calls, ownership=ownership, previous=previous, actual=current_state
                 )
                 events.append(ReconciliationEvent("service_skipped_matching_state", target))
                 continue
@@ -727,12 +986,21 @@ class Reconciliation:
                 calls,
                 signature,
                 revision_is_current=revision_is_current,
+                before_dispatch=before_dispatch,
             )
             events.extend(applied.events)
             if revision_is_current is not None and not revision_is_current():
                 events.append(ReconciliationEvent("stale_result_discarded", target))
                 return events
             if applied.failed:
+                if applied.completed_calls:
+                    self._last_resolved[target] = _build_partially_applied_target_state(
+                        resolved,
+                        applied.completed_calls,
+                        ownership=ownership,
+                        previous=previous,
+                        actual=current_state,
+                    )
                 events.append(self._schedule_retry(target, signature, now_ms))
             else:
                 self._policy_denials.pop(target, None)
@@ -749,9 +1017,132 @@ class Reconciliation:
                 clear_pending_state_drift(self._drift_candidates, target)
                 self._suppress_drift_during_transition(target, transition_ms, now_ms)
                 self._last_resolved[target] = _build_resolved_target_state(
-                    resolved, calls, ownership=ownership
+                    resolved, calls, ownership=ownership, previous=previous, actual=current_state
                 )
         return events
+
+    def _shadowing_transitions(
+        self, engine: Any, now_ms: int, resolved_targets: dict[str, Any] | None = None
+    ) -> list[ReconciliationEvent]:
+        visible: set[str] = set()
+        active: set[str] = set()
+        for target in engine.list_active_targets():
+            resolved = (
+                resolved_targets[target]
+                if resolved_targets is not None and target in resolved_targets
+                else engine.resolve(target)
+            )
+            if resolved is None:
+                continue
+            intents = engine.list_active_intents(target)
+            active.update(intent.rule_id for intent in intents if intent.rule_id)
+            visible.update(
+                provider.rule_id for provider in getattr(resolved, "field_providers", {}).values()
+                if provider.rule_id
+            )
+            for intent in intents:
+                if intent.rule_id and any(
+                    getattr(intent, operation, {}) for operation in ("cap", "floor", "offset", "multiply")
+                ):
+                    visible.add(intent.rule_id)
+        events: list[ReconciliationEvent] = []
+        for rule_id in sorted(active):
+            is_visible = rule_id in visible
+            previous = self._rule_visibility.get(rule_id)
+            observed_at = self._rule_observed_at.get(rule_id, now_ms)
+            if previous:
+                self._rule_winning_ms[rule_id] = self._rule_winning_ms.get(rule_id, 0) + max(0, now_ms - observed_at)
+            if previous is not None and previous != is_visible:
+                since = self._rule_visibility_since.get(rule_id, now_ms)
+                events.append(ReconciliationEvent(
+                    "rule_visible" if is_visible else "rule_fully_shadowed",
+                    details={"rule_id": rule_id, "previous_duration_ms": max(0, now_ms - since)},
+                ))
+                self._record_churn(now_ms, "winner_change", "", rule_id)
+                self._rule_visibility_since[rule_id] = now_ms
+            elif previous is None:
+                self._rule_visibility_since[rule_id] = now_ms
+                self._rule_active_since[rule_id] = now_ms
+            self._rule_visibility[rule_id] = is_visible
+            self._rule_observed_at[rule_id] = now_ms
+        for rule_id in set(self._rule_visibility) - active:
+            self._rule_visibility.pop(rule_id, None)
+            self._rule_visibility_since.pop(rule_id, None)
+            self._rule_active_since.pop(rule_id, None)
+            self._rule_winning_ms.pop(rule_id, None)
+            self._rule_observed_at.pop(rule_id, None)
+        return events
+
+    def _record_events(self, events: list[ReconciliationEvent], now_ms: int) -> None:
+        dispositions = {
+            "service_applied": "applied", "service_failed": "failed",
+            "service_skipped_matching_state": "skipped", "service_skipped_pending_transition": "skipped",
+            "service_skipped_drift_promoted": "skipped", "service_denied_target_policy": "denied",
+            "withdraw_skipped_target_policy": "withdraw_skipped", "withdraw_cancelled_user_change": "withdraw_cancelled",
+            "service_would_apply": "skipped", "service_would_withdraw": "withdraw_skipped",
+            "stale_result_discarded": "stale",
+        }
+        for event in events:
+            if event.kind == "drift_promoted":
+                self._record_churn(now_ms, "drift", event.target, None)
+            if event.kind in {"service_applied", "service_failed"}:
+                self._record_churn(now_ms, "failure" if event.kind == "service_failed" else "call", event.target, None)
+            elif event.kind.startswith("service_skipped") and event.kind != "service_skipped_matching_state":
+                self._record_churn(now_ms, "skip", event.target, None)
+            disposition = dispositions.get(event.kind)
+            if disposition is None:
+                continue
+            details = event.details
+            call = None
+            if details.get("domain") and details.get("service"):
+                call = {
+                    "domain": details["domain"], "service": details["service"],
+                    "data": _redact_call_data(details.get("service_data", {})),
+                }
+            signature = self._desired_signatures.get(event.target) or self._last_applied.get(event.target)
+            correlation = sha256(repr(signature or (event.target, event.kind)).encode()).hexdigest()[:16]
+            self._attempt_history.append({
+                "time_ms": now_ms, "target": event.target, "plan_id": correlation,
+                "disposition": disposition, "withdraw": bool(details.get("withdraw")),
+                "call": call, "error": _truncate_utf8(details.get("error"), 200),
+            })
+
+    def _record_churn(self, now_ms: int, kind: str, target: str, rule_id: str | None) -> None:
+        self._expire_churn(now_ms)
+        if target:
+            evicted = self._bounded_dimension(self._churn_targets, target)
+            if evicted is not None:
+                self._churn_events = deque(
+                    event for event in self._churn_events if event[2] != evicted
+                )
+        if rule_id:
+            evicted = self._bounded_dimension(self._churn_rules, rule_id)
+            if evicted is not None:
+                self._churn_events = deque(
+                    event for event in self._churn_events if event[3] != evicted
+                )
+        self._churn_events.append((now_ms, kind, target, rule_id))
+
+    @staticmethod
+    def _bounded_dimension(values: OrderedDict[str, None], key: str) -> str | None:
+        values.pop(key, None)
+        values[key] = None
+        evicted = None
+        while len(values) > 256:
+            evicted, _value = values.popitem(last=False)
+        return evicted
+
+    def _expire_churn(self, now_ms: int) -> None:
+        cutoff = now_ms - 3_600_000
+        while self._churn_events and self._churn_events[0][0] < cutoff:
+            self._churn_events.popleft()
+
+    def _summarize_churn(self, cutoff: int) -> dict[str, int]:
+        result: dict[str, int] = {}
+        for timestamp, kind, _target, _rule_id in self._churn_events:
+            if timestamp >= cutoff:
+                result[kind] = result.get(kind, 0) + 1
+        return result
 
     async def _withdraw_stale_targets(
         self,
@@ -760,12 +1151,23 @@ class Reconciliation:
         now_ms: int,
         *,
         revision_is_current: Callable[[], bool] | None = None,
+        before_dispatch: Callable[[], Awaitable[None]] | None = None,
     ) -> list[ReconciliationEvent]:
         events: list[ReconciliationEvent] = []
         active_targets = set(engine.list_active_targets())
         for stale_target in sorted(set(self._last_resolved) - active_targets):
             previous = self._last_resolved[stale_target]
             policy = getattr(engine, "target_policy", lambda _target: None)(stale_target)
+            explicit_withdraw = _owned_withdrawals(previous)
+            if previous.dispatch == "shadow" or policy is not None and policy.dispatch == "shadow":
+                self._last_resolved.pop(stale_target, None)
+                self._last_applied.pop(stale_target, None)
+                value = explicit_withdraw or _default_withdraw_value(stale_target, previous)
+                shadow = {"would_apply": None, "would_withdraw": value}
+                if self._shadow_plans.get(stale_target) != shadow:
+                    self._shadow_plans[stale_target] = shadow
+                    events.append(ReconciliationEvent("service_would_withdraw", stale_target, {"value": value}))
+                continue
             if (
                 previous.ownership != "managed"
                 or policy is not None
@@ -780,7 +1182,11 @@ class Reconciliation:
                     )
                 )
                 continue
-            withdraw_value = _default_withdraw_value(stale_target, previous)
+            withdraw_value = explicit_withdraw or (
+                _default_withdraw_value(stale_target, previous)
+                if not _has_explicit_withdrawal(previous)
+                else None
+            )
             if withdraw_value is None:
                 self._last_resolved.pop(stale_target, None)
                 continue
@@ -825,6 +1231,7 @@ class Reconciliation:
                 signature,
                 withdraw=True,
                 revision_is_current=revision_is_current,
+                before_dispatch=before_dispatch,
             )
             events.extend(applied.events)
             if revision_is_current is not None and not revision_is_current():
@@ -894,18 +1301,24 @@ class Reconciliation:
         *,
         withdraw: bool = False,
         revision_is_current: Callable[[], bool] | None = None,
+        before_dispatch: Callable[[], Awaitable[None]] | None = None,
     ) -> _ServicePlanResult:
         """Call each service in the plan; stop on first failure."""
         fired: list[ReconciliationEvent] = []
-        context = adapter.new_context()
         progress_signature, start_at = self._service_plan_progress.get(target, (signature, 0))
         if progress_signature != signature:
             start_at = 0
+        # Include successful calls from earlier attempts so partial ownership is
+        # cumulative when another later call fails.
+        completed: list[tuple[str, str, dict[str, Any]]] = list(calls[:start_at])
+        context = adapter.new_context()
         resumable = all(
             _service_call_is_idempotent(service) for _domain, service, _data in calls[:start_at]
         )
         for call_index, (domain, service, service_data) in enumerate(calls[start_at:], start_at):
             try:
+                if before_dispatch is not None:
+                    await before_dispatch()
                 await adapter.async_call(domain, service, service_data, context=context)
             except Exception as err:  # noqa: BLE001 — record and back off
                 fired.append(
@@ -923,14 +1336,15 @@ class Reconciliation:
                     )
                 )
                 if revision_is_current is not None and not revision_is_current():
-                    return _ServicePlanResult(fired, failed=True)
+                    return _ServicePlanResult(fired, failed=True, completed_calls=tuple(completed))
                 if call_index and resumable:
                     self._service_plan_progress[target] = (signature, call_index)
                 else:
                     self._service_plan_progress.pop(target, None)
-                return _ServicePlanResult(fired, failed=True)
+                return _ServicePlanResult(fired, failed=True, completed_calls=tuple(completed))
             if revision_is_current is not None and not revision_is_current():
-                return _ServicePlanResult(fired, failed=False)
+                completed.append((domain, service, service_data))
+                return _ServicePlanResult(fired, failed=False, completed_calls=tuple(completed))
             fired.append(
                 ReconciliationEvent(
                     "service_applied",
@@ -943,9 +1357,10 @@ class Reconciliation:
                     },
                 )
             )
+            completed.append((domain, service, service_data))
             resumable = resumable and _service_call_is_idempotent(service)
         self._service_plan_progress.pop(target, None)
-        return _ServicePlanResult(fired, failed=False)
+        return _ServicePlanResult(fired, failed=False, completed_calls=tuple(completed))
 
     def _suppress_drift_during_transition(
         self, target: str, transition_ms: int, now_ms: int
@@ -972,6 +1387,8 @@ class Reconciliation:
                     if state.withdraw_value is not None
                     else None,
                     "ownership": state.ownership,
+                    "field_ownership": dict(state.field_ownership),
+                    "dispatch": state.dispatch,
                 }
             )
         return records
@@ -979,6 +1396,34 @@ class Reconciliation:
     def pending_withdraw_targets(self) -> tuple[str, ...]:
         """Return Targets retained for possible withdrawal."""
         return tuple(sorted(self._last_resolved))
+
+    def export_runtime_state(self, engine: Any) -> dict[str, Any]:
+        """Return bounded, versioned restart state for ownership and retries."""
+        now_ms = self._last_reconciliation_now_ms or 0
+        retries = []
+        for target, retry in sorted(self._service_failure_backoff.items())[:_MAX_PERSISTED_TARGETS]:
+            retries.append({
+                "target": target,
+                "failures": retry.failures,
+                "remaining_ms": max(
+                    0,
+                    min(retry.retry_at_ms - now_ms, self._service_failure_backoff_max_ms),
+                ),
+                "signature": retry.signature,
+            })
+        progress = []
+        for target, (signature, next_call_index) in sorted(self._service_plan_progress.items())[:_MAX_PERSISTED_TARGETS]:
+            progress.append({
+                "target": target,
+                "signature": signature,
+                "next_call_index": next_call_index,
+            })
+        return {
+            "version": _RECONCILIATION_STATE_VERSION,
+            "pending_withdraws": self.export_pending_withdraws(engine)[:_MAX_PERSISTED_TARGETS],
+            "service_failure_backoff": retries,
+            "service_plan_progress": progress,
+        }
 
     def restore_pending_withdraws(
         self,
@@ -989,7 +1434,10 @@ class Reconciliation:
     ) -> None:
         if not isinstance(records, dict):
             return
-        pending_withdraws = records.get("pending_withdraws", [])
+        runtime = records.get("reconciliation", records)
+        if not isinstance(runtime, dict):
+            return
+        pending_withdraws = runtime.get("pending_withdraws", [])
         if not isinstance(pending_withdraws, list):
             pending_withdraws = []
         for raw in pending_withdraws:
@@ -999,6 +1447,36 @@ class Reconciliation:
             if restored is not None:
                 target, state = restored
                 self._last_resolved[target] = state
+        version = runtime.get("version")
+        if version in {1, _RECONCILIATION_STATE_VERSION}:
+            restore_now_ms = 0 if now_ms is None else now_ms
+            for raw in runtime.get("service_failure_backoff", [])[:_MAX_PERSISTED_TARGETS]:
+                try:
+                    target = raw["target"]
+                    failures = raw["failures"]
+                    persisted_delay = (
+                        raw["remaining_ms"]
+                        if version == _RECONCILIATION_STATE_VERSION
+                        else raw["retry_at_ms"]
+                    )
+                    signature = _freeze_signature_value(raw["signature"])
+                    if not isinstance(target, str) or not target or not isinstance(failures, int) or isinstance(failures, bool) or failures < 1 or not isinstance(persisted_delay, int) or isinstance(persisted_delay, bool) or persisted_delay < 0:
+                        continue
+                    delay_ms = min(persisted_delay, self._service_failure_backoff_max_ms)
+                    retry_at_ms = restore_now_ms + delay_ms
+                    self._service_failure_backoff[target] = _RetryState(failures, retry_at_ms, signature)
+                except (KeyError, TypeError, ValueError):
+                    continue
+            for raw in runtime.get("service_plan_progress", [])[:_MAX_PERSISTED_TARGETS]:
+                try:
+                    target = raw["target"]
+                    next_call_index = raw["next_call_index"]
+                    signature = _freeze_signature_value(raw["signature"])
+                    if not isinstance(target, str) or not target or not isinstance(next_call_index, int) or isinstance(next_call_index, bool) or next_call_index < 1:
+                        continue
+                    self._service_plan_progress[target] = (signature, next_call_index)
+                except (KeyError, TypeError, ValueError):
+                    continue
         if linger_rule_ids is None or now_ms is None:
             return
         intents = records.get("intents", [])
@@ -1047,6 +1525,9 @@ class Reconciliation:
             self._service_failure_backoff,
             self._service_plan_progress,
             self._policy_denials,
+            self._shadow_plans,
+            self._desired_signatures,
+            self._target_winners,
         ):
             for target in set(mapping) - targets:
                 mapping.pop(target, None)
@@ -1117,6 +1598,7 @@ def _field_has_user_authority(intents: list[Any], field: str) -> bool:
 class _ServicePlanResult:
     events: list[ReconciliationEvent]
     failed: bool
+    completed_calls: tuple[tuple[str, str, dict[str, Any]], ...] = ()
 
 
 # --------------------------------------------------------------------------- #

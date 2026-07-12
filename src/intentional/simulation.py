@@ -64,6 +64,8 @@ MAX_ACTUAL_STATES_PER_STEP = 100
 MAX_TOTAL_STATE_UPDATES = 5_000
 MAX_PROJECTED_TARGETS = 200
 MAX_SELECTOR_MEMBERSHIPS = 200
+MAX_PREVIEW_HORIZONS = 32
+MAX_PREVIEW_HORIZON_MS = 86_400_000
 _RECONCILIATION_OPTIONS = {
     "drift_override_ttl_ms",
     "drift_confirmation_ms",
@@ -71,6 +73,24 @@ _RECONCILIATION_OPTIONS = {
     "service_failure_backoff_max_ms",
     "drift_transition_grace_ms",
 }
+
+
+def validate_preview_horizons(value: Any) -> list[int]:
+    """Validate bounded, forward-only lifecycle preview horizons."""
+    if (
+        not isinstance(value, list)
+        or len(value) > MAX_PREVIEW_HORIZONS
+        or any(
+            not isinstance(item, int) or isinstance(item, bool)
+            or item < 0 or item > MAX_PREVIEW_HORIZON_MS
+            for item in value
+        )
+        or value != sorted(value)
+    ):
+        raise ValueError(
+            "`horizons_ms` must be an ascending list of at most 32 integers from 0 to 86400000"
+        )
+    return value
 
 
 def validate_simulation_input(
@@ -212,7 +232,7 @@ async def simulate_timeline(
             engine.set_rule_paused(rule_id, False)
         if step.get("restart"):
             lifecycle = engine.export_lifecycle_records()
-            pending = reconciler.export_pending_withdraws(engine)
+            reconciliation_state = reconciler.export_runtime_state(engine)
             previous = engine
             engine = Engine(
                 clock_fn=lambda now=previous.now_ms(): now, selector_resolver=resolver
@@ -227,7 +247,7 @@ async def simulate_timeline(
             engine.import_lifecycle_records(lifecycle)
             reconciler = _new_reconciler(options)
             reconciler.restore_pending_withdraws(
-                {"pending_withdraws": pending}, now_ms=engine.now_ms()
+                {"reconciliation": reconciliation_state}, now_ms=engine.now_ms()
             )
         if "time_of_day" in step:
             engine.set_time_of_day("simulation", clock=step["time_of_day"])
@@ -261,6 +281,16 @@ async def simulate_timeline(
         )
         if len(targets) > MAX_PROJECTED_TARGETS:
             raise ValueError(f"simulation may project at most {MAX_PROJECTED_TARGETS} Targets")
+        simulated_effects = []
+        for due in engine.due_effects():
+            effect = engine.begin_effect_attempt(due.activation_id, due.effect_index)
+            if effect is None:
+                continue
+            simulated_effects.append({
+                "rule_id": effect.rule_id, "domain": effect.domain,
+                "service": effect.service, "target": effect.target, "data": effect.data,
+            })
+            engine.acknowledge_effect(effect.activation_id, effect.effect_index)
         record.update(
             {
                 "events": [
@@ -272,6 +302,7 @@ async def simulate_timeline(
                     for event in events
                 ],
                 "calls": list(adapter.calls),
+                "effects": simulated_effects,
                 "targets": [
                     target_projection(
                         engine,
@@ -363,6 +394,11 @@ def _validate_semantic_metadata(value: Any) -> None:
         if not isinstance(item, dict) or set(item) - allowed or not isinstance(item.get("entity_id"), str):
             raise ValueError(f"semantic_metadata[{index}] is invalid")
         entity_id = item["entity_id"]
+        if "." not in entity_id or any(
+            field in item and (not isinstance(item[field], str) or not item[field])
+            for field in allowed - {"entity_id"}
+        ):
+            raise ValueError(f"semantic_metadata[{index}] fields must be non-empty strings")
         if entity_id in seen_entity_ids:
             raise ValueError(f"semantic_metadata[{index}] duplicates an entity ID")
         seen_entity_ids.add(entity_id)
@@ -379,7 +415,7 @@ def _simulation_selector_resolver(engine: Any, memberships: Any, semantic_metada
         tuple(item["selector"].get(name) for name in ("domain", "area", "label", "device", "entity", "purpose")): tuple(sorted(set(item["targets"])))
         for item in memberships or []
     }
-    purpose_classes = {"motion": ("binary_sensor", "motion"), "occupancy": ("binary_sensor", "occupancy"), "door": ("binary_sensor", "door"), "window": ("binary_sensor", "window"), "moisture": ("binary_sensor", "moisture"), "temperature": ("sensor", "temperature"), "illuminance": ("sensor", "illuminance")}
+    purpose_classes = {"motion": ("binary_sensor", "motion"), "occupancy": ("binary_sensor", "occupancy"), "door": ("binary_sensor", "door"), "window": ("binary_sensor", "window"), "moisture": ("binary_sensor", "moisture"), "temperature": ("sensor", "temperature"), "illuminance": ("sensor", "illuminance"), "power": ("sensor", "power")}
     for key in required - set(registry):
         domain, area, label, device, entity, purpose = key
         if purpose and semantic_metadata is not None and label is None:

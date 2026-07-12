@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from numbers import Real
 from typing import Any
@@ -11,6 +12,15 @@ from ._engine.engine import Engine
 from ._engine.yaml_loader import RuleLoadError, load_rules_from_string
 
 DANGEROUS_TARGET_DOMAINS = frozenset({"lock", "alarm_control_panel", "cover", "valve", "climate"})
+LIGHT_COLOR_FIELDS = frozenset({
+    "color_temp", "color_temp_k", "color_temp_kelvin", "color_temp_mired",
+    "hs_color", "rgb_color", "rgbw_color", "rgbww_color", "xy_color",
+})
+MAX_POLICY_WARNINGS = 200
+MAX_PAIRWISE_RULES_PER_TARGET = 128
+_SIMPLE_COMPARISON = re.compile(
+    r"^\s*([A-Za-z_][\w.]*)\s*(==|!=|<=|>=|<|>)\s*(['\"]?)([^'\"\s]+)\3\s*$"
+)
 
 
 def document_policy_findings(rules: list[Any]) -> dict[str, list[dict[str, Any]]]:
@@ -115,6 +125,64 @@ def document_policy_findings(rules: list[Any]) -> dict[str, list[dict[str, Any]]
                 }
             )
 
+        for rule in target_rules:
+            authored_id = _authored_id(rule)
+            set_values = getattr(rule, "set", {}) or {}
+            color_fields = sorted(set(set_values) & LIGHT_COLOR_FIELDS)
+            if domain == "light" and len(color_fields) > 1:
+                warnings.append(_warning(
+                    "mutually_exclusive_light_color", "definite", "single_rule",
+                    target=target, rule_ids=[authored_id], fields=color_fields,
+                    message=f"{target} Rule {authored_id!r} sets mutually exclusive light color groups: {', '.join(color_fields)}.",
+                ))
+            contradictory = sorted(
+                field for field in set_values
+                if field != "state" and (field.startswith("brightness") or field in LIGHT_COLOR_FIELDS)
+            )
+            if str(set_values.get("state", "")).lower() == "off" and contradictory:
+                warnings.append(_warning(
+                    "state_off_with_light_output", "possible", "single_rule",
+                    target=target, rule_ids=[authored_id], fields=contradictory,
+                    message=f"{target} Rule {authored_id!r} sets state off together with brightness/color fields.",
+                ))
+
+        pair_rules = target_rules[:MAX_PAIRWISE_RULES_PER_TARGET]
+        for index, left in enumerate(pair_rules):
+            for right in pair_rules[index + 1:]:
+                left_id, right_id = _authored_id(left), _authored_id(right)
+                if left_id == right_id:
+                    continue
+                if _conditions_are_mutually_exclusive(left, right):
+                    continue
+                certainty, basis = _pair_certainty(left, right)
+                common_set = sorted(set(getattr(left, "set", {}) or {}) & set(getattr(right, "set", {}) or {}))
+                if common_set:
+                    warnings.append(_warning(
+                        "same_target_field_shadowing", certainty, basis,
+                        target=target, rule_ids=sorted({left_id, right_id}), fields=common_set,
+                        message=f"Rules {left_id!r} and {right_id!r} may both set {target} fields: {', '.join(common_set)}.",
+                    ))
+                    if left.authority == right.authority and left.confidence == right.confidence:
+                        warnings.append(_warning(
+                            "equal_precedence_recency_tie", certainty, basis,
+                            target=target, rule_ids=sorted({left_id, right_id}), fields=common_set,
+                            message=f"Rules {left_id!r} and {right_id!r} have equal Authority/confidence; recency decides shared fields on {target}.",
+                        ))
+                for operation in ("cap", "floor", "offset", "multiply"):
+                    left_values = getattr(left, operation, {}) or {}
+                    right_values = getattr(right, operation, {}) or {}
+                    duplicate = sorted(
+                        field for field in set(left_values) & set(right_values)
+                        if left_values[field] == right_values[field]
+                    )
+                    if duplicate:
+                        warnings.append(_warning(
+                            "exact_duplicate_modifier", certainty, basis,
+                            target=target, rule_ids=sorted({left_id, right_id}), fields=duplicate,
+                            operation=operation,
+                            message=f"Rules {left_id!r} and {right_id!r} duplicate the same {operation} modifier on {target}: {', '.join(duplicate)}.",
+                        ))
+
         fields = set().union(*(set(getattr(rule, "floor", {}) or {}) for rule in target_rules))
         fields.update(*(set(getattr(rule, "cap", {}) or {}) for rule in target_rules))
         for field in sorted(fields):
@@ -164,7 +232,19 @@ def document_policy_findings(rules: list[Any]) -> dict[str, list[dict[str, Any]]
                 }
             )
 
-    return {"errors": errors, "warnings": warnings}
+    for suppressor in rules:
+        if not _is_unconditional(suppressor):
+            continue
+        for suppressed_id in sorted(getattr(suppressor, "blocks", ()) or ()):
+            if suppressed_id in authored_ids:
+                warnings.append(_warning(
+                    "unconditional_suppression_shadowing", "definite", "unconditional_suppressor",
+                    rule_ids=sorted({_authored_id(suppressor), suppressed_id}),
+                    suppressor_rule_id=_authored_id(suppressor), suppressed_rule_id=suppressed_id,
+                    message=f"Unconditional Rule {_authored_id(suppressor)!r} suppresses Rule {suppressed_id!r} whenever enabled.",
+                ))
+
+    return {"errors": errors, "warnings": warnings[:MAX_POLICY_WARNINGS]}
 
 
 def load_and_preflight_document(contents: str) -> tuple[list[Any], dict[str, list[dict[str, Any]]]]:
@@ -215,6 +295,44 @@ def _authored_id(rule: Any) -> str:
 
 def _is_number(value: Any) -> bool:
     return isinstance(value, Real) and not isinstance(value, bool)
+
+
+def _is_unconditional(rule: Any) -> bool:
+    return str(getattr(rule, "when", "")).strip().lower() in {"true", "'true'", '"true"'}
+
+
+def _pair_certainty(left: Any, right: Any) -> tuple[str, str]:
+    if _is_unconditional(left) and _is_unconditional(right):
+        return "definite", "both_unconditional"
+    if str(getattr(left, "when", "")).strip() == str(getattr(right, "when", "")).strip():
+        return "possible", "same_condition_text"
+    return "possible", "no_overlap_proof"
+
+
+def _conditions_are_mutually_exclusive(left: Any, right: Any) -> bool:
+    first = _SIMPLE_COMPARISON.fullmatch(str(getattr(left, "when", "")))
+    second = _SIMPLE_COMPARISON.fullmatch(str(getattr(right, "when", "")))
+    if first is None or second is None or first.group(1) != second.group(1):
+        return False
+    first_op, first_value = first.group(2), first.group(4)
+    second_op, second_value = second.group(2), second.group(4)
+    if first_op == second_op == "==":
+        return first_value != second_value
+    try:
+        a, b = float(first_value), float(second_value)
+    except ValueError:
+        return False
+    upper = {"<": False, "<=": True}
+    lower = {">": False, ">=": True}
+    if first_op in upper and second_op in lower:
+        return a < b or a == b and not (upper[first_op] and lower[second_op])
+    if second_op in upper and first_op in lower:
+        return b < a or a == b and not (upper[second_op] and lower[first_op])
+    return False
+
+
+def _warning(code: str, certainty: str, basis: str, **data: Any) -> dict[str, Any]:
+    return {"code": code, "certainty": certainty, "basis": basis, **data}
 
 
 def _suppression_cycles(graph: dict[str, set[str]], known_ids: set[str]) -> list[list[str]]:

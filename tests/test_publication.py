@@ -19,6 +19,15 @@ class _Engine:
     def is_enabled(self): return True
 
 
+class _ChangingEngine(_Engine):
+    active = True
+    targets = ()
+
+    def list_active_targets(self): return self.targets
+    def list_authored_rule_statuses(self):
+        return {"adaptive": {"active": self.active, "hold_after": {"remaining_ms": self.remaining_ms}}}
+
+
 class _Store:
     def list_rules(self): return [{"id": "adaptive", "filename": "rules.yaml", "enabled": True}]
 
@@ -42,3 +51,34 @@ def test_rule_switch_attributes_omit_nested_remaining_countdown() -> None:
     assert _without_volatile_remaining(status) == {
         "hold_after": {"duration_ms": 10_000}
     }
+
+
+def test_shadow_transition_and_churn_publish_once_per_projection(monkeypatch) -> None:
+    sent = []
+    monkeypatch.setattr(publication, "room_controls_for_engine", lambda *_args: {})
+    monkeypatch.setattr(publication, "async_dispatcher_send", lambda *_args: sent.append(_args))
+    engine = _ChangingEngine()
+    publisher = publication.EntityPublication(object(), "entry", engine, _Store())
+
+    assert publisher.publish_if_changed()
+    engine.active = False
+    assert publisher.publish_if_changed()
+    for remaining in (4_900, 4_800, 4_700):
+        engine.remaining_ms = remaining
+        assert not publisher.publish_if_changed()
+    assert len(sent) == 2
+
+
+def test_reload_and_restored_projection_do_not_republish(monkeypatch) -> None:
+    sent = []
+    monkeypatch.setattr(publication, "room_controls_for_engine", lambda *_args: {})
+    monkeypatch.setattr(publication, "async_dispatcher_send", lambda *_args: sent.append(_args))
+    engine = _ChangingEngine()
+    engine.targets = ("light.restored",)
+    publisher = publication.EntityPublication(object(), "entry", engine, _Store())
+
+    assert publisher.publish_if_changed()
+    # An unchanged reload and lifecycle restore reconstruct equivalent public state.
+    assert not publisher.publish_if_changed()
+    assert not publisher.publish_if_changed()
+    assert len(sent) == 1

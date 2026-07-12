@@ -96,11 +96,16 @@ class _ParsedRule:
 def _canonical_value(value: Any) -> Any:
     """Return a JSON-safe semantic value with deterministic mapping order."""
     if is_dataclass(value) and not isinstance(value, type):
-        return {field.name: _canonical_value(getattr(value, field.name)) for field in fields(value)}
+        return {
+            field.name: _canonical_value(getattr(value, field.name))
+            for field in fields(value)
+            if field.name not in {"window_name", "provenance"}
+        }
     if isinstance(value, dict):
         return {
             str(key): _canonical_value(item)
             for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+            if str(key) not in {"window_name", "provenance"}
         }
     if isinstance(value, (list, tuple)):
         return [_canonical_value(item) for item in value]
@@ -116,7 +121,7 @@ def _rule_fingerprint(rule: Rule) -> str:
     semantic = {
         field.name: _canonical_value(getattr(rule, field.name))
         for field in fields(rule)
-        if field.name not in {"source_file", "source_line"}
+        if field.name not in {"source_file", "source_line", "window_name", "provenance"}
     }
     encoded = json.dumps(semantic, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -159,6 +164,7 @@ class Engine:
         self._enabled = True
         self._paused_labels: set[str] = set()
         self._paused_rule_ids: set[str] = set()
+        self._hysteresis_latches: dict[str, bool] = {}
 
     # ── Lifecycle Persistence ───────────────────────────────────────
 
@@ -187,6 +193,17 @@ class Engine:
             }
             for rule_id, active_since in sorted(self._rule_active_since.items())
             if rule_id in self._rules
+        ]
+        records["hysteresis_latches"] = [
+            {
+                "rule_fingerprint": fingerprint,
+                "latched": True,
+                "condition_true_since_ms": self._condition_true_since.get(rule_id),
+            }
+            for rule_id, parsed in sorted(self._rules.items())
+            for fingerprint in (_rule_fingerprint(parsed.rule),)
+            for latched in (self._hysteresis_latches.get(fingerprint, False),)
+            if latched
         ]
         return records
 
@@ -221,10 +238,37 @@ class Engine:
         enabled = records.get("enabled", True)
         if not isinstance(enabled, bool):
             enabled = True
-        if enabled is False:
+        if enabled:
+            self._restore_rule_activations(records)
+        valid_fingerprints = {
+            _rule_fingerprint(parsed.rule)
+            for parsed in self._rules.values()
+            if parsed.rule.hysteresis is not None
+        }
+        latches = records.get("hysteresis_latches", [])
+        if isinstance(latches, list):
+            self._hysteresis_latches = {
+                raw["rule_fingerprint"]: True
+                for raw in latches
+                if isinstance(raw, dict)
+                and raw.get("latched") is True
+                and raw.get("rule_fingerprint") in valid_fingerprints
+            }
+            by_fingerprint = {
+                _rule_fingerprint(parsed.rule): rule_id
+                for rule_id, parsed in self._rules.items()
+                if parsed.rule.hysteresis is not None
+            }
+            for raw in latches:
+                if not isinstance(raw, dict):
+                    continue
+                rule_id = by_fingerprint.get(raw.get("rule_fingerprint"))
+                since = raw.get("condition_true_since_ms")
+                if rule_id is not None and _is_nonnegative_int(since):
+                    self._condition_true_since[rule_id] = since
+        if not enabled:
             self.set_enabled(False)
             return
-        self._restore_rule_activations(records)
         self._terminate_rule_lifecycle(
             {rule_id for rule_id in self._rules if self._rule_is_paused(rule_id)}
         )
@@ -887,7 +931,8 @@ class Engine:
                 if update_timers:
                     self._condition_true_since.pop(rule_id, None)
                 continue
-            if self._eval_when(parsed.when_ast) and observe_selectors_fire(
+            condition = self._hysteresis_fires(parsed, update=update_timers)
+            if condition and observe_selectors_fire(
                 parsed.rule,
                 self.state,
                 self._selector_resolver,
@@ -924,6 +969,28 @@ class Engine:
 
         return firing, condition_firing, blocked_by, for_remaining
 
+    def _hysteresis_fires(self, parsed: _ParsedRule, *, update: bool) -> bool:
+        observation = parsed.rule.hysteresis
+        if observation is None:
+            return self._eval_when(parsed.when_ast)
+        fingerprint = _rule_fingerprint(parsed.rule)
+        latched = self._hysteresis_latches.get(fingerprint, False)
+        raw = self.state.get(f"{observation.entity}.state")
+        try:
+            actual = float(raw)
+        except (TypeError, ValueError):
+            return latched
+        operator = observation.exit_operator if latched else observation.enter_operator
+        threshold = observation.exit_value if latched else observation.enter_value
+        matched = _numeric_comparison(actual, operator, float(threshold))
+        result = not matched if latched else matched
+        if update:
+            if result:
+                self._hysteresis_latches[fingerprint] = True
+            else:
+                self._hysteresis_latches.pop(fingerprint, None)
+        return result
+
     def _rule_for_ms(self, rule: Rule) -> int:
         if rule.for_entity is None:
             return rule.for_ms
@@ -955,6 +1022,7 @@ class Engine:
         intent = Intent(
             target=rule.target or "",  # "" for scene rules, entity_id otherwise
             set=self._template_renderer.render_value(rule.set, self.state),
+            withdraw=dict(rule.withdraw),
             cap=self._template_renderer.render_value(rule.cap, self.state),
             floor=self._template_renderer.render_value(rule.floor, self.state),
             offset=self._template_renderer.render_value(rule.offset, self.state),
@@ -1047,6 +1115,7 @@ class Engine:
                     Intent(
                         target=target,
                         set=self._template_renderer.render_value(selector.set, self.state),
+                        withdraw=dict(selector.withdraw),
                         cap=self._template_renderer.render_value(selector.cap, self.state),
                         floor=self._template_renderer.render_value(selector.floor, self.state),
                         offset=self._template_renderer.render_value(selector.offset, self.state),
@@ -1480,14 +1549,21 @@ class Engine:
         decision = self._frozen_hold_after.get(rule_id)
         if decision is None:
             return None
+        rule = self._rules.get(rule_id)
+        adjustment = None
+        if decision.adjustment_index is not None:
+            source = rule.rule.dynamic_hold_after.adjustments[decision.adjustment_index] if rule and rule.rule.dynamic_hold_after else None
+            adjustment = {
+                "index": decision.adjustment_index, "from": decision.adjustment_from,
+                "until": decision.adjustment_until, "add_ms": decision.adjustment_add_ms,
+            }
+            if source and source.window_name is not None:
+                adjustment["window"] = source.window_name
         return {
             "frozen": True,
             "active_for_ms": decision.active_for_ms,
             "tier": {"index": decision.tier_index, "threshold_ms": decision.tier_threshold_ms, "base_duration_ms": decision.base_duration_ms},
-            "adjustment": None if decision.adjustment_index is None else {
-                "index": decision.adjustment_index, "from": decision.adjustment_from,
-                "until": decision.adjustment_until, "add_ms": decision.adjustment_add_ms,
-            },
+            "adjustment": adjustment,
             "max_ms": decision.max_ms,
             "unclamped_duration_ms": decision.unclamped_duration_ms,
             "duration_ms": decision.duration_ms,
@@ -1549,6 +1625,7 @@ def _intent_to_diagnostic_dict(intent: Intent | None) -> dict[str, Any] | None:
         "rule_id": intent.rule_id,
         "target": intent.target,
         "set": dict(intent.set) if intent.set else {},
+        "withdraw": dict(intent.withdraw) if intent.withdraw else {},
         "cap": dict(intent.cap) if intent.cap else {},
         "floor": dict(intent.floor) if intent.floor else {},
         "offset": dict(intent.offset) if intent.offset else {},
@@ -1577,6 +1654,7 @@ def _linger_intent(intent: Intent, linger_ms: int, now: int) -> Intent:
     return Intent(
         target=intent.target,
         set=dict(intent.set),
+        withdraw=dict(intent.withdraw),
         merge=intent.merge,
         cap=dict(intent.cap),
         floor=dict(intent.floor),
@@ -1604,6 +1682,18 @@ def _minute_in_window(minute: int, start: int, end: int) -> bool:
     if start == end:
         return True
     return start <= minute < end if start < end else minute >= start or minute < end
+
+
+def _numeric_comparison(actual: float, operator: str, threshold: float) -> bool:
+    if operator == "gt":
+        return actual > threshold
+    if operator == "gte":
+        return actual >= threshold
+    if operator == "lt":
+        return actual < threshold
+    if operator == "lte":
+        return actual <= threshold
+    return False
 
 
 def _frozen_hold_to_record(decision: FrozenHoldAfter | None) -> dict[str, Any] | None:

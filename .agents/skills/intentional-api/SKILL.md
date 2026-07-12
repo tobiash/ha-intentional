@@ -23,6 +23,13 @@ go build -buildvcs=false -o /tmp/opencode/intentionalctl ./cmd/intentionalctl
 
 The CLI wraps the live API endpoints, including `/api/intentional/rules/document`, `/api/intentional/dry-run`, `/api/intentional/simulate`, and `/api/intentional/rules/rollback`.
 
+For read-only HA automation migration, use `intentionalctl migrate-ha list`,
+`intentionalctl migrate-ha inspect automation.example`, and
+`intentionalctl migrate-ha propose automation.example --output yaml`. Migration
+only proposes Rules: it never edits or disables the source automation. Review the
+edge-to-level and withdrawal warnings, then merge/save through the normal
+generation-guarded document workflow.
+
 ## Read First
 
 Start every live edit session by reading health, world, and the storage document:
@@ -120,6 +127,7 @@ Rollback records the pre-rollback document in history, so it can be undone.
 ## Rule Authoring Notes
 
 - Prefer `while -> intent` rules. Use `after` for dwell and `hold` for retention after the original situation changes.
+- Reuse document-level `retention_profiles` with `hold: {use: NAME}` and strict `HH:MM` `time_windows` with `time_window: {in: NAME}` or `{not_in: NAME}`. Semantic `power` matches only `sensor` entities with device class `power` and compares raw native numeric state values.
 - Use `hold.until` with `for` for noisy false-off presence sensors, e.g. “hold until presence has been off for 15m”.
 - Use `group` for related modes and `profile` for reusable behavior names like `pass-through`, `settled`, or `occupied-session`.
 - Use durable target-state intents for ongoing desired state.

@@ -47,6 +47,7 @@ class IntentionalPanel extends HTMLElement {
     this._validateTimer = null;
     this._validationRequest = 0;
     this._visualModeError = "";
+    this._migration = { automations: [], selected: "", inspection: null, proposal: null };
   }
 
   set hass(hass) {
@@ -161,6 +162,7 @@ class IntentionalPanel extends HTMLElement {
     let timeline;
     try {
       timeline = JSON.parse(this._timelineText || "[]");
+      if (containsNonFiniteNumber(timeline)) throw new Error("non-finite numbers are not supported");
     } catch (err) {
       this._error = `Timeline JSON is invalid: ${err.message || err}`;
       this._render();
@@ -207,6 +209,57 @@ class IntentionalPanel extends HTMLElement {
   async _loadHistory() {
     const history = await this._api("GET", "rules/history");
     this._history = history.history || [];
+  }
+
+  async _discoverMigrations() {
+    this._busy = true;
+    this._render();
+    try {
+      const result = await this._api("GET", "migrate-ha");
+      this._migration = { automations: result.automations || [], selected: "", inspection: null, proposal: null };
+      this._error = "";
+    } catch (err) { this._error = err.message || String(err); }
+    finally { this._busy = false; this._render(); }
+  }
+
+  async _inspectMigration(entityId) {
+    const request = (this._migrationInspectionRequest || 0) + 1;
+    this._migrationInspectionRequest = request;
+    this._migration.selected = entityId;
+    this._migration.proposal = null;
+    if (!entityId) { this._migration.inspection = null; this._render(); return; }
+    try {
+      const inspection = await this._api("GET", `migrate-ha/${encodeURIComponent(entityId)}`);
+      if (request !== this._migrationInspectionRequest || this._migration.selected !== entityId) return;
+      this._migration.inspection = inspection; this._error = "";
+    }
+    catch (err) { if (request === this._migrationInspectionRequest) this._error = err.message || String(err); }
+    this._render();
+  }
+
+  async _proposeMigration() {
+    if (!this._migration.selected) return;
+    const entityId = this._migration.selected;
+    const request = (this._migrationProposalRequest || 0) + 1;
+    this._migrationProposalRequest = request;
+    try {
+      const proposal = await this._api("POST", "migrate-ha/propose", { entity_id: entityId });
+      if (request !== this._migrationProposalRequest || this._migration.selected !== entityId) return;
+      this._migration.proposal = proposal; this._error = "";
+    }
+    catch (err) { if (request === this._migrationProposalRequest) this._error = err.message || String(err); }
+    this._render();
+  }
+
+  _addMigrationProposal() {
+    const proposal = this._migration.proposal;
+    if (!proposal?.supported || !proposal?.merged_validation?.valid) return;
+    this._contents = proposal.merged_candidate;
+    this._editorMode = "document";
+    this._selectedRuleId = "";
+    this._dirty = true;
+    this._validation = proposal.merged_validation;
+    this._render();
   }
 
   async _rollback(generation) {
@@ -317,7 +370,10 @@ class IntentionalPanel extends HTMLElement {
       for (const key of ["target", "data"]) {
         const value = effect[key].trim();
         if (value) {
-          try { JSON.parse(value); } catch (err) { errors.push(`Effect ${key} JSON is invalid: ${err.message || err}`); }
+          try {
+            const parsed = JSON.parse(value);
+            if (containsNonFiniteNumber(parsed)) throw new Error("non-finite numbers are not supported");
+          } catch (err) { errors.push(`Effect ${key} JSON is invalid: ${err.message || err}`); }
         }
       }
     }
@@ -539,6 +595,18 @@ class IntentionalPanel extends HTMLElement {
     `).join("");
   }
 
+  _renderMigration() {
+    const migration = this._migration;
+    const proposal = migration.proposal;
+    return `<section class="card migration">
+      <div class="card-header"><div><h2>Migrate HA automation</h2><p>Inspect a strict supported subset and add proposed Rules to this editor.</p></div><button class="secondary small" data-action="migration-discover">Discover</button></div>
+      <div class="warning-box"><strong>Source automation stays unchanged.</strong><p>Intentional never disables, edits, or calls the source automation. Review overlap before saving.</p></div>
+      ${migration.automations.length ? `<label class="field"><span>Loaded automation</span><select data-migration-select><option value="">Select…</option>${migration.automations.map((item) => `<option value="${escapeHtml(item.entity_id)}" ${migration.selected === item.entity_id ? "selected" : ""}>${escapeHtml(item.alias || item.entity_id)}</option>`).join("")}</select></label>` : `<div class="muted">Discover loaded automations to begin.</div>`}
+      ${migration.inspection ? `<div class="muted">${migration.inspection.supported ? "Supported candidate" : "Unsupported"}. ${(migration.inspection.diagnostics || []).map((item) => escapeHtml(item.message)).join(" ")}</div><button class="secondary small" data-action="migration-propose" ${migration.inspection.supported ? "" : "disabled"}>Propose</button>` : ""}
+      ${proposal ? `<pre>${escapeHtml(proposal.yaml || JSON.stringify(proposal.diagnostics, null, 2))}</pre><button data-action="migration-add" ${proposal.supported && proposal.merged_validation?.valid ? "" : "disabled"}>Add to editor</button>` : ""}
+    </section>`;
+  }
+
   _render() {
     if (!this.shadowRoot) return;
     const version = this._health?.version ? `v${this._health.version}` : "";
@@ -555,7 +623,7 @@ class IntentionalPanel extends HTMLElement {
         <section class="grid">
           <aside class="card rules"><div class="card-header"><h2>Rules</h2><button class="secondary small" data-action="new-rule">New</button></div>${this._renderRules()}</aside>
           ${this._renderEditor()}
-          <aside class="card inspector"><h2>Validation</h2>${this._renderValidation()}<h2>Preview</h2>${this._renderPreview()}<h2>Simulation</h2>${this._renderSimulation()}<h2>History</h2>${this._renderHistory()}</aside>
+          <aside class="inspector-stack"><aside class="card inspector"><h2>Validation</h2>${this._renderValidation()}<h2>Preview</h2>${this._renderPreview()}<h2>Simulation</h2>${this._renderSimulation()}<h2>History</h2>${this._renderHistory()}</aside>${this._renderMigration()}</aside>
         </section>
       </main>
     `;
@@ -574,6 +642,7 @@ class IntentionalPanel extends HTMLElement {
     this.shadowRoot.querySelectorAll("[data-action]").forEach((button) => button.addEventListener("click", () => this._handleAction(button)));
     this.shadowRoot.querySelectorAll("[data-rule-id]").forEach((button) => button.addEventListener("click", () => this._selectRule(button.dataset.ruleId)));
     this.shadowRoot.querySelectorAll("[data-rollback]").forEach((button) => button.addEventListener("click", () => this._rollback(button.dataset.rollback)));
+    this.shadowRoot.querySelector("[data-migration-select]")?.addEventListener("change", (event) => this._inspectMigration(event.target.value));
   }
 
   _onFormInput(event) {
@@ -616,6 +685,9 @@ class IntentionalPanel extends HTMLElement {
     if (action === "validate") this._validate();
     if (action === "dry-run") this._dryRun();
     if (action === "simulate") this._simulate();
+    if (action === "migration-discover") this._discoverMigrations();
+    if (action === "migration-propose") this._proposeMigration();
+    if (action === "migration-add") this._addMigrationProposal();
     if (action === "new-rule") this._newRule();
     if (action === "show-document") this._showDocument();
     if (action === "show-yaml-rule") this._showYamlRule();
@@ -776,6 +848,13 @@ function writeEffects(lines, effects) {
   }
 }
 
+function containsNonFiniteNumber(value) {
+  if (typeof value === "number") return !Number.isFinite(value);
+  if (Array.isArray(value)) return value.some(containsNonFiniteNumber);
+  if (value !== null && typeof value === "object") return Object.values(value).some(containsNonFiniteNumber);
+  return false;
+}
+
 function writeYamlValue(lines, value, indent) {
   const pad = " ".repeat(indent);
   if (Array.isArray(value)) {
@@ -845,6 +924,9 @@ function visualModeError(block) {
     const key = line.match(/^  ([\w.-]+):/);
     if (key && !supportedTopLevel.has(key[1])) return `Visual mode cannot safely edit the unsupported '${key[1]}' field.`;
   }
+  if (/^\s{2}hold:\s*\{[^\n}]*\buse\s*:/m.test(block) || /^\s{4}use:\s*\S+/m.test(block)) return "Visual mode is unavailable to prevent data loss: retention profile references are not represented by the visual editor. Edit this rule as YAML.";
+  if (/^\s+time_window:\s*(?:\{|$)/m.test(block) || /^\s+-?\s*window:\s*\S+/m.test(block)) return "Visual mode is unavailable to prevent data loss: named time windows are not represented by the visual editor. Edit this rule as YAML.";
+  if (/^\s{4}power:\s*(?:\{|$)/m.test(block)) return "Visual mode is unavailable to prevent data loss: semantic power observations are not represented by the visual editor. Edit this rule as YAML.";
   if (/^  labels:\s*(?:#.*)?$/m.test(block)) return "Visual mode is unavailable to prevent data loss: block-style 'labels' are not represented by the visual editor. Edit this rule as YAML.";
   if (inlineLabelsContainQuotedComma(block)) return "Visual mode is unavailable to prevent data loss: inline 'labels' containing commas cannot be represented by the comma-separated visual editor. Edit this rule as YAML.";
   const blockScalar = String(block || "").match(/^  ([\w.-]+):\s*[>|](?:[1-9]?[-+]?|[-+]?[1-9]?)?\s*(?:#.*)?$/m);
