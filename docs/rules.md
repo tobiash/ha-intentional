@@ -14,6 +14,15 @@ names, and nested fields instead of silently changing a reference's meaning.
 
 ## Diagnostics
 
+The Intentional panel opens on an Intent Ledger that groups authored Rules by attention,
+activity, waiting, and disabled/paused state. Rule details join the stored YAML with the live
+world model so desired Targets, actual state, alignment, and relevant competing Intentions can
+be reviewed without reading YAML. Source YAML remains available from every Rule.
+
+Panel edits follow `Draft -> Checked -> Reviewed -> Published`. Review uses the isolated preview
+API and Publish remains unavailable if the reviewed candidate changes. Storage writes use the
+loaded generation, so a concurrent edit reports a conflict without discarding the local draft.
+
 Document validation reports warning-only findings for likely composition mistakes, including
 same-field shadowing, equal-precedence recency ties, conflicting light color groups, off-state
 brightness/color combinations, unconditional suppression, and duplicate modifiers. Each such

@@ -394,6 +394,199 @@ def test_stale_validation_response_is_ignored() -> None:
     assert result == "new"
 
 
+def test_validation_returns_api_valid_flag() -> None:
+    result = _run_panel_js(r'''(async () => {
+      const panel = new IntentionalPanel(); panel._render = () => {};
+      panel._candidateContents = () => "- id: invalid\n";
+      panel._api = async () => ({valid: false, errors: ["no target"], normalized: []});
+      return await panel._validate({quiet: true});
+    })()''')
+    assert result is False
+
+
+def test_draft_workflow_and_structured_preview_helpers() -> None:
+    result = _run_panel_js(r'''({
+      stages: [
+        draftStageTransition("Draft", "validate-valid"),
+        draftStageTransition("Checked", "review"),
+        draftStageTransition("Reviewed", "publish"),
+        draftStageTransition("Reviewed", "edit"),
+      ],
+      summary: summarizePreview({preview: [
+        {target: "light.one", changes: {state: {from: "off", to: "on", changed: true}}},
+        {target: "light.two", changes: {}},
+      ], effects: [{}], withdrawals: [{}], errors: []}),
+    })''')
+    assert result["stages"] == ["Checked", "Reviewed", "Published", "Draft"]
+    assert result["summary"]["changing"] == 1
+    assert result["summary"]["unchanged"] == 1
+    assert result["summary"]["effects"] == 1
+    assert result["summary"]["withdrawals"] == 1
+
+
+def test_panel_mvp_accessibility_responsiveness_and_dirty_guards() -> None:
+    source = PANEL_PATH.read_text()
+    for required in [
+        'aria-live="polite"', 'role="alert"', 'aria-busy=', 'aria-current="true"',
+        'aria-label="Remove target"', ':focus-visible', '@media (max-width: 700px)',
+        'beforeunload', 'Discard unsaved editor changes and reload?',
+        'this._api("POST", "preview"', 'expected_generation:',
+    ]:
+        assert required in source
+
+
+def test_rename_replaces_original_source_id() -> None:
+    result = _run_panel_js(r'''(() => {
+      const panel = new IntentionalPanel(); panel._render = () => {};
+      panel._contents = `- id: old-name\n  while:\n    binary_sensor.ready: on\n  intent:\n    light.room:\n      state: on\n`;
+      panel._rules = parseDocumentRuleSummaries(panel._contents, []);
+      panel._selectRule("old-name", {render: false});
+      panel._selectedRuleForm.id = "new-name";
+      panel._formEdited = true;
+      return panel._candidateContents();
+    })()''')
+    assert "id: new-name" in result
+    assert "id: old-name" not in result
+
+
+def test_publish_puts_exact_reviewed_candidate_without_gate_demotion() -> None:
+    result = _run_panel_js(r'''(async () => {
+      const panel = new IntentionalPanel(); panel._render = () => {}; panel._loadHistory = async () => {}; panel._refreshWorld = async () => {};
+      panel._document = {generation: "g1"}; panel._contents = "reviewed"; panel._dirty = true;
+      panel._stage = "Reviewed"; panel._reviewedFingerprint = candidateFingerprint("reviewed");
+      const calls = []; panel._api = async (method, path, data) => { calls.push({method, path, data}); return path === "validate" ? {valid: true, normalized: []} : {generation: "g2", contents: "reviewed"}; };
+      await panel._save();
+      return {calls, stage: panel._stage};
+    })()''')
+    put = next(call for call in result["calls"] if call["method"] == "PUT")
+    assert put["data"] == {"contents": "reviewed", "expected_generation": "g1"}
+    assert result["stage"] == "Published"
+
+
+def test_in_flight_publish_preserves_newer_draft() -> None:
+    result = _run_panel_js(r'''(async () => {
+      const panel = new IntentionalPanel(); panel._render = () => {}; panel._loadHistory = async () => {}; panel._refreshWorld = async () => {};
+      panel._document = {generation: "g1"}; panel._contents = "old"; panel._dirty = true; panel._stage = "Reviewed"; panel._reviewedFingerprint = candidateFingerprint("old");
+      let release; panel._api = async (method, path) => path === "validate" ? {valid: true, normalized: []} : new Promise(resolve => { release = resolve; });
+      const saving = panel._save(); await Promise.resolve(); await Promise.resolve(); panel._contents = "newer"; panel._dirty = true;
+      release({generation: "g2", contents: "old"}); await saving;
+      return {base: panel._document.generation, candidate: panel._candidateContents(), dirty: panel._dirty, stage: panel._stage};
+    })()''')
+    assert result == {"base": "g2", "candidate": "newer", "dirty": True, "stage": "Draft"}
+
+
+def test_ledger_alignment_and_competition_are_target_scoped() -> None:
+    result = _run_panel_js(r'''(() => {
+      const block = `- id: one\n  while:\n    sensor.ready: on\n  intent:\n    light.one:\n      state: on\n`;
+      return buildRuleViewModels(parseDocumentRuleSummaries(block, []), {targets: [
+        {target: "light.one", plan_match: "match", active_intents: [{rule_id: "one"}, {rule_id: "rival"}]},
+        {target: "light.other", plan_match: "mismatch", active_intents: [{rule_id: "unrelated"}]},
+      ]}, {})[0];
+    })()''')
+    assert result["targets"][0]["aligned"] is True
+    assert [item["rule_id"] for item in result["competing"]] == ["rival"]
+
+
+def test_comment_guard_is_quote_aware() -> None:
+    result = _run_panel_js(r'''[
+      visualModeError(`- id: one # authored\n  while:\n    sensor.ready: on\n`),
+      visualModeError(`- id: "one # literal"\n  while:\n    sensor.ready: "on # literal"\n`),
+    ]''')
+    assert "inline comments" in result[0]
+    assert result[1] == ""
+
+
+def test_structured_preview_counts_changed_flags_and_unique_effects_truthfully() -> None:
+    result = _run_panel_js(r'''summarizePreview({preview: [
+      {changes: {state: {changed: false}}}, {changes: {state: {changed: true}}}
+    ], phases: [{effects: [{rule_id: "r", service: "notify.one"}]}, {effects: [{rule_id: "r", service: "notify.one"}]}]})''')
+    assert result["changing"] == 1
+    assert result["unchanged"] == 1
+    assert result["effects"] == 1
+    assert result["withdrawals"] is None
+
+
+def test_preview_includes_future_service_plan_targets_without_false_no_change() -> None:
+    result = _run_panel_js(r'''summarizePreview({preview: [
+      {target: "light.now", changes: {state: {changed: true}}},
+      {target: "light.later", changes: {state: {changed: false}}}
+    ], phases: [{horizon_ms: 60000, service_plans: [{target: "light.later"}]}]})''')
+    assert result["nowChanging"] == 1
+    assert result["laterChanging"] == 1
+    assert result["unchanged"] == 0
+    assert "1 now, 1 later" in result["headline"]
+
+
+def test_rule_detail_uses_composed_desired_and_projection_issues_take_precedence() -> None:
+    result = _run_panel_js(r'''(() => {
+      const block = `- id: one\n  while:\n    sensor.ready: on\n  intent:\n    light.one:\n      state: on\n`;
+      return buildRuleViewModels(parseDocumentRuleSummaries(block, []), {authored_rules: [{rule_id: "one", active: true}], targets: [
+        {target: "light.one", desired: {state: "off"}, resolved: {state: "wrong"}, plan_match: "mismatch"}
+      ]}, {})[0];
+    })()''')
+    assert result["targets"][0]["desired"] == {"state": "off"}
+    assert result["section"] == "attention"
+
+
+def test_source_is_preserved_until_guided_form_is_actually_edited() -> None:
+    result = _run_panel_js(r'''(() => {
+      const panel = new IntentionalPanel(); panel._render = () => {};
+      panel._contents = `# standalone\n- id: one\n  reason: 'kept formatting'\n  while:\n    sensor.ready: on\n  intent:\n    light.one:\n      state: on\n`;
+      panel._rules = parseDocumentRuleSummaries(panel._contents, []); panel._selectRule("one", {render: false});
+      const original = panel._selectedRuleContents; panel._showYamlRule();
+      return {source: panel._selectedRuleContents, candidate: panel._candidateContents(), original};
+    })()''')
+    assert result["source"] == result["original"]
+    assert result["candidate"] == "# standalone\n" + result["original"]
+
+
+def test_stale_preview_cannot_review_newer_candidate() -> None:
+    result = _run_panel_js(r'''(async () => {
+      const panel = new IntentionalPanel(); panel._render = () => {}; panel._validate = async () => true;
+      panel.contents = "old"; panel._candidateContents = () => panel.contents;
+      let release; panel._api = () => new Promise(resolve => { release = resolve; });
+      const reviewing = panel._review(); await Promise.resolve(); panel.contents = "new";
+      panel._previewRequest += 1; panel._stage = "Draft"; panel._reviewedFingerprint = "";
+      release({preview: []}); await reviewing;
+      return {stage: panel._stage, preview: panel._preview, fingerprint: panel._reviewedFingerprint};
+    })()''')
+    assert result == {"stage": "Draft", "preview": None, "fingerprint": ""}
+
+
+def test_mobile_edit_back_preserves_dirty_draft_after_confirmation() -> None:
+    result = _run_panel_js(r'''(() => {
+      const panel = new IntentionalPanel(); panel._render = () => {}; panel._screen = "edit"; panel._dirty = true;
+      globalThis.confirm = () => true;
+      panel._handleAction({dataset: {action: "leave-edit", destination: "detail"}});
+      return {screen: panel._screen, dirty: panel._dirty, html: panel._renderEditBack.call({_selectedRuleId: "one", _dirty: true})};
+    })()''')
+    assert result["screen"] == "detail"
+    assert result["dirty"] is True
+    assert "Draft preserved" in result["html"]
+
+
+def test_rollback_review_fetches_snapshot_before_separate_apply() -> None:
+    result = _run_panel_js(r'''(async () => {
+      const panel = new IntentionalPanel(); panel._render = () => {}; const calls = [];
+      panel._api = async (method, path) => { calls.push([method, path]); return {generation: "generation-1", contents: "<unsafe>"}; };
+      await panel._reviewRollback("generation-1");
+      return {calls, html: panel._renderHistory.call({...panel, _history: [{generation: "generation-1"}]})};
+    })()''')
+    assert result["calls"] == [["GET", "rules/history/generation-1"]]
+    assert "&lt;unsafe&gt;" in result["html"]
+    assert "Apply this rollback" in result["html"]
+
+
+def test_large_ledger_build_is_linear_enough_for_50_rules() -> None:
+    result = _run_panel_js(r'''(() => {
+      const rules = Array.from({length: 60}, (_, i) => ({id: `r${i}`, block: `- id: r${i}\n  while:\n    sensor.ready: on\n  intent:\n    light.t${i}:\n      state: on\n`}));
+      const targets = rules.map((_, i) => ({target: `light.t${i}`, plan_match: "match", active_intents: [{rule_id: `r${i}`}] }));
+      const built = buildRuleViewModels(rules, {targets}, {});
+      return {count: built.length, targets: built.reduce((n, rule) => n + rule.targets.length, 0)};
+    })()''')
+    assert result == {"count": 60, "targets": 60}
+
+
 def test_integration_registers_frontend_panel_asset() -> None:
     source = INTEGRATION_INIT.read_text()
 
