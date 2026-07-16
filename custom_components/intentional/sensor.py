@@ -25,8 +25,10 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from ._engine.alerting import AlertCoordinator
 from ._engine.presentation import intent_sensor_state, value_summary
 from ._engine.runtime import TickRuntime, runtime_key
+from .alerting import alert_sensor_unique_id, alerting_coordinator_for, alerting_signal
 from .const import (
     ATTR_ACTIVE_INTENTS,
     ATTR_AUTHORITY,
@@ -61,13 +63,26 @@ async def async_setup_entry(
             lambda target: area_for_target(hass, target),
         )
     }
+    alerting = alerting_coordinator_for(hass, entry.entry_id)
+    alert_entities = {
+        (str(alert["rule_id"]), str(alert["name"])): IntentionalAlertSensor(
+            alerting, entry, str(alert["rule_id"]), str(alert["name"])
+        )
+        for alert in (alerting.list_alerts() if alerting is not None else [])
+    }
+    for key, entity in alert_entities.items():
+        entity.set_removal_callback(
+            lambda key=key, entity=entity: alert_entities.pop(key, None)
+            if alert_entities.get(key) is entity else None
+        )
+    _cleanup_stale_alert_sensors(hass, entry, set(alert_entities))
     _cleanup_stale_room_sensors(hass, entry, set(room_entities))
     for area_id, entity in room_entities.items():
         entity.set_removal_callback(
             lambda area_id=area_id, entity=entity: room_entities.pop(area_id, None)
             if room_entities.get(area_id) is entity else None
         )
-    async_add_entities([summary, *room_entities.values()])
+    async_add_entities([summary, *room_entities.values(), *alert_entities.values()])
 
     _cleanup_legacy_target_sensors(hass, entry)
 
@@ -104,6 +119,34 @@ async def async_setup_entry(
         async_dispatcher_connect(hass, publication_signal(entry.entry_id), _on_publication)
     )
 
+    if alerting is not None:
+        async def _on_alerting() -> None:
+            current = {
+                (str(alert["rule_id"]), str(alert["name"]))
+                for alert in alerting.list_alerts()
+            }
+            for removed in set(alert_entities) - current:
+                await alert_entities[removed].async_mark_removed()
+            _cleanup_stale_alert_sensors(hass, entry, current)
+            new_entities = []
+            for key in current - set(alert_entities):
+                entity = IntentionalAlertSensor(alerting, entry, *key)
+                alert_entities[key] = entity
+                entity.set_removal_callback(
+                    lambda key=key, entity=entity: alert_entities.pop(key, None)
+                    if alert_entities.get(key) is entity else None
+                )
+                new_entities.append(entity)
+            for key in current & set(alert_entities):
+                alert_entities[key].mark_desired()
+                alert_entities[key].async_write_if_registered()
+            if new_entities:
+                async_add_entities(new_entities)
+
+        entry.async_on_unload(
+            async_dispatcher_connect(hass, alerting_signal(entry.entry_id), _on_alerting)
+        )
+
 
 def _cleanup_legacy_target_sensors(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Remove old per-target intent sensors to avoid registry bloat."""
@@ -115,7 +158,11 @@ def _cleanup_legacy_target_sensors(hass: HomeAssistant, entry: ConfigEntry) -> N
         if registry_entry.domain != Platform.SENSOR:
             continue
         unique_id = registry_entry.unique_id
-        if unique_id.startswith(prefix) and not unique_id.startswith(f"{prefix}area_"):
+        if (
+            unique_id.startswith(prefix)
+            and not unique_id.startswith(f"{prefix}area_")
+            and not unique_id.startswith(f"{prefix}alert_")
+        ):
             registry.async_remove(entity_id)
 
 
@@ -138,6 +185,87 @@ def _cleanup_stale_room_sensors(
             and unique_id not in current_unique_ids
         ):
             registry.async_remove(entity_id)
+
+
+def _cleanup_stale_alert_sensors(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    current: set[tuple[str, str]],
+) -> None:
+    """Remove registry entries for Alert definitions that no longer exist."""
+    registry = er.async_get(hass)
+    prefix = f"{entry.entry_id}_alert_"
+    current_unique_ids = {
+        alert_sensor_unique_id(entry.entry_id, rule_id, name) for rule_id, name in current
+    }
+    for entity_id, registry_entry in list(registry.entities.items()):
+        if registry_entry.platform != DOMAIN or registry_entry.domain != Platform.SENSOR:
+            continue
+        unique_id = registry_entry.unique_id
+        if unique_id.startswith(prefix) and unique_id not in current_unique_ids:
+            registry.async_remove(entity_id)
+
+
+class IntentionalAlertSensor(RegistrationAwareEntity, SensorEntity):
+    """Lifecycle sensor for one authored Alert definition."""
+
+    _attr_icon = "mdi:alert"
+
+    def __init__(
+        self,
+        coordinator: AlertCoordinator,
+        entry: ConfigEntry,
+        rule_id: str,
+        alert_name: str,
+    ) -> None:
+        super().__init__()
+        self._coordinator = coordinator
+        self._rule_id = rule_id
+        self._alert_name = alert_name
+        self._attr_unique_id = alert_sensor_unique_id(
+            entry.entry_id, rule_id, alert_name
+        )
+        self._attr_name = f"Intentional {alert_name}"
+
+    def _projection(self) -> dict[str, object] | None:
+        return next(
+            (
+                alert
+                for alert in self._coordinator.list_alerts()
+                if alert.get("rule_id") == self._rule_id
+                and alert.get("name") == self._alert_name
+            ),
+            None,
+        )
+
+    @property
+    def available(self) -> bool:
+        """Return whether this Alert definition has a current projection."""
+        return self._coordinator.available and self._projection() is not None
+
+    @property
+    def native_value(self) -> str | None:
+        """Return inactive, pending, or firing."""
+        projection = self._projection()
+        return None if projection is None else str(projection["state"])
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        """Expose bounded Alert context."""
+        projection = self._projection()
+        if projection is None:
+            return {}
+        return {
+            key: projection.get(key)
+            for key in (
+                "rule_id",
+                "name",
+                "severity",
+                "summary",
+                "instance_id",
+                "evaluation_status",
+            )
+        }
 
 
 class IntentionalTargetSensor(SensorEntity):

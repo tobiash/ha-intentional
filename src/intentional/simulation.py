@@ -6,6 +6,7 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any
 
+from .alerting import AlertLifecycle
 from .engine import Engine
 from .projection import simulation_step, target_projection
 from .reconciliation import Reconciliation
@@ -219,9 +220,10 @@ async def simulate_timeline(
     adapter = FakeAdapter()
     tracker = _NoOwnership()
     reconciler = _new_reconciler(options)
+    alert_lifecycle = AlertLifecycle()
     steps = []
     for index, step in enumerate(timeline):
-        pulses: set[str] = set()
+        pulse_fields: set[tuple[str, str]] = set()
         if step.get("advance_ms"):
             engine.advance_clock(step["advance_ms"])
         if "enabled" in step:
@@ -232,6 +234,7 @@ async def simulate_timeline(
             engine.set_rule_paused(rule_id, False)
         if step.get("restart"):
             lifecycle = engine.export_lifecycle_records()
+            alert_state = alert_lifecycle.export_state()
             reconciliation_state = reconciler.export_runtime_state(engine)
             previous = engine
             engine = Engine(
@@ -245,6 +248,8 @@ async def simulate_timeline(
                     entity_id, _separator, field = key.rpartition(".")
                     engine.update_state(entity_id, value, field=field)
             engine.import_lifecycle_records(lifecycle)
+            alert_lifecycle = AlertLifecycle()
+            alert_lifecycle.import_state(alert_state)
             reconciler = _new_reconciler(options)
             reconciler.restore_pending_withdraws(
                 {"reconciliation": reconciliation_state}, now_ms=engine.now_ms()
@@ -261,9 +266,17 @@ async def simulate_timeline(
                 old_key = f"{entity_id}.{field}"
                 if field == "state" and old_key in engine.state and engine.state[old_key] != value:
                     engine.update_state(entity_id, True, field="changed")
-                    pulses.add(entity_id)
+                    pulse_fields.add((entity_id, "changed"))
                 engine.update_state(entity_id, value, field=field)
+                if field in {"changed", "triggered"} and value is True:
+                    pulse_fields.add((entity_id, field))
         engine.evaluate_all()
+        alert_observations = engine.alert_observations(
+            {entity_id: index + 1 for entity_id, _field in pulse_fields}
+        )
+        alerts, alert_transitions = alert_lifecycle.advance(
+            alert_observations, now_ms=engine.now_ms()
+        )
         events = []
         for state in changed_actual:
             events.extend(reconciler.on_state_delta(engine, state, tracker, engine.now_ms()))
@@ -303,6 +316,8 @@ async def simulate_timeline(
                 ],
                 "calls": list(adapter.calls),
                 "effects": simulated_effects,
+                "alerts": alerts,
+                "alert_transitions": alert_transitions,
                 "targets": [
                     target_projection(
                         engine,
@@ -317,8 +332,8 @@ async def simulate_timeline(
         )
         adapter.calls.clear()
         steps.append(record)
-        for entity_id in pulses:
-            engine.update_state(entity_id, False, field="changed")
+        for entity_id, field in pulse_fields:
+            engine.update_state(entity_id, False, field=field)
         if index % 10 == 9:
             await asyncio.sleep(0)
     return steps

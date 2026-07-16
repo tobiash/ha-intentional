@@ -1500,3 +1500,70 @@ def test_dynamic_hold_after_bounds_collection_sizes() -> None:
         load_rules_from_string(prefix + f"      tiers:\n{tiers}\n      adjustments: []\n      max: 1h" + suffix)
     with pytest.raises(RuleLoadError, match="adjustments.*at most"):
         load_rules_from_string(prefix + f"      tiers: [{{active_for: 0s, duration: 1m}}]\n      adjustments:\n{adjustments}\n      max: 1h" + suffix)
+
+
+def test_pulse_alert_requires_resolution_duration() -> None:
+    with pytest.raises(RuleLoadError, match="pulse.*resolve_after"):
+        load_rules_from_string("""
+- id: doorbell
+  when: binary_sensor.doorbell.changed == true
+  alert:
+    name: DoorbellPressed
+    severity: info
+    annotations: {summary: Doorbell pressed}
+""")
+
+
+def test_state_alert_rejects_pulse_resolution_duration() -> None:
+    with pytest.raises(RuleLoadError, match="resolve_after.*pulse"):
+        load_rules_from_string("""
+- id: freezer
+  while: {sensor.freezer_temperature: {gt: -10}}
+  alert:
+    name: FreezerTemperatureHigh
+    severity: warning
+    resolve_after: 5m
+    annotations: {summary: Freezer is too warm}
+""")
+
+
+def test_pulse_alert_rejects_pending_duration() -> None:
+    with pytest.raises(RuleLoadError, match="pulse.*for"):
+        load_rules_from_string("""
+- id: doorbell
+  when: event.doorbell.triggered == true
+  alert:
+    name: DoorbellPressed
+    severity: info
+    for: 1s
+    resolve_after: 5m
+    annotations: {summary: Doorbell pressed}
+""")
+
+
+def test_alert_names_must_be_unique_within_rule() -> None:
+    with pytest.raises(RuleLoadError, match="duplicate Alert name"):
+        load_rules_from_string("""
+- id: freezer
+  while: {sensor.freezer_temperature: {gt: -10}}
+  alert:
+    - name: FreezerTemperatureHigh
+      severity: warning
+      annotations: {summary: Freezer is too warm}
+    - name: FreezerTemperatureHigh
+      severity: critical
+      annotations: {summary: Freezer is critically warm}
+""")
+
+
+def test_alert_rejects_mixed_pulse_and_state_observation() -> None:
+    with pytest.raises(RuleLoadError, match="mix pulse and state"):
+        load_rules_from_string("""
+- id: mixed
+  when: button.doorbell.changed == true or binary_sensor.smoke == "on"
+  alert:
+    name: Emergency
+    severity: critical
+    resolve_after: 5m
+    annotations: {summary: Emergency detected}
+""")

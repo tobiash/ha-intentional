@@ -152,6 +152,25 @@ def test_rule_fingerprint_is_shared_and_stable_under_dict_insertion_order() -> N
     assert restored.resolve("light.room").value == {"state": "on", "brightness_pct": 40}
 
 
+def test_alert_declaration_does_not_invalidate_intent_lifecycle() -> None:
+    without_alert = load_rules_from_string("""
+- id: stable
+  while: {binary_sensor.room: "on"}
+  intent: {light.room: {state: "on"}}
+""")[0]
+    with_alert = load_rules_from_string("""
+- id: stable
+  while: {binary_sensor.room: "on"}
+  intent: {light.room: {state: "on"}}
+  alert:
+    name: RoomOccupied
+    severity: info
+    annotations: {summary: Room is occupied}
+""")[0]
+
+    assert Engine.rule_fingerprint(with_alert) == Engine.rule_fingerprint(without_alert)
+
+
 def test_v1_restores_rule_intent_without_fingerprint_but_v2_requires_it() -> None:
     rules = load_rules_from_string("""
 - id: legacy

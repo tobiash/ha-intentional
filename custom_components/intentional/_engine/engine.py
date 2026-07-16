@@ -48,6 +48,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .alerting import AlertObservation
 from .compositor import ResolvedIntent, resolve_intents
 from .generation import GeneratedFieldState, sample_generated_field
 from .intent import Authority, Intent
@@ -61,12 +62,21 @@ from .records import EffectOutboxRecord, FrozenHoldAfter, IntentSelector
 from .rule_lifecycle import dominant_phase, min_optional, rule_phase
 from .selectors import (
     observation_groups_fire,
+    observe_selectors_evidence,
     observe_selectors_fire,
     selector_diagnostics,
 )
 from .target_policy import TargetPolicy
 from .templates import TemplateRenderer
-from .when_parser import TimeOfDay, WhenAST, evaluate_when, parse_when
+from .when_parser import (
+    TimeOfDay,
+    WhenAST,
+    evaluate_when,
+    evaluate_when_evidence,
+    parse_when,
+    references_state_change_pulse,
+    state_change_pulse_entities,
+)
 from .yaml_loader import Rule
 
 StateChangeCallback = Callable[[str, Any], None]
@@ -121,7 +131,13 @@ def _rule_fingerprint(rule: Rule) -> str:
     semantic = {
         field.name: _canonical_value(getattr(rule, field.name))
         for field in fields(rule)
-        if field.name not in {"source_file", "source_line", "window_name", "provenance"}
+        if field.name not in {
+            "source_file",
+            "source_line",
+            "window_name",
+            "provenance",
+            "alerts",
+        }
     }
     encoded = json.dumps(semantic, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -1002,6 +1018,11 @@ class Engine:
         multiplier = _FOR_UNIT_MULTIPLIERS.get(rule.for_entity_unit, 1_000)
         return max(0, int(value * multiplier))
 
+    def rule_for_ms(self, rule_id: str) -> int:
+        """Return the current effective pending duration for a loaded Rule."""
+        parsed = self._rules.get(rule_id)
+        return 0 if parsed is None else self._rule_for_ms(parsed.rule)
+
     def _hold_until_released(self, parsed: _ParsedRule, now: int) -> bool:
         if parsed.hold_until_ast is None:
             return True
@@ -1426,7 +1447,8 @@ class Engine:
         """Return statuses grouped by authored rule id before target expansion."""
         grouped: dict[str, dict[str, Any]] = {}
         for rule_id, status in self.list_rule_statuses().items():
-            authored_id = rule_id.split(":", 1)[0]
+            rule = self._rules[rule_id].rule
+            authored_id = rule.authored_rule_id or rule_id
             current = grouped.get(authored_id)
             if current is None:
                 grouped[authored_id] = {**status, "rule_id": authored_id}
@@ -1459,6 +1481,96 @@ class Engine:
             ]
             current["for_remaining_ms"] = min(remaining) if remaining else None
         return grouped
+
+    def alert_observations(
+        self, pulse_tokens: dict[str, object] | None = None
+    ) -> tuple[AlertObservation, ...]:
+        """Return one current observation per authored Alert declaration."""
+        statuses = self.list_authored_rule_statuses()
+        observations: list[AlertObservation] = []
+        seen: set[tuple[str, str]] = set()
+        for parsed in self._rules.values():
+            rule = parsed.rule
+            rule_id = rule.authored_rule_id or rule.id
+            status = statuses.get(rule_id, {})
+            when_evidence = evaluate_when_evidence(
+                parsed.when_ast, self.state, time_of_day=self._time_of_day
+            )
+            selector_evidence = observe_selectors_evidence(
+                rule, self.state, self._selector_resolver
+            )
+            pulse_entities = state_change_pulse_entities(parsed.when_ast)
+            pulse_id = None
+            if pulse_tokens is not None:
+                consumed = [
+                    f"{entity_id}:{pulse_tokens[entity_id]}"
+                    for entity_id in sorted(pulse_entities)
+                    if entity_id in pulse_tokens
+                ]
+                if consumed:
+                    pulse_id = "|".join(consumed)
+            quality = (
+                "known"
+                if (when_evidence.quality == "known" and not when_evidence.value)
+                or (selector_evidence.quality == "known" and not selector_evidence.value)
+                or (
+                    when_evidence.quality == "known"
+                    and selector_evidence.quality == "known"
+                )
+                else "unknown"
+            )
+            for alert in rule.alerts:
+                key = (rule_id, alert.name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                inactive_reason = (
+                    "evaluation_disabled"
+                    if not self.is_enabled()
+                    else "evaluation_paused"
+                    if status.get("paused")
+                    else "rule_blocked"
+                    if status.get("blocked_by")
+                    else "condition_inactive"
+                )
+                observations.append(
+                    AlertObservation(
+                        rule_id=rule_id,
+                        name=alert.name,
+                        severity=alert.severity,
+                        summary=str(alert.summary),
+                        active=bool(
+                            self.is_enabled()
+                            and status.get("condition_firing")
+                            and not status.get("blocked_by")
+                            and not status.get("paused")
+                            and status.get("enabled", True)
+                        ),
+                        for_ms=(
+                            alert.for_ms
+                            if alert.for_ms is not None
+                            else self.rule_for_ms(rule.id)
+                        ),
+                        quality=(
+                            "known" if inactive_reason != "condition_inactive" else quality
+                        ),
+                        resolve_after_ms=(
+                            alert.resolve_after_ms
+                            if references_state_change_pulse(parsed.when_ast)
+                            else None
+                        ),
+                        inactive_reason=inactive_reason,
+                        pulse_id=pulse_id,
+                        duration_revision=(
+                            f"alert:{alert.for_ms}"
+                            if alert.for_ms is not None
+                            else (
+                                f"rule:{rule.for_ms}:{rule.for_entity}:{rule.for_entity_unit}"
+                            )
+                        ),
+                    )
+                )
+        return tuple(observations)
 
     def _rule_status(
         self,

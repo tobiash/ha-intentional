@@ -32,6 +32,17 @@ def test_pulse_queue_preserves_same_entity_readded_after_drain_begins() -> None:
     assert pulses.entity_ids() == frozenset({"binary_sensor.front_door"})
 
 
+def test_pulse_tokens_do_not_repeat_after_runtime_restart() -> None:
+    from intentional.runtime import StateChangePulseQueue
+
+    before = StateChangePulseQueue(epoch="before")
+    after = StateChangePulseQueue(epoch="after")
+    before.add("event.doorbell")
+    after.add("event.doorbell")
+
+    assert before.begin_drain().tokens != after.begin_drain().tokens
+
+
 def test_tick_runtime_reports_stale_liveness_as_degraded() -> None:
     from intentional.runtime import TickRuntime
 

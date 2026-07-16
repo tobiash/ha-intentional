@@ -22,7 +22,7 @@ REPO_ROOT = Path(__file__).parent.parent
 SOURCE_DIR = REPO_ROOT / "src" / "intentional"
 BUNDLE_DIR = REPO_ROOT / "custom_components" / "intentional" / "_engine"
 
-PACKAGES = ("adapter",)
+PACKAGES = ("adapter", "alerting")
 
 
 def check_files_match(source: Path, bundle: Path, name: str) -> list[str]:

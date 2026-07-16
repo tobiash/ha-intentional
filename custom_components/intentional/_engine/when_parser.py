@@ -101,6 +101,14 @@ class LogicalOp:
 WhenAST = Comparison | LogicalOp | EntityRef | Literal
 
 
+@dataclass(frozen=True)
+class WhenEvidence:
+    """Legacy boolean result plus whether available evidence proves it."""
+
+    value: bool
+    quality: str
+
+
 # ── Errors ───────────────────────────────────────────────────────────
 
 
@@ -347,6 +355,56 @@ def evaluate_when(
     raise WhenSyntaxError(f"unknown AST node: {ast!r}")
 
 
+def evaluate_when_evidence(
+    ast: WhenAST,
+    state: dict[str, Any],
+    *,
+    time_of_day: str | TimeOfDay | None = None,
+) -> WhenEvidence:
+    """Evaluate without changing legacy truth when required evidence is unavailable."""
+    possibilities = _evidence_possibilities(ast, state, time_of_day)
+    return WhenEvidence(
+        value=evaluate_when(ast, state, time_of_day=time_of_day),
+        quality="known" if len(possibilities) == 1 else "unknown",
+    )
+
+
+def _evidence_possibilities(
+    ast: WhenAST,
+    state: dict[str, Any],
+    time_of_day: str | TimeOfDay | None,
+) -> set[bool]:
+    if isinstance(ast, LogicalOp):
+        left = _evidence_possibilities(ast.left, state, time_of_day)
+        if ast.op == "not":
+            return {not value for value in left}
+        right = _evidence_possibilities(ast.right, state, time_of_day)
+        if ast.op == "and":
+            return {left_value and right_value for left_value in left for right_value in right}
+        if ast.op == "or":
+            return {left_value or right_value for left_value in left for right_value in right}
+        raise WhenSyntaxError(f"unknown logical op: {ast.op}")
+    if isinstance(ast, Comparison):
+        refs = [value for value in (ast.left, ast.right) if isinstance(value, EntityRef)]
+        unavailable = any(
+            _is_unavailable(_resolve(ref, state, time_of_day)) for ref in refs
+        )
+        explicit_unavailable = any(
+            isinstance(value, Literal) and value.value in {"unknown", "unavailable"}
+            for value in (ast.left, ast.right)
+        )
+        if unavailable and not explicit_unavailable:
+            return {False, True}
+        return {evaluate_when(ast, state, time_of_day=time_of_day)}
+    if isinstance(ast, EntityRef) and _is_unavailable(_resolve(ast, state, time_of_day)):
+        return {False, True}
+    return {evaluate_when(ast, state, time_of_day=time_of_day)}
+
+
+def _is_unavailable(value: Any) -> bool:
+    return value is None or isinstance(value, str) and value in {"unknown", "unavailable"}
+
+
 def _eval_logical(
     op: LogicalOp,
     state: dict[str, Any],
@@ -515,6 +573,46 @@ def _clock_minutes(value: str) -> int | None:
 
 
 # ── Entity-reference collection ──────────────────────────────────────
+
+
+def references_state_change_pulse(ast: WhenAST) -> bool:
+    """Return whether an expression observes a one-cycle state-change pulse."""
+    if isinstance(ast, EntityRef):
+        return ast.field in {"changed", "triggered"}
+    if isinstance(ast, (Comparison, LogicalOp)):
+        return references_state_change_pulse(ast.left) or (
+            ast.right is not None and references_state_change_pulse(ast.right)
+        )
+    return False
+
+
+def state_change_pulse_entities(ast: WhenAST) -> frozenset[str]:
+    """Return entities whose pulse fields are referenced by an expression."""
+    if isinstance(ast, EntityRef):
+        return frozenset(
+            {ast.entity_id} if ast.field in {"changed", "triggered"} else set()
+        )
+    if isinstance(ast, (Comparison, LogicalOp)):
+        entities = set(state_change_pulse_entities(ast.left))
+        if ast.right is not None:
+            entities.update(state_change_pulse_entities(ast.right))
+        return frozenset(entities)
+    return frozenset()
+
+
+def requires_state_change_pulse(ast: WhenAST) -> bool:
+    """Return whether every true path through an expression requires a pulse."""
+    if isinstance(ast, EntityRef):
+        return ast.field in {"changed", "triggered"}
+    if isinstance(ast, Comparison):
+        return references_state_change_pulse(ast)
+    if isinstance(ast, LogicalOp):
+        if ast.op == "not":
+            return False
+        left = requires_state_change_pulse(ast.left)
+        right = requires_state_change_pulse(ast.right)
+        return left or right if ast.op == "and" else left and right
+    return False
 
 
 def referenced_entities(rules: Any) -> frozenset[str]:

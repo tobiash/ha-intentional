@@ -68,7 +68,7 @@ import json
 import logging
 import math
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import partial
 from typing import Any
 
@@ -77,6 +77,8 @@ from homeassistant.components.http import HomeAssistantView, require_admin
 from homeassistant.core import HomeAssistant
 
 from ._engine import __version__  # noqa: TID252
+from ._engine.alerting import AlertCoordinator  # noqa: TID252
+from ._engine.alerting.policy import AlertingPolicyRepository  # noqa: TID252
 from ._engine.engine import Engine  # noqa: TID252
 from ._engine.projection import (  # noqa: TID252
     dashboard_cards,
@@ -99,6 +101,10 @@ from ._engine.simulation import (  # noqa: TID252
     validate_simulation_input,
 )
 from ._engine.yaml_loader import MAX_DOCUMENT_BYTES, RuleLoadError  # noqa: TID252
+from .alerting import (  # noqa: TID252
+    alerting_coordinator_key,
+    alerting_policy_repository_key,
+)
 from .automatic_rollback import AutomaticRollback, automatic_rollback_key  # noqa: TID252
 from .const import CONF_RULE_DIR, DEFAULT_RULE_DIR, DOMAIN  # noqa: TID252
 from .diagnostics import list_diagnostics  # noqa: TID252
@@ -149,6 +155,26 @@ def _engine_for(hass: HomeAssistant) -> Any | None:
     if entry is None:
         return None
     return hass.data.get(DOMAIN, {}).get(entry.entry_id)
+
+
+def _alerting_for(hass: HomeAssistant) -> AlertCoordinator | None:
+    """Return Alert runtime state for the first config entry, if loaded."""
+    entry = _entry_for_view(hass)
+    if entry is None:
+        return None
+    coordinator = hass.data.get(DOMAIN, {}).get(alerting_coordinator_key(entry.entry_id))
+    return coordinator if isinstance(coordinator, AlertCoordinator) else None
+
+
+def _alerting_policy_for(hass: HomeAssistant) -> AlertingPolicyRepository | None:
+    """Return Alert routing policy state for the first config entry, if loaded."""
+    entry = _entry_for_view(hass)
+    if entry is None:
+        return None
+    repository = hass.data.get(DOMAIN, {}).get(
+        alerting_policy_repository_key(entry.entry_id)
+    )
+    return repository if isinstance(repository, AlertingPolicyRepository) else None
 
 
 def _reconciliation_for(hass: HomeAssistant) -> Any | None:
@@ -204,6 +230,17 @@ def _runtime_health(hass: HomeAssistant) -> dict[str, Any]:
     if runtime is None:
         return {"status": "degraded", "error": "runtime_not_loaded"}
     return runtime.health()
+
+
+def _alerting_health(hass: HomeAssistant) -> dict[str, object]:
+    coordinator = _alerting_for(hass)
+    if coordinator is None:
+        return {
+            "status": "unhealthy",
+            "dirty": False,
+            "current_error": "alerting_not_loaded",
+        }
+    return coordinator.health()
 
 
 def _persistence_health(hass: HomeAssistant) -> dict[str, Any]:
@@ -323,12 +360,14 @@ class IntentionalHealthView(HomeAssistantView):
         persistence_health = _persistence_health(hass)
         user = request.get("hass_user") if hasattr(request, "get") else None
         rollback_health = _rollback_health(hass, diagnostics=bool(user and user.is_admin))
+        alerting_health = _alerting_health(hass)
         return web.json_response(
             {
                 "status": "ok"
                 if _overall_status(runtime_health) == "ok"
                 and persistence_health["status"] == "ok"
                 and rollback_health.get("state") != "manual_intervention_required"
+                and alerting_health["status"] == "ok"
                 else "degraded",
                 "version": __version__,
                 "rule_dir": entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR),
@@ -337,6 +376,7 @@ class IntentionalHealthView(HomeAssistantView):
                 "runtime": runtime_health,
                 "persistence": persistence_health,
                 "rollback": rollback_health,
+                "alerting": alerting_health,
             }
         )
 
@@ -1075,6 +1115,185 @@ class IntentionalDashboardView(HomeAssistantView):
         return web.json_response(dashboard_cards(rooms))
 
 
+class IntentionalAlertsView(HomeAssistantView):
+    """GET /api/intentional/alerts - current durable Alert state."""
+
+    url = "/api/intentional/alerts"
+    name = "api:intentional:alerts"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        coordinator = _alerting_for(request.app["hass"])
+        if coordinator is None:
+            return _error("Integration not configured", "not_configured", 503)
+        return web.json_response(
+            {"alerts": coordinator.list_alerts(), "health": coordinator.health()}
+        )
+
+
+class IntentionalAlertingPolicyView(HomeAssistantView):
+    """Read or generation-guard the durable Alert routing policy document."""
+
+    url = "/api/intentional/alerting/policy"
+    name = "api:intentional:alerting:policy"
+    requires_auth = True
+
+    @require_admin
+    async def get(self, request: web.Request) -> web.Response:
+        repository = _alerting_policy_for(request.app["hass"])
+        if repository is None:
+            return _error("Integration not configured", "not_configured", 503)
+        return web.json_response(
+            {
+                "contents": repository.contents,
+                "generation": repository.generation,
+                "health": repository.health(),
+            }
+        )
+
+    @require_admin
+    async def put(self, request: web.Request) -> web.Response:
+        repository = _alerting_policy_for(request.app["hass"])
+        if repository is None:
+            return _error("Integration not configured", "not_configured", 503)
+        data, error = await _json_object(request)
+        if error is not None:
+            return error
+        assert data is not None
+        contents = data.get("contents")
+        expected_generation = data.get("expected_generation")
+        if not isinstance(contents, str) or not isinstance(expected_generation, str):
+            return _error(
+                "Request body must include string `contents` and `expected_generation`",
+                "bad_request",
+                400,
+            )
+        if len(contents.encode()) > 1_000_000:
+            return _error("`contents` may not exceed 1000000 bytes", "request_too_large", 400)
+        try:
+            result = await repository.async_publish(
+                contents, expected_generation=expected_generation
+            )
+        except ValueError as err:
+            return web.json_response(
+                {"valid": False, "errors": [str(err)]}, status=400
+            )
+        if result.get("error") == "generation_mismatch":
+            return _error("Policy generation changed", "generation_mismatch", 409)
+        return web.json_response({"valid": True, **result, "errors": []})
+
+
+class IntentionalAlertingPolicyHistoryView(HomeAssistantView):
+    """List prior durable Alert routing policy generations."""
+
+    url = "/api/intentional/alerting/policy/history"
+    name = "api:intentional:alerting:policy:history"
+    requires_auth = True
+
+    @require_admin
+    async def get(self, request: web.Request) -> web.Response:
+        repository = _alerting_policy_for(request.app["hass"])
+        if repository is None:
+            return _error("Integration not configured", "not_configured", 503)
+        return web.json_response({"history": repository.list_history()})
+
+
+class IntentionalAlertingPolicyHistoryGenerationView(HomeAssistantView):
+    """Read one prior Alert routing policy generation."""
+
+    url = r"/api/intentional/alerting/policy/history/{generation:.+}"
+    name = "api:intentional:alerting:policy:history:generation"
+    requires_auth = True
+
+    @require_admin
+    async def get(self, request: web.Request, generation: str) -> web.Response:
+        repository = _alerting_policy_for(request.app["hass"])
+        if repository is None:
+            return _error("Integration not configured", "not_configured", 503)
+        record = repository.read_history(generation)
+        if record is None:
+            return _error("Policy history not found", "not_found", 404)
+        return web.json_response(record)
+
+
+class IntentionalAlertingPolicyRollbackView(HomeAssistantView):
+    """Restore one prior Alert routing policy generation."""
+
+    url = "/api/intentional/alerting/policy/rollback"
+    name = "api:intentional:alerting:policy:rollback"
+    requires_auth = True
+
+    @require_admin
+    async def post(self, request: web.Request) -> web.Response:
+        repository = _alerting_policy_for(request.app["hass"])
+        if repository is None:
+            return _error("Integration not configured", "not_configured", 503)
+        data, error = await _json_object(request)
+        if error is not None:
+            return error
+        assert data is not None
+        generation = data.get("generation")
+        expected_generation = data.get("expected_generation")
+        if not isinstance(generation, str) or not isinstance(
+            expected_generation, str
+        ):
+            return _error(
+                "Request body must include string `generation` and `expected_generation`",
+                "bad_request",
+                400,
+            )
+        result = await repository.async_rollback(
+            generation, expected_generation=expected_generation
+        )
+        if result.get("error") == "generation_mismatch":
+            return _error("Policy generation changed", "generation_mismatch", 409)
+        if result.get("error") == "history_not_found":
+            return _error("Policy history not found", "not_found", 404)
+        return web.json_response(result)
+
+
+class IntentionalAlertingSimulateView(HomeAssistantView):
+    """POST /api/intentional/alerting/simulate - preview Alert routing policy."""
+
+    url = "/api/intentional/alerting/simulate"
+    name = "api:intentional:alerting:simulate"
+    requires_auth = True
+
+    @require_admin
+    async def post(self, request: web.Request) -> web.Response:
+        repository = _alerting_policy_for(request.app["hass"])
+        if repository is None:
+            return _error("Integration not configured", "not_configured", 503)
+        data, error = await _json_object(request)
+        if error is not None:
+            return error
+        assert data is not None
+        contents = data.get("contents")
+        alerts = data.get("alerts")
+        if not isinstance(contents, str) or not isinstance(alerts, list):
+            return _error(
+                "Request body must include string `contents` and list `alerts`",
+                "bad_request",
+                400,
+            )
+        if len(contents.encode()) > 1_000_000:
+            return _error("`contents` may not exceed 1000000 bytes", "request_too_large", 400)
+        raw_at = data.get("at")
+        try:
+            at = datetime.now(UTC) if raw_at is None else datetime.fromisoformat(raw_at)
+        except (TypeError, ValueError):
+            return _error("`at` must be an ISO 8601 timestamp", "bad_request", 400)
+        if at.tzinfo is None:
+            return _error("`at` must include a timezone", "bad_request", 400)
+        try:
+            preview = repository.preview(contents, alerts, at=at)
+        except (TypeError, ValueError) as err:
+            return web.json_response(
+                {"valid": False, "errors": [str(err)]}, status=400
+            )
+        return web.json_response({"valid": True, **preview, "errors": []})
+
+
 class IntentionalSimulateView(HomeAssistantView):
     """POST /api/intentional/simulate — evaluate YAML across a state timeline."""
 
@@ -1233,17 +1452,20 @@ class IntentionalWorldView(HomeAssistantView):
         runtime_health = _runtime_health(hass)
         persistence_health = _persistence_health(hass)
         rollback_health = _rollback_health(hass)
+        alerting_health = _alerting_health(hass)
         world["health"] = {
             "status": "ok"
             if _overall_status(runtime_health) == "ok"
             and persistence_health["status"] == "ok"
             and rollback_health.get("state") != "manual_intervention_required"
+            and alerting_health["status"] == "ok"
             else "degraded",
             "rule_count": engine.rule_count(),
             "active_intent_count": engine.active_intent_count(),
             "runtime": runtime_health,
             "persistence": persistence_health,
             "rollback": rollback_health,
+            "alerting": alerting_health,
         }
         world["entities"] = entities
         reconciler = _reconciliation_for(hass)
@@ -1560,6 +1782,12 @@ def register_api(hass: HomeAssistant) -> None:
         IntentionalPreviewView,
         IntentionalCardView,
         IntentionalDashboardView,
+        IntentionalAlertsView,
+        IntentionalAlertingPolicyView,
+        IntentionalAlertingPolicyHistoryView,
+        IntentionalAlertingPolicyHistoryGenerationView,
+        IntentionalAlertingPolicyRollbackView,
+        IntentionalAlertingSimulateView,
         IntentionalSimulateView,
         IntentionalReplayView,
         IntentionalWorldView,

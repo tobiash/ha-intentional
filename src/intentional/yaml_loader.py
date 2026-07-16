@@ -57,6 +57,7 @@ from intentional.durations import parse_duration
 from intentional.generation import ValueGeneratorSpec, parse_generator_spec
 from intentional.intent import Authority
 from intentional.records import (
+    AlertSpec,
     DynamicHoldAfter,
     Effect,
     HoldAfterAdjustment,
@@ -68,13 +69,18 @@ from intentional.records import (
 )
 from intentional.rule_model import Rule, RuleDirFingerprint, RuleLoadError
 from intentional.target_policy import TargetPolicy
+from intentional.when_parser import (
+    parse_when,
+    references_state_change_pulse,
+    requires_state_change_pulse,
+)
 
 # ── Schema validation ────────────────────────────────────────────────
 
 
 # Recognized top-level fields in a rule
 _RULE_TOP_LEVEL = {
-    "id", "extends", "when", "observe", "while", "for", "after", "stable_for", "hold", "emit", "intent", "effect", "authority", "confidence", "reason", "blocks", "enabled", "labels", "group", "profile", "notes", "edge_created",
+    "id", "extends", "when", "observe", "while", "for", "after", "stable_for", "hold", "emit", "intent", "effect", "alert", "authority", "confidence", "reason", "blocks", "enabled", "labels", "group", "profile", "notes", "edge_created",
 }
 # Recognized fields in the emit block
 _EMIT_FIELDS = {
@@ -264,9 +270,21 @@ def _validate_rule(
     # emit
     emit = raw.get("emit")
     effects = _parse_effects(raw.get("effect"), rule_id, file, line)
+    when_ast = parse_when(when)
+    alerts = _parse_alerts(
+        raw.get("alert"),
+        rule_id,
+        file,
+        line,
+        pulse=references_state_change_pulse(when_ast),
+        mixed_pulse=(
+            references_state_change_pulse(when_ast)
+            and not requires_state_change_pulse(when_ast)
+        ),
+    )
     intent_selectors = _parse_intent_selectors(raw.get("intent"), rule_id, file, line)
     observe_selectors, observe_selector_mode = _parse_observe_selectors(raw.get("observe"), rule_id, file, line)
-    if emit is None and (effects or intent_selectors):
+    if emit is None and (effects or alerts or intent_selectors):
         emit = {"target": "__intentional_effect_only__"}
     if not isinstance(emit, dict):
         raise RuleLoadError(f"Rule {rule_id!r}: missing or invalid `emit` block", file=file, line=line)
@@ -420,6 +438,7 @@ def _validate_rule(
         animation=animation,
         generators=generators,
         effects=effects,
+        alerts=alerts,
         intent_selectors=intent_selectors,
         observe_selectors=observe_selectors,
         observe_selector_mode=observe_selector_mode,
@@ -1426,6 +1445,105 @@ def _parse_effects(
             raise RuleLoadError(f"Rule {rule_id!r}: `effect.data` must be a mapping", file=file, line=line)
         effects.append(Effect(domain=domain, service=service, target=dict(target), data=dict(data)))
     return tuple(effects)
+
+
+def _parse_alerts(
+    raw: Any,
+    rule_id: str,
+    file: Path | None,
+    line: int | None,
+    *,
+    pulse: bool,
+    mixed_pulse: bool,
+) -> tuple[AlertSpec, ...]:
+    if raw is None:
+        return ()
+    if mixed_pulse:
+        raise RuleLoadError(
+            f"Rule {rule_id!r}: Alert observation cannot mix pulse and state activation paths",
+            file=file,
+            line=line,
+        )
+    raw_alerts = raw if isinstance(raw, list) else [raw]
+    alerts: list[AlertSpec] = []
+    names: set[str] = set()
+    for alert in raw_alerts:
+        if not isinstance(alert, dict):
+            raise RuleLoadError(
+                f"Rule {rule_id!r}: each `alert` must be a mapping", file=file, line=line
+            )
+        unknown = set(alert) - {"name", "severity", "for", "resolve_after", "annotations"}
+        if unknown:
+            raise RuleLoadError(
+                f"Rule {rule_id!r}: unknown fields in `alert`: {sorted(unknown)}",
+                file=file,
+                line=line,
+            )
+        name = alert.get("name")
+        severity = alert.get("severity")
+        annotations = alert.get("annotations")
+        summary = annotations.get("summary") if isinstance(annotations, dict) else None
+        if not isinstance(name, str) or not name:
+            raise RuleLoadError(
+                f"Rule {rule_id!r}: `alert.name` must be a non-empty string",
+                file=file,
+                line=line,
+            )
+        if name in names:
+            raise RuleLoadError(
+                f"Rule {rule_id!r}: duplicate Alert name {name!r}", file=file, line=line
+            )
+        names.add(name)
+        if severity not in {"info", "warning", "critical"}:
+            raise RuleLoadError(
+                f"Rule {rule_id!r}: `alert.severity` must be info, warning, or critical",
+                file=file,
+                line=line,
+            )
+        if not isinstance(summary, str) or not summary:
+            raise RuleLoadError(
+                f"Rule {rule_id!r}: `alert.annotations.summary` must be a non-empty string",
+                file=file,
+                line=line,
+            )
+        for_ms = _parse_optional_duration(
+            alert.get("for"), f"Rule {rule_id!r}: alert.for", file, line, default=None
+        )
+        resolve_after_ms = _parse_optional_duration(
+            alert.get("resolve_after"),
+            f"Rule {rule_id!r}: alert.resolve_after",
+            file,
+            line,
+            default=None,
+        )
+        if pulse and resolve_after_ms is None:
+            raise RuleLoadError(
+                f"Rule {rule_id!r}: pulse Alert requires `resolve_after`",
+                file=file,
+                line=line,
+            )
+        if pulse and for_ms is not None:
+            raise RuleLoadError(
+                f"Rule {rule_id!r}: pulse Alert cannot declare `for`",
+                file=file,
+                line=line,
+            )
+        if not pulse and resolve_after_ms is not None:
+            raise RuleLoadError(
+                f"Rule {rule_id!r}: `resolve_after` is only valid for a pulse Alert",
+                file=file,
+                line=line,
+            )
+        alerts.append(
+            AlertSpec(
+                name=name,
+                severity=severity,
+                summary=summary,
+                for_ms=for_ms,
+                resolve_after_ms=resolve_after_ms,
+            )
+        )
+    return tuple(alerts)
 
 
 def _parse_intent_selectors(

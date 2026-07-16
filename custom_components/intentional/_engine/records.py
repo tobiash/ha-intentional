@@ -7,6 +7,17 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class AlertSpec:
+    """An authored durable attention assertion."""
+
+    name: str
+    severity: str
+    summary: Any
+    for_ms: int | None = None
+    resolve_after_ms: int | None = None
+
+
+@dataclass(frozen=True)
 class Effect:
     """A side-effect escape hatch emitted by an active rule."""
 

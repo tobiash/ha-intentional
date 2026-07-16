@@ -10,6 +10,7 @@ from .animation import AnimationSpec
 from .generation import ValueGeneratorSpec
 from .intent import Authority
 from .records import (
+    AlertSpec,
     DynamicHoldAfter,
     Effect,
     HysteresisObservation,
@@ -79,6 +80,7 @@ class Rule:
     animation: AnimationSpec | None = None
     generators: dict[str, ValueGeneratorSpec] = field(default_factory=dict)
     effects: tuple[Effect, ...] = field(default_factory=tuple)
+    alerts: tuple[AlertSpec, ...] = field(default_factory=tuple)
     intent_selectors: tuple[IntentSelector, ...] = field(default_factory=tuple)
     observe_selectors: tuple[ObserveSelector, ...] = field(default_factory=tuple)
     observe_selector_mode: str = "any"

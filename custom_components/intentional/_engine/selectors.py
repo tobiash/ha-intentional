@@ -3,12 +3,102 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from .records import ObservationGroup, ObserveSelector
 from .yaml_loader import Rule
 
 SelectorResolver = Callable[[ObserveSelector], list[str]]
+
+
+@dataclass(frozen=True)
+class SelectorEvidence:
+    """Selector result plus whether available evidence proves it."""
+
+    value: bool
+    quality: str
+
+
+def observe_selectors_evidence(
+    rule: Rule,
+    state: dict[str, Any],
+    resolver: SelectorResolver,
+) -> SelectorEvidence:
+    """Evaluate selector observations without collapsing unavailable evidence."""
+    semantic = {True}
+    for group in rule.observation_groups:
+        semantic = {
+            left and right
+            for left in semantic
+            for right in _selector_fold_possibilities(
+                group.selector, group.behavior, state, resolver
+            )
+        }
+    combined = semantic
+    if rule.observe_selectors:
+        legacy_matches = [
+            _selector_target_possibilities(state, target, selector)
+            for selector in rule.observe_selectors
+            for target in resolver(selector)
+            if target not in selector.exclude
+        ]
+        legacy = _fold_possibilities(legacy_matches, rule.observe_selector_mode)
+        combined = {
+            left and right for left in semantic for right in legacy
+        }
+    return SelectorEvidence(
+        value=observe_selectors_fire(rule, state, resolver),
+        quality="known" if len(combined) == 1 else "unknown",
+    )
+
+
+def _selector_fold_possibilities(
+    selector: ObserveSelector,
+    mode: str,
+    state: dict[str, Any],
+    resolver: SelectorResolver,
+) -> set[bool]:
+    matches = [
+        _selector_target_possibilities(state, target, selector)
+        for target in resolver(selector)
+        if target not in selector.exclude
+    ]
+    return _fold_possibilities(matches, mode)
+
+
+def _selector_target_possibilities(
+    state: dict[str, Any], target: str, selector: ObserveSelector
+) -> set[bool]:
+    actual = state.get(f"{target}.{selector.field}")
+    explicit_unavailable = (
+        selector.operator in {"is", "is_not"}
+        and selector.value in {"unknown", "unavailable"}
+    )
+    if (actual is None or actual in {"unknown", "unavailable"}) and not explicit_unavailable:
+        return {False, True}
+    return {observe_selector_target_matches(state, target, selector)}
+
+
+def _fold_possibilities(matches: list[set[bool]], mode: str) -> set[bool]:
+    if not matches:
+        return {mode == "none"}
+    if mode == "any":
+        if any(values == {True} for values in matches):
+            return {True}
+        if all(values == {False} for values in matches):
+            return {False}
+        return {False, True}
+    if mode == "all":
+        if any(values == {False} for values in matches):
+            return {False}
+        if all(values == {True} for values in matches):
+            return {True}
+        return {False, True}
+    if mode == "none":
+        any_possibilities = _fold_possibilities(matches, "any")
+        return {not value for value in any_possibilities}
+    return {False}
 
 
 def observe_selectors_fire(

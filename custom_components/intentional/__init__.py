@@ -35,6 +35,8 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import dt as dt_util
 
 from ._engine import Engine, RuleLoadError, __version__
+from ._engine.alerting import AlertCoordinator
+from ._engine.alerting.policy import AlertingPolicyRepository
 from ._engine.ha_adapter import (
     clear_state_change_pulses,
     manual_set_from_service_data,
@@ -47,6 +49,15 @@ from ._engine.reconciliation import Reconciliation, ReconciliationEvent, reconci
 from ._engine.runtime import StateChangePulseQueue, TickRuntime, monotonic_ms, runtime_key
 from ._engine.when_parser import referenced_entities
 from ._engine.yaml_loader import Rule
+from .alerting import (
+    ALERTING_POLICY_STORAGE_VERSION,
+    ALERTING_STORAGE_VERSION,
+    alerting_coordinator_key,
+    alerting_policy_repository_key,
+    alerting_policy_storage_key,
+    alerting_storage_key,
+    publish_alerts,
+)
 from .automatic_rollback import AutomaticRollback, automatic_rollback_key
 from .const import (
     ATTR_TARGET,
@@ -402,6 +413,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     engine.load_rules(initial_rules)
     if isinstance(lifecycle_records, dict):
         engine.import_lifecycle_records(lifecycle_records)
+    alert_store: Store = Store(
+        hass,
+        ALERTING_STORAGE_VERSION,
+        alerting_storage_key(entry.entry_id),
+    )
+    alerting = AlertCoordinator(
+        alert_store,
+        publish=lambda: publish_alerts(hass, entry.entry_id),
+    )
+    await alerting.async_load()
+    hass.data[DOMAIN][alerting_coordinator_key(entry.entry_id)] = alerting
+    alerting_policy_store: Store = Store(
+        hass,
+        ALERTING_POLICY_STORAGE_VERSION,
+        alerting_policy_storage_key(entry.entry_id),
+    )
+    alerting_policy = AlertingPolicyRepository(
+        alerting_policy_store,
+        default_timezone=hass.config.time_zone,
+    )
+    try:
+        await alerting_policy.async_load()
+    except ValueError as err:
+        _LOGGER.error("Could not load stored Alert routing policy: %s", err)
+    hass.data[DOMAIN][alerting_policy_repository_key(entry.entry_id)] = alerting_policy
     publication = EntityPublication(hass, entry.entry_id, engine, rule_store)
     hass.data[DOMAIN][publication_key(entry.entry_id)] = publication
     publication.publish_if_changed()
@@ -494,6 +530,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _reconciler.retain_targets(retained_targets)
             _runtime.advance_revision()
             lifecycle_writer.mutated()
+            alert_observations = engine.alert_observations(
+                _runtime.pulses.begin_drain().tokens
+            )
+        if alerting.available:
+            await alerting.async_observe(alert_observations, now_ms=engine.now_ms())
         if publication.publish_if_changed():
             _reconciler.record_publication_dispatch(engine.now_ms())
 
@@ -540,6 +581,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             ),
                         )
                         engine.evaluate_all()
+                        alert_observations = engine.alert_observations(pulse_drain.tokens)
                         now_ms = _monotonic_ms()
                         _runtime.active_rule_ids = _record_rule_activity_changes(
                             hass,
@@ -567,6 +609,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             record_diagnostic(hass, "tick_failed", error=str(err))
                         _runtime.tick_idle.set()
                         continue
+                if alerting.available:
+                    await alerting.async_observe(alert_observations, now_ms=engine.now_ms())
                 # Effect activation is not dispatchable until its outbox
                 # snapshot has crossed the lifecycle storage boundary.
                 await lifecycle_writer.async_flush()
@@ -797,6 +841,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN].pop(publication_key(entry.entry_id), None)
     hass.data[DOMAIN].pop(reconciliation_key(entry.entry_id), None)
     hass.data[DOMAIN].pop(mutation_coordinator_key(entry.entry_id), None)
+    hass.data[DOMAIN].pop(alerting_coordinator_key(entry.entry_id), None)
+    hass.data[DOMAIN].pop(alerting_policy_repository_key(entry.entry_id), None)
     return True
 
 

@@ -30,8 +30,27 @@ from intentional.when_parser import (
     TimeOfDay,
     WhenSyntaxError,
     evaluate_when,
+    evaluate_when_evidence,
     parse_when,
 )
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected_value", "expected_quality"),
+    [
+        ('true or sensor.temperature > 20', True, "known"),
+        ('false and sensor.temperature > 20', False, "known"),
+        ('not sensor.temperature > 20', True, "unknown"),
+        ('sensor.temperature != "on"', True, "unknown"),
+    ],
+)
+def test_unavailable_evidence_uses_possibility_based_logic(
+    expression: str, expected_value: bool, expected_quality: str
+) -> None:
+    result = evaluate_when_evidence(parse_when(expression), {})
+
+    assert result.value is expected_value
+    assert result.quality == expected_quality
 
 # ── Parsing ──────────────────────────────────────────────────────────
 

@@ -38,6 +38,7 @@ MODULES = (
 # Sub-packages whose .py files are synced individually.
 PACKAGES = (
     "adapter",
+    "alerting",
 )
 
 

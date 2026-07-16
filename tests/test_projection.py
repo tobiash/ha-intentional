@@ -235,6 +235,496 @@ async def test_simulated_restart_uses_fresh_engine_without_duplicate_intents() -
 
 
 @pytest.mark.asyncio
+async def test_simulation_projects_alert_firing_and_resolution() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string("""
+- id: freezer-too-warm
+  while:
+    sensor.freezer_temperature:
+      gt: -10
+  alert:
+    name: FreezerTemperatureHigh
+    severity: critical
+    annotations:
+      summary: Freezer is too warm
+"""))
+
+    steps = await simulate_timeline(engine, [
+        {"states": {"sensor.freezer_temperature.state": -18}},
+        {"advance_ms": 1_000, "states": {"sensor.freezer_temperature.state": -5}},
+        {"advance_ms": 1_000, "states": {"sensor.freezer_temperature.state": -18}},
+    ])
+
+    assert [step["alerts"][0]["state"] for step in steps] == [
+        "inactive",
+        "firing",
+        "inactive",
+    ]
+    transitions = [
+        transition
+        for step in steps
+        for transition in step["alert_transitions"]
+    ]
+    assert [transition["to"] for transition in transitions] == ["firing", "resolved"]
+    assert transitions[0]["instance_id"]
+    assert transitions[1]["instance_id"] == transitions[0]["instance_id"]
+    assert all(step["active_targets"] == [] for step in steps)
+    assert all(step["effects"] == [] for step in steps)
+    assert all(step["calls"] == [] for step in steps)
+
+
+@pytest.mark.asyncio
+async def test_simulation_fires_alert_after_its_pending_duration() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string("""
+- id: freezer-too-warm
+  while: {sensor.freezer_temperature: {gt: -10}}
+  alert:
+    name: FreezerTemperatureHigh
+    severity: warning
+    for: 10s
+    annotations: {summary: Freezer is too warm}
+"""))
+
+    steps = await simulate_timeline(engine, [
+        {"states": {"sensor.freezer_temperature.state": -5}},
+        {"advance_ms": 9_999},
+        {"advance_ms": 1},
+    ])
+
+    assert [step["alerts"][0]["state"] for step in steps] == [
+        "pending",
+        "pending",
+        "firing",
+    ]
+    assert [
+        transition["to"]
+        for step in steps
+        for transition in step["alert_transitions"]
+    ] == ["pending", "firing"]
+
+
+@pytest.mark.asyncio
+async def test_alert_pending_duration_is_not_added_to_rule_duration() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string("""
+- id: freezer
+  while: {sensor.freezer_temperature: {gt: -10}}
+  for: 5s
+  alert:
+    name: FreezerTemperatureHigh
+    severity: warning
+    for: 10s
+    annotations: {summary: Freezer is too warm}
+"""))
+
+    steps = await simulate_timeline(engine, [
+        {"states": {"sensor.freezer_temperature.state": -5}},
+        {"advance_ms": 9_999},
+        {"advance_ms": 1},
+    ])
+
+    assert [step["alerts"][0]["state"] for step in steps] == [
+        "pending",
+        "pending",
+        "firing",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_alert_inherits_rule_pending_duration_when_omitted() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string("""
+- id: freezer
+  while: {sensor.freezer_temperature: {gt: -10}}
+  for: 5s
+  alert:
+    name: FreezerTemperatureHigh
+    severity: warning
+    annotations: {summary: Freezer is too warm}
+"""))
+
+    steps = await simulate_timeline(engine, [
+        {"states": {"sensor.freezer_temperature.state": -5}},
+        {"advance_ms": 4_999},
+        {"advance_ms": 1},
+    ])
+
+    assert [step["alerts"][0]["state"] for step in steps] == [
+        "pending",
+        "pending",
+        "firing",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_simulation_creates_new_alert_instance_after_recurrence() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string("""
+- id: leak
+  while: {binary_sensor.water_leak: "on"}
+  alert:
+    name: WaterLeak
+    severity: critical
+    annotations: {summary: Water leak detected}
+"""))
+
+    steps = await simulate_timeline(engine, [
+        {"states": {"binary_sensor.water_leak.state": "on"}},
+        {"states": {"binary_sensor.water_leak.state": "off"}},
+        {"states": {"binary_sensor.water_leak.state": "on"}},
+    ])
+
+    transitions = [
+        transition
+        for step in steps
+        for transition in step["alert_transitions"]
+    ]
+    assert [transition["to"] for transition in transitions] == [
+        "firing",
+        "resolved",
+        "firing",
+    ]
+    assert transitions[1]["instance_id"] == transitions[0]["instance_id"]
+    assert transitions[2]["instance_id"] != transitions[0]["instance_id"]
+
+
+@pytest.mark.asyncio
+async def test_simulation_preserves_pending_alert_across_restart() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string("""
+- id: freezer
+  while: {sensor.freezer_temperature: {gt: -10}}
+  alert:
+    name: FreezerTemperatureHigh
+    severity: warning
+    for: 10s
+    annotations: {summary: Freezer is too warm}
+"""))
+
+    steps = await simulate_timeline(engine, [
+        {"states": {"sensor.freezer_temperature.state": -5}},
+        {"advance_ms": 5_000, "restart": True},
+        {"advance_ms": 4_999},
+        {"advance_ms": 1},
+    ])
+
+    assert [step["alerts"][0]["state"] for step in steps] == [
+        "pending",
+        "pending",
+        "pending",
+        "firing",
+    ]
+    assert len({step["alerts"][0]["instance_id"] for step in steps}) == 1
+    assert steps[1]["checkpoint"] == "restart"
+
+
+@pytest.mark.asyncio
+async def test_simulation_keeps_firing_alert_during_unknown_evidence() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string("""
+- id: freezer
+  while: {sensor.freezer_temperature: {gt: -10}}
+  alert:
+    name: FreezerTemperatureHigh
+    severity: critical
+    annotations: {summary: Freezer is too warm}
+"""))
+
+    steps = await simulate_timeline(engine, [
+        {"states": {"sensor.freezer_temperature.state": -5}},
+        {"advance_ms": 1_000, "states": {"sensor.freezer_temperature.state": "unavailable"}},
+        {"advance_ms": 119_999},
+        {"advance_ms": 1},
+        {"states": {"sensor.freezer_temperature.state": -5}},
+        {"states": {"sensor.freezer_temperature.state": -18}},
+    ])
+
+    assert [step["alerts"][0]["state"] for step in steps] == [
+        "firing",
+        "firing",
+        "firing",
+        "firing",
+        "firing",
+        "inactive",
+    ]
+    assert [step["alerts"][0]["evaluation_status"] for step in steps] == [
+        "current",
+        "grace",
+        "grace",
+        "stale",
+        "current",
+        "current",
+    ]
+    assert [
+        transition["to"]
+        for step in steps
+        for transition in step["alert_transitions"]
+    ] == ["firing", "resolved"]
+
+
+@pytest.mark.asyncio
+async def test_simulation_latches_pulse_alert_until_after_latest_pulse() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string("""
+- id: doorbell
+  when: binary_sensor.doorbell.changed == true and binary_sensor.doorbell == "on"
+  alert:
+    name: DoorbellPressed
+    severity: info
+    resolve_after: 5s
+    annotations: {summary: Doorbell pressed}
+"""))
+
+    steps = await simulate_timeline(engine, [
+        {"states": {"binary_sensor.doorbell.state": "off"}},
+        {"states": {"binary_sensor.doorbell.state": "on"}},
+        {"advance_ms": 4_000},
+        {"states": {"binary_sensor.doorbell.state": "off"}},
+        {"states": {"binary_sensor.doorbell.state": "on"}},
+        {"advance_ms": 4_999},
+        {"advance_ms": 1},
+    ])
+
+    assert [step["alerts"][0]["state"] for step in steps] == [
+        "inactive",
+        "firing",
+        "firing",
+        "firing",
+        "firing",
+        "firing",
+        "inactive",
+    ]
+    transitions = [
+        transition
+        for step in steps
+        for transition in step["alert_transitions"]
+    ]
+    assert [transition["to"] for transition in transitions] == ["firing", "resolved"]
+    assert transitions[1]["instance_id"] == transitions[0]["instance_id"]
+
+
+@pytest.mark.asyncio
+async def test_simulation_drains_event_pulse_before_resolution_deadline() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string("""
+- id: doorbell
+  when: event.doorbell.triggered == true
+  alert:
+    name: DoorbellPressed
+    severity: info
+    resolve_after: 5s
+    annotations: {summary: Doorbell pressed}
+"""))
+
+    steps = await simulate_timeline(engine, [
+        {"states": {"event.doorbell.triggered": True}},
+        {},
+        {"advance_ms": 5_000},
+    ])
+
+    assert [step["alerts"][0]["state"] for step in steps] == [
+        "firing",
+        "firing",
+        "inactive",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unknown_pulse_evidence_does_not_activate_alert() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string("""
+- id: doorbell
+  when: event.doorbell.triggered != true
+  alert:
+    name: DoorbellPressed
+    severity: info
+    resolve_after: 5s
+    annotations: {summary: Doorbell pressed}
+"""))
+
+    steps = await simulate_timeline(engine, [{}])
+
+    assert steps[0]["alerts"][0]["state"] == "inactive"
+    assert steps[0]["alerts"][0]["evaluation_status"] == "grace"
+    assert steps[0]["alert_transitions"] == []
+
+
+@pytest.mark.asyncio
+async def test_intent_retention_does_not_retain_alert() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string("""
+- id: motion
+  while: {binary_sensor.motion: "on"}
+  hold:
+    after:
+      tiers: [{active_for: 0s, duration: 30s}]
+      adjustments: []
+      max: 30s
+  intent: {light.room: {state: "on"}}
+  alert:
+    name: MotionDetected
+    severity: info
+    annotations: {summary: Motion detected}
+"""))
+
+    steps = await simulate_timeline(engine, [
+        {"states": {"binary_sensor.motion.state": "on"}},
+        {"states": {"binary_sensor.motion.state": "off"}},
+    ])
+
+    assert steps[1]["active_targets"] == ["light.room"]
+    assert steps[1]["alerts"][0]["state"] == "inactive"
+
+
+@pytest.mark.asyncio
+async def test_selector_alert_preserves_firing_state_when_evidence_is_unavailable() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string("""
+- id: selected-motion
+  observe:
+    select:
+      mode: any
+      entities:
+        - {domain: binary_sensor, label: motion, state: "on"}
+  alert:
+    name: MotionDetected
+    severity: warning
+    annotations: {summary: Motion detected}
+"""))
+    memberships = [{
+        "selector": {"domain": "binary_sensor", "label": "motion"},
+        "targets": ["binary_sensor.hall_motion"],
+    }]
+
+    steps = await simulate_timeline(
+        engine,
+        [
+            {"states": {"binary_sensor.hall_motion.state": "on"}},
+            {"states": {"binary_sensor.hall_motion.state": "unavailable"}},
+        ],
+        selector_memberships=memberships,
+    )
+
+    assert steps[1]["alerts"][0]["state"] == "firing"
+    assert steps[1]["alerts"][0]["evaluation_status"] == "grace"
+
+
+@pytest.mark.asyncio
+async def test_global_disable_resolves_firing_alert() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string("""
+- id: leak
+  while: {binary_sensor.water_leak: "on"}
+  alert:
+    name: WaterLeak
+    severity: critical
+    annotations: {summary: Water leak detected}
+"""))
+
+    steps = await simulate_timeline(engine, [
+        {"states": {"binary_sensor.water_leak.state": "on"}},
+        {"enabled": False},
+    ])
+
+    assert [step["alerts"][0]["state"] for step in steps] == ["firing", "inactive"]
+    assert steps[1]["alert_transitions"][0]["to"] == "resolved"
+    assert steps[1]["alert_transitions"][0]["reason"] == "evaluation_disabled"
+
+
+@pytest.mark.asyncio
+async def test_rule_pause_resolves_firing_alert_with_operational_reason() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string("""
+- id: leak
+  while: {binary_sensor.water_leak: "on"}
+  alert:
+    name: WaterLeak
+    severity: critical
+    annotations: {summary: Water leak detected}
+"""))
+
+    steps = await simulate_timeline(engine, [
+        {"states": {"binary_sensor.water_leak.state": "on"}},
+        {"pause_rule_ids": ["leak"]},
+    ])
+
+    assert steps[1]["alerts"][0]["state"] == "inactive"
+    assert steps[1]["alert_transitions"][0]["reason"] == "evaluation_paused"
+
+
+@pytest.mark.asyncio
+async def test_rule_pause_closes_alert_even_when_evidence_is_unknown() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string("""
+- id: freezer
+  while: {sensor.freezer_temperature: {gt: -10}}
+  alert:
+    name: FreezerTemperatureHigh
+    severity: critical
+    annotations: {summary: Freezer is too warm}
+"""))
+
+    steps = await simulate_timeline(engine, [
+        {"states": {"sensor.freezer_temperature.state": -5}},
+        {"states": {"sensor.freezer_temperature.state": "unavailable"}},
+        {"pause_rule_ids": ["freezer"]},
+    ])
+
+    assert steps[2]["alerts"][0]["state"] == "inactive"
+    assert steps[2]["alert_transitions"][0]["reason"] == "evaluation_paused"
+
+
+@pytest.mark.asyncio
+async def test_alert_uses_complete_authored_rule_id() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string("""
+- id: kitchen:leak
+  while: {binary_sensor.water_leak: "on"}
+  alert:
+    name: WaterLeak
+    severity: critical
+    annotations: {summary: Water leak detected}
+"""))
+
+    steps = await simulate_timeline(
+        engine, [{"states": {"binary_sensor.water_leak.state": "on"}}]
+    )
+
+    assert steps[0]["alerts"][0]["rule_id"] == "kitchen:leak"
+    assert steps[0]["alerts"][0]["state"] == "firing"
+
+
+@pytest.mark.asyncio
+async def test_alert_inherits_snapshotted_dynamic_rule_duration() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string("""
+- id: motion
+  while: {binary_sensor.motion: "on"}
+  for: {entity: input_number.alert_delay, unit: s, default: 5s}
+  alert:
+    name: MotionDetected
+    severity: warning
+    annotations: {summary: Motion detected}
+"""))
+
+    steps = await simulate_timeline(engine, [
+        {"states": {
+            "binary_sensor.motion.state": "on",
+            "input_number.alert_delay.state": 10,
+        }},
+        {"advance_ms": 9_999, "states": {"input_number.alert_delay.state": 1}},
+        {"advance_ms": 1},
+    ])
+
+    assert [step["alerts"][0]["state"] for step in steps] == [
+        "pending",
+        "pending",
+        "firing",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_simulation_effects_dispatch_once_per_activation_across_restart() -> None:
     engine = Engine(clock_fn=lambda: 0)
     engine.load_rules(load_rules_from_string("""
@@ -424,6 +914,25 @@ def test_schema_completely_describes_new_authoring_and_safety_contracts() -> Non
     assert schema["hysteresis"]["persistence"].startswith("latch and dwell survive restart")
     assert schema["field_withdrawal"]["adopt_semantics"].startswith("restore")
     assert schema["shadow_target_policy"]["shadow"]["calls_home_assistant_services"] is False
+
+
+def test_schema_describes_alert_lifecycle_contract() -> None:
+    from intentional.schema import dsl_schema
+
+    schema = dsl_schema()
+
+    assert "alert" in schema["top_level_rule_fields"]
+    assert schema["alerts"] == {
+        "required_fields": ["name", "severity", "annotations.summary"],
+        "severity": ["info", "warning", "critical"],
+        "states": ["inactive", "pending", "firing"],
+        "evaluation_status": ["current", "grace", "stale"],
+        "pulse_requires": "resolve_after",
+        "api": "/api/intentional/alerts",
+        "policy_api": "/api/intentional/alerting/policy",
+        "simulate_api": "/api/intentional/alerting/simulate",
+        "matcher_operators": ["=", "!=", "=~", "!~"],
+    }
     assert schema["semantic_observations"]["power"]["effective_device_class"] == "power"
     assert schema["capabilities"]["preview"]["horizons_ms"]["max_items"] == 32
     assert schema["capabilities"]["diagnostics"]["runtime_event_retention"]["max_items"] == 200

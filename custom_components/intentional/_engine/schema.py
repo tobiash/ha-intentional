@@ -11,7 +11,7 @@ def dsl_schema() -> dict[str, Any]:
         "dsl_version": "vnext-draft",
         "top_level_rule_fields": [
             "id", "enabled", "labels", "notes", "while", "after", "stable_for", "hold", "observe", "intent",
-            "effect", "authority", "confidence", "reason", "group", "profile",
+            "effect", "alert", "authority", "confidence", "reason", "group", "profile",
         ],
         "top_level_document_fields": ["rules", "scenes", "targets", "retention_profiles", "time_windows"],
         "target_policy_fields": [
@@ -32,6 +32,17 @@ def dsl_schema() -> dict[str, Any]:
             "sample", "walk", "weighted_sample", "gradient", "noise",
         ],
         "target_metadata": ["ttl", "linger", "transition", "easing"],
+        "alerts": {
+            "required_fields": ["name", "severity", "annotations.summary"],
+            "severity": ["info", "warning", "critical"],
+            "states": ["inactive", "pending", "firing"],
+            "evaluation_status": ["current", "grace", "stale"],
+            "pulse_requires": "resolve_after",
+            "api": "/api/intentional/alerts",
+            "policy_api": "/api/intentional/alerting/policy",
+            "simulate_api": "/api/intentional/alerting/simulate",
+            "matcher_operators": ["=", "!=", "=~", "!~"],
+        },
         "lifecycle_fields": [
             "while", "after", "stable_for", "hold.while", "hold.until", "hold.until.for",
             "hold.after", "hold.after_when_stops",

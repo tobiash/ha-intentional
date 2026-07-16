@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -28,7 +29,7 @@ def _set_event() -> asyncio.Event:
 class PulseDrain:
     """Snapshot of pulses that are eligible to clear after one tick."""
 
-    tokens: dict[str, int]
+    tokens: dict[str, str]
 
     def __bool__(self) -> bool:
         return bool(self.tokens)
@@ -43,13 +44,14 @@ class StateChangePulseQueue:
     it observed, leaving newer same-entity pulses for the next cycle.
     """
 
-    def __init__(self) -> None:
-        self._tokens: dict[str, int] = {}
+    def __init__(self, *, epoch: str | None = None) -> None:
+        self._tokens: dict[str, str] = {}
         self._next_token = 0
+        self._epoch = epoch or str(uuid.uuid4())
 
     def add(self, entity_id: str) -> None:
         self._next_token += 1
-        self._tokens[entity_id] = self._next_token
+        self._tokens[entity_id] = f"{self._epoch}:{self._next_token}"
 
     def begin_drain(self) -> PulseDrain:
         return PulseDrain(dict(self._tokens))

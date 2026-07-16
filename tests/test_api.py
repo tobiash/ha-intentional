@@ -84,6 +84,11 @@ async def test_health_view_includes_tick_runtime_liveness(
     )
     request = SimpleNamespace(app={"hass": hass})
     monkeypatch.setattr(api, "_persistence_health", lambda _hass: {"status": "ok"})
+    monkeypatch.setattr(
+        api,
+        "_alerting_health",
+        lambda _hass: {"status": "ok", "dirty": False, "current_error": None},
+    )
 
     response = await IntentionalHealthView().get(request)
     body = json.loads(response.body.decode())
@@ -93,6 +98,7 @@ async def test_health_view_includes_tick_runtime_liveness(
     assert body["runtime"]["status"] == "ok"
     assert body["runtime"]["last_success_age_ms"] is not None
     assert body["runtime"]["failure_count"] == 0
+    assert body["alerting"]["status"] == "ok"
 
 
 def test_rules_view_has_correct_url() -> None:
@@ -142,6 +148,75 @@ def test_simulate_view_accepts_post() -> None:
     assert IntentionalSimulateView.url == "/api/intentional/simulate"
     assert IntentionalSimulateView.requires_auth is True
     assert hasattr(IntentionalSimulateView, "post")
+
+
+def test_alerting_simulate_view_accepts_admin_post() -> None:
+    from custom_components.intentional.api import (
+        IntentionalAlertingPolicyHistoryGenerationView,
+        IntentionalAlertingPolicyHistoryView,
+        IntentionalAlertingPolicyRollbackView,
+        IntentionalAlertingPolicyView,
+        IntentionalAlertingSimulateView,
+    )
+
+    assert IntentionalAlertingSimulateView.url == "/api/intentional/alerting/simulate"
+    assert IntentionalAlertingSimulateView.requires_auth is True
+    assert hasattr(IntentionalAlertingSimulateView, "post")
+    assert IntentionalAlertingPolicyView.url == "/api/intentional/alerting/policy"
+    assert hasattr(IntentionalAlertingPolicyView, "get")
+    assert hasattr(IntentionalAlertingPolicyView, "put")
+    assert IntentionalAlertingPolicyHistoryView.url.endswith("/policy/history")
+    assert "{generation" in IntentionalAlertingPolicyHistoryGenerationView.url
+    assert IntentionalAlertingPolicyRollbackView.url.endswith("/policy/rollback")
+    assert hasattr(IntentionalAlertingPolicyRollbackView, "post")
+
+
+async def test_alert_api_and_sensor_share_durable_instance() -> None:
+    from custom_components.intentional._engine.alerting import (
+        AlertCoordinator,
+        AlertObservation,
+    )
+    from custom_components.intentional.alerting import alerting_coordinator_key
+    from custom_components.intentional.api import IntentionalAlertsView
+    from custom_components.intentional.const import DOMAIN
+    from custom_components.intentional.sensor import IntentionalAlertSensor
+
+    class Store:
+        async def async_load(self):
+            return None
+
+        async def async_save(self, _data):
+            return None
+
+    coordinator = AlertCoordinator(
+        Store(), id_factory=lambda: "00000000-0000-4000-8000-000000000001"
+    )
+    await coordinator.async_load()
+    await coordinator.async_observe(
+        [
+            AlertObservation(
+                rule_id="freezer",
+                name="FreezerTemperatureHigh",
+                severity="critical",
+                summary="Freezer is too warm",
+                active=True,
+            )
+        ],
+        now_ms=1_000,
+    )
+    entry = SimpleNamespace(entry_id="entry-1")
+    hass = SimpleNamespace(
+        config_entries=SimpleNamespace(async_entries=lambda _domain: [entry]),
+        data={DOMAIN: {alerting_coordinator_key(entry.entry_id): coordinator}},
+    )
+
+    response = await IntentionalAlertsView().get(SimpleNamespace(app={"hass": hass}))
+    alert = json.loads(response.body.decode())["alerts"][0]
+    sensor = IntentionalAlertSensor(coordinator, entry, "freezer", "FreezerTemperatureHigh")
+
+    assert response.status == 200
+    assert sensor.native_value == alert["state"] == "firing"
+    assert sensor.extra_state_attributes["instance_id"] == alert["instance_id"]
 
 
 def test_high_leverage_views_have_correct_urls() -> None:
