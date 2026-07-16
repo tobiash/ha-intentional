@@ -67,7 +67,11 @@ receivers:
         {
             **{key: value for key, value in item.items() if key != "fanout"},
             "routes": [
-                {key: value for key, value in route.items() if key != "group_key"}
+                {
+                    key: value
+                    for key, value in route.items()
+                    if key not in {"group_key", "destinations"}
+                }
                 for route in item["routes"]
             ],
         }

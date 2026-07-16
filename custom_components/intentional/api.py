@@ -77,7 +77,10 @@ from homeassistant.components.http import HomeAssistantView, require_admin
 from homeassistant.core import HomeAssistant
 
 from ._engine import __version__  # noqa: TID252
-from ._engine.alerting import AlertCoordinator  # noqa: TID252
+from ._engine.alerting import (  # noqa: TID252
+    AlertCoordinator,
+    AlertStateUnavailableError,
+)
 from ._engine.alerting.policy import AlertingPolicyRepository  # noqa: TID252
 from ._engine.engine import Engine  # noqa: TID252
 from ._engine.projection import (  # noqa: TID252
@@ -181,6 +184,59 @@ def _request_actor(request: web.Request) -> str | None:
     user = request.get("hass_user")
     user_id = getattr(user, "id", None)
     return user_id if isinstance(user_id, str) and user_id else None
+
+
+def _public_alert_projection(alert: dict[str, object]) -> dict[str, object]:
+    allowed = {
+        key: alert.get(key)
+        for key in (
+            "rule_id",
+            "name",
+            "severity",
+            "summary",
+            "state",
+            "instance_id",
+            "evaluation_status",
+            "observed_at_ms",
+            "active_at_ms",
+            "firing_at_ms",
+            "resolved_at_ms",
+            "next_deadline_ms",
+            "definition_revision",
+            "labels",
+            "suppression",
+            "reason",
+        )
+        if key in alert
+    }
+    allowed["acknowledged"] = alert.get("acknowledgment") is not None
+    return allowed
+
+
+def _redact_failed_alert_payload(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return None
+    notifications = value.get("notifications")
+    obligations = (
+        notifications.get("obligations", [])
+        if isinstance(notifications, dict)
+        else []
+    )
+    return {
+        "version": value.get("version")
+        if isinstance(value.get("version"), int)
+        else None,
+        "generation": value.get("generation")
+        if isinstance(value.get("generation"), int)
+        else None,
+        "sections": sorted(str(key) for key in value),
+        "alert_count": len(value.get("alerts", []))
+        if isinstance(value.get("alerts"), list)
+        else None,
+        "notification_count": len(obligations)
+        if isinstance(obligations, list)
+        else None,
+    }
 
 
 def _reconciliation_for(hass: HomeAssistant) -> Any | None:
@@ -1133,7 +1189,13 @@ class IntentionalAlertsView(HomeAssistantView):
         if coordinator is None:
             return _error("Integration not configured", "not_configured", 503)
         return web.json_response(
-            {"alerts": coordinator.list_alerts(), "health": coordinator.health()}
+            {
+                "alerts": [
+                    _public_alert_projection(alert)
+                    for alert in coordinator.list_alerts()
+                ],
+                "health": coordinator.health(),
+            }
         )
 
 
@@ -1163,8 +1225,16 @@ class IntentionalAlertInstanceView(HomeAssistantView):
             for event in coordinator.list_audit()
             if event.get("instance_id") == instance_id
         ]
+        public_audit = [
+            {key: value for key, value in event.items() if key not in {"actor", "comment"}}
+            for event in audit
+        ]
         return web.json_response(
-            {"instance": instance, "audit": audit, "health": coordinator.health()}
+            {
+                "instance": _public_alert_projection(instance),
+                "audit": public_audit,
+                "health": coordinator.health(),
+            }
         )
 
 
@@ -1268,7 +1338,14 @@ class IntentionalSilencesView(HomeAssistantView):
         coordinator = _alerting_for(request.app["hass"])
         if coordinator is None:
             return _error("Integration not configured", "not_configured", 503)
-        return web.json_response({"silences": coordinator.list_silences()})
+        actor = _request_actor(request)
+        is_admin = getattr(request.get("hass_user"), "is_admin", False) is True
+        silences = [
+            silence
+            for silence in coordinator.list_silences()
+            if is_admin or silence.get("actor") == actor
+        ]
+        return web.json_response({"silences": silences})
 
     @require_admin
     async def post(self, request: web.Request) -> web.Response:
@@ -1322,6 +1399,17 @@ class IntentionalSilenceView(HomeAssistantView):
             return _error("Integration not configured", "not_configured", 503)
         if actor is None:
             return _error("Authenticated actor required", "actor_required", 403)
+        silence = next(
+            (
+                item
+                for item in coordinator.list_silences()
+                if item.get("silence_id") == silence_id
+            ),
+            None,
+        )
+        is_admin = getattr(request.get("hass_user"), "is_admin", False) is True
+        if silence is not None and silence.get("actor") != actor and not is_admin:
+            return _error("Administrator required", "admin_required", 403)
         removed = await coordinator.async_delete_silence(
             silence_id,
             actor=actor,
@@ -1383,6 +1471,39 @@ class IntentionalAlertingNotificationsView(HomeAssistantView):
                 }
             )
         return web.json_response({"notifications": notifications})
+
+
+class IntentionalAlertingResetView(HomeAssistantView):
+    """Preview or explicitly reset unavailable Alert runtime state."""
+
+    url = "/api/intentional/alerting/reset"
+    name = "api:intentional:alerting:reset"
+    requires_auth = True
+
+    @require_admin
+    async def post(self, request: web.Request) -> web.Response:
+        coordinator = _alerting_for(request.app["hass"])
+        if coordinator is None:
+            return _error("Integration not configured", "not_configured", 503)
+        data, error = await _json_object(request)
+        if error is not None:
+            return error
+        assert data is not None
+        confirmed = data.get("confirmed", False)
+        if not isinstance(confirmed, bool):
+            return _error("`confirmed` must be a boolean", "bad_request", 400)
+        if not confirmed:
+            return web.json_response(
+                {
+                    "requires_confirmation": True,
+                    "health": coordinator.health(),
+                    "failed_payload": _redact_failed_alert_payload(
+                        coordinator.failed_payload()
+                    ),
+                }
+            )
+        await coordinator.async_reset(confirmed=True)
+        return web.json_response({"reset": True, "health": coordinator.health()})
 
 
 class IntentionalAlertingPolicyView(HomeAssistantView):
@@ -1454,11 +1575,22 @@ class IntentionalAlertingPolicyView(HomeAssistantView):
         if result.get("error") == "confirmation_required":
             return web.json_response(result, status=409)
         if coordinator is not None:
-            await coordinator.async_set_policy(
-                contents,
-                now_ms=int(datetime.now(UTC).timestamp() * 1_000),
-                default_timezone=request.app["hass"].config.time_zone,
-            )
+            try:
+                await coordinator.async_set_policy(
+                    contents,
+                    now_ms=int(datetime.now(UTC).timestamp() * 1_000),
+                    default_timezone=request.app["hass"].config.time_zone,
+                )
+            except AlertStateUnavailableError:
+                await repository.async_rollback(
+                    expected_generation,
+                    expected_generation=str(result["generation"]),
+                )
+                return _error(
+                    "Alert runtime could not apply policy",
+                    "alerting_unavailable",
+                    503,
+                )
         return web.json_response({"valid": True, **result, "errors": []})
 
 
@@ -1530,11 +1662,22 @@ class IntentionalAlertingPolicyRollbackView(HomeAssistantView):
             return _error("Policy history not found", "not_found", 404)
         coordinator = _alerting_for(request.app["hass"])
         if coordinator is not None and repository.contents is not None:
-            await coordinator.async_set_policy(
-                repository.contents,
-                now_ms=int(datetime.now(UTC).timestamp() * 1_000),
-                default_timezone=request.app["hass"].config.time_zone,
-            )
+            try:
+                await coordinator.async_set_policy(
+                    repository.contents,
+                    now_ms=int(datetime.now(UTC).timestamp() * 1_000),
+                    default_timezone=request.app["hass"].config.time_zone,
+                )
+            except AlertStateUnavailableError:
+                await repository.async_rollback(
+                    expected_generation,
+                    expected_generation=str(result["generation"]),
+                )
+                return _error(
+                    "Alert runtime could not apply rollback",
+                    "alerting_unavailable",
+                    503,
+                )
         return web.json_response(result)
 
 
@@ -1754,6 +1897,31 @@ class IntentionalWorldView(HomeAssistantView):
             "alerting": alerting_health,
         }
         world["entities"] = entities
+        alerting = _alerting_for(hass)
+        world["alerts"] = (
+            [
+                {
+                    key: alert.get(key)
+                    for key in (
+                        "rule_id",
+                        "name",
+                        "severity",
+                        "summary",
+                        "state",
+                        "instance_id",
+                        "evaluation_status",
+                        "active_at_ms",
+                        "firing_at_ms",
+                        "next_deadline_ms",
+                        "suppression",
+                    )
+                }
+                | {"acknowledged": alert.get("acknowledgment") is not None}
+                for alert in alerting.list_alerts()
+            ]
+            if alerting is not None
+            else []
+        )
         reconciler = _reconciliation_for(hass)
         world["targets"] = [
             target_projection(
@@ -2077,6 +2245,7 @@ def register_api(hass: HomeAssistant) -> None:
         IntentionalSilenceView,
         IntentionalAlertingStatusView,
         IntentionalAlertingNotificationsView,
+        IntentionalAlertingResetView,
         IntentionalAlertingPolicyView,
         IntentionalAlertingPolicyHistoryView,
         IntentionalAlertingPolicyHistoryGenerationView,

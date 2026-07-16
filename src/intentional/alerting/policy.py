@@ -272,6 +272,7 @@ def simulate_alerting_policy(
     *,
     at: datetime | None = None,
     default_timezone: str = "UTC",
+    inhibition_sources: set[int] | None = None,
 ) -> list[dict[str, Any]]:
     """Route synthetic Alert labels without dispatching Notifications."""
     root, receivers, intervals, inhibit_rules = _load_policy(
@@ -290,7 +291,11 @@ def simulate_alerting_policy(
     for alert_index, labels in enumerate(alerts):
         routes = _route_alert(root, labels)
         inhibition = _inhibition_suppression(
-            alert_index, labels, alerts, inhibit_rules
+            alert_index,
+            labels,
+            alerts,
+            inhibit_rules,
+            inhibition_sources=inhibition_sources,
         )
         projected_routes = [
             _project_route(route, labels, receivers, intervals, at, inhibition)
@@ -552,6 +557,10 @@ def _project_route(
             "receiver_revision": receivers[route.receiver].revision,
             "labels": {name: labels.get(name, "") for name in route.group_by},
         },
+        "destinations": [
+            dict(destination.data)
+            for destination in receivers[route.receiver].destinations
+        ],
     }
     suppression = _interval_suppression(route, intervals, at) or inhibition
     if suppression is not None:
@@ -615,17 +624,29 @@ def _inhibition_suppression(
     labels: dict[str, str],
     alerts: list[dict[str, str]],
     rules: tuple[InhibitRule, ...],
+    *,
+    inhibition_sources: set[int] | None,
 ) -> dict[str, Any] | None:
     for rule_index, rule in enumerate(rules):
         if not _matches(rule.target_matchers, labels):
             continue
         for source_index, source_labels in enumerate(alerts):
-            if source_index == alert_index or not _matches(
+            if (
+                source_index == alert_index
+                or (
+                    inhibition_sources is not None
+                    and source_index not in inhibition_sources
+                )
+                or not _matches(
                 rule.source_matchers, source_labels
+                )
             ):
                 continue
             if not all(
-                source_labels.get(name) == labels.get(name) for name in rule.equal
+                name in source_labels
+                and name in labels
+                and source_labels[name] == labels[name]
+                for name in rule.equal
             ):
                 continue
             return {

@@ -82,7 +82,7 @@ def _selector_target_possibilities(
 
 def _fold_possibilities(matches: list[set[bool]], mode: str) -> set[bool]:
     if not matches:
-        return {mode == "none"}
+        return {mode in {"all", "none"}}
     if mode == "any":
         if any(values == {True} for values in matches):
             return {True}

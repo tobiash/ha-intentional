@@ -61,6 +61,7 @@ from intentional.lifecycle import (
 from intentional.records import EffectOutboxRecord, FrozenHoldAfter, IntentSelector
 from intentional.rule_lifecycle import dominant_phase, min_optional, rule_phase
 from intentional.selectors import (
+    SelectorEvidence,
     observation_groups_fire,
     observe_selectors_evidence,
     observe_selectors_fire,
@@ -71,6 +72,7 @@ from intentional.templates import TemplateRenderer
 from intentional.when_parser import (
     TimeOfDay,
     WhenAST,
+    WhenEvidence,
     evaluate_when,
     evaluate_when_evidence,
     parse_when,
@@ -1483,24 +1485,35 @@ class Engine:
         return grouped
 
     def alert_observations(
-        self, pulse_tokens: dict[str, object] | None = None
+        self,
+        pulse_tokens: dict[str, object] | None = None,
+        pulse_source_timestamps_ms: dict[str, int] | None = None,
     ) -> tuple[AlertObservation, ...]:
         """Return one current observation per authored Alert declaration."""
         statuses = self.list_authored_rule_statuses()
         observations: list[AlertObservation] = []
         seen: set[tuple[str, str]] = set()
+        evaluated_authored_rules: set[str] = set()
         for parsed in self._rules.values():
             rule = parsed.rule
             rule_id = rule.authored_rule_id or rule.id
+            if rule_id in evaluated_authored_rules:
+                continue
+            evaluated_authored_rules.add(rule_id)
             status = statuses.get(rule_id, {})
-            when_evidence = evaluate_when_evidence(
-                parsed.when_ast, self.state, time_of_day=self._time_of_day
-            )
-            selector_evidence = observe_selectors_evidence(
-                rule, self.state, self._selector_resolver
-            )
+            try:
+                when_evidence = evaluate_when_evidence(
+                    parsed.when_ast, self.state, time_of_day=self._time_of_day
+                )
+                selector_evidence = observe_selectors_evidence(
+                    rule, self.state, self._selector_resolver
+                )
+            except Exception:  # Alert evidence failure remains unknown, never inactive.
+                when_evidence = WhenEvidence(value=False, quality="unknown")
+                selector_evidence = SelectorEvidence(value=False, quality="unknown")
             pulse_entities = state_change_pulse_entities(parsed.when_ast)
             pulse_id = None
+            source_timestamp_ms = None
             if pulse_tokens is not None:
                 consumed = [
                     f"{entity_id}:{pulse_tokens[entity_id]}"
@@ -1509,6 +1522,13 @@ class Engine:
                 ]
                 if consumed:
                     pulse_id = "|".join(consumed)
+                    if pulse_source_timestamps_ms is not None:
+                        timestamps = [
+                            pulse_source_timestamps_ms[entity_id]
+                            for entity_id in pulse_entities
+                            if entity_id in pulse_source_timestamps_ms
+                        ]
+                        source_timestamp_ms = max(timestamps) if timestamps else None
             quality = (
                 "known"
                 if (when_evidence.quality == "known" and not when_evidence.value)
@@ -1597,6 +1617,7 @@ class Engine:
                         ),
                         inactive_reason=inactive_reason,
                         pulse_id=pulse_id,
+                        source_timestamp_ms=source_timestamp_ms,
                         duration_revision=(
                             f"alert:{alert.for_ms}"
                             if alert.for_ms is not None

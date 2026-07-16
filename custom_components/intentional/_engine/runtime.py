@@ -30,6 +30,7 @@ class PulseDrain:
     """Snapshot of pulses that are eligible to clear after one tick."""
 
     tokens: dict[str, str]
+    source_timestamps_ms: dict[str, int]
 
     def __bool__(self) -> bool:
         return bool(self.tokens)
@@ -46,15 +47,21 @@ class StateChangePulseQueue:
 
     def __init__(self, *, epoch: str | None = None) -> None:
         self._tokens: dict[str, str] = {}
+        self._source_timestamps_ms: dict[str, int] = {}
         self._next_token = 0
         self._epoch = epoch or str(uuid.uuid4())
 
-    def add(self, entity_id: str) -> None:
+    def add(self, entity_id: str, *, source_timestamp_ms: int | None = None) -> None:
         self._next_token += 1
         self._tokens[entity_id] = f"{self._epoch}:{self._next_token}"
+        self._source_timestamps_ms[entity_id] = (
+            source_timestamp_ms
+            if source_timestamp_ms is not None
+            else int(time.time() * 1_000)
+        )
 
     def begin_drain(self) -> PulseDrain:
-        return PulseDrain(dict(self._tokens))
+        return PulseDrain(dict(self._tokens), dict(self._source_timestamps_ms))
 
     def current_entity_ids(self, drain: PulseDrain) -> frozenset[str]:
         return frozenset(
@@ -67,6 +74,7 @@ class StateChangePulseQueue:
         for entity_id, token in drain.tokens.items():
             if self._tokens.get(entity_id) == token:
                 self._tokens.pop(entity_id, None)
+                self._source_timestamps_ms.pop(entity_id, None)
 
     def entity_ids(self) -> frozenset[str]:
         return frozenset(self._tokens)

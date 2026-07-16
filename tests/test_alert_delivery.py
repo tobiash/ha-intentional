@@ -92,6 +92,29 @@ def test_policy_reconciliation_uses_explicit_simulation_instant() -> None:
     assert runtime.next_deadline_ms() == 30_000
 
 
+def test_suppression_does_not_emit_false_resolution_and_in_flight_retries_after_restart() -> None:
+    runtime = NotificationRuntime(id_factory=lambda: "obligation-1")
+    policy = POLICY.replace("group_wait: 30s", "group_wait: 0s").replace(
+        "      - {type: persistent_notification}\n", ""
+    )
+    runtime.reconcile([firing()], policy, now_ms=0)
+    obligation = runtime.advance(now_ms=0)[0]
+    runtime.mark_in_flight(obligation["obligation_id"], now_ms=0)
+
+    restored = NotificationRuntime()
+    restored.import_state(runtime.export_state())
+    assert restored.advance(now_ms=0)[0]["status"] == "planned"
+    restored.mark_in_flight(obligation["obligation_id"], now_ms=1)
+    restored.accept(obligation["obligation_id"], now_ms=1)
+    suppressed = {**firing(), "notification_suppressed": True}
+    restored.reconcile([suppressed], policy, now_ms=2)
+    restored.advance(now_ms=60_001)
+
+    assert all(
+        item["message_kind"] != "resolved" for item in restored.list_obligations()
+    )
+
+
 async def test_coordinator_persists_obligation_before_returning_it_for_dispatch() -> None:
     class Store:
         def __init__(self) -> None:

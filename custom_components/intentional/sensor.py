@@ -216,6 +216,10 @@ def _cleanup_stale_alert_sensors(
     current_unique_ids = {
         alert_sensor_unique_id(entry.entry_id, rule_id, name) for rule_id, name in current
     }
+    current_unique_ids.update(
+        f"{entry.entry_id}_alert_{kind}"
+        for kind in ("firing", "unacknowledged", "pending", "backlog", "health")
+    )
     for entity_id, registry_entry in list(registry.entities.items()):
         if registry_entry.platform != DOMAIN or registry_entry.domain != Platform.SENSOR:
             continue

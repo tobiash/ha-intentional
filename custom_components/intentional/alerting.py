@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import secrets
 import time
 from typing import Any
 
@@ -16,6 +17,7 @@ from ._engine.alerting.policy import AlertingPolicyRepository
 
 ALERTING_STORAGE_VERSION = 1
 ALERTING_POLICY_STORAGE_VERSION = 1
+ALERTING_SECRET_STORAGE_VERSION = 1
 
 
 def alerting_coordinator_key(entry_id: str) -> str:
@@ -31,6 +33,10 @@ def alerting_storage_key(entry_id: str) -> str:
 def alerting_policy_storage_key(entry_id: str) -> str:
     """Return the Store key for one entry's Alert routing policy."""
     return f"intentional_alerting_policy_{entry_id}_v1"
+
+
+def alerting_secret_storage_key(entry_id: str) -> str:
+    return f"intentional_alerting_secret_{entry_id}_v1"
 
 
 def alerting_policy_repository_key(entry_id: str) -> str:
@@ -117,10 +123,41 @@ class AlertNotificationDispatcher:
         payload = obligation["payload"]
         destination_type = destination.get("type")
         if destination_type == "notify_entity":
+            capabilities = obligation.get("capabilities", [])
+            actions = [
+                {
+                    "action": "|".join(
+                        (
+                            "INTENTIONAL_ALERT",
+                            str(capability["operation"]),
+                            str(capability["record_id"]),
+                            str(capability["token"]),
+                            str(capability["instance_id"]),
+                        )
+                    ),
+                    "title": (
+                        "Acknowledge"
+                        if capability["operation"] == "acknowledge"
+                        else "Silence 1h"
+                    ),
+                }
+                for capability in capabilities
+            ]
+            actions.append(
+                {
+                    "action": "URI",
+                    "title": "Open Alerts",
+                    "uri": "/intentional/alerts",
+                }
+            )
             await self._hass.services.async_call(
                 "notify",
                 "send_message",
-                {"message": payload["message"], "title": payload["title"]},
+                {
+                    "message": payload["message"],
+                    "title": payload["title"],
+                    "data": {"actions": actions} if actions else {},
+                },
                 target={"entity_id": destination["entity_id"]},
                 blocking=True,
             )
@@ -138,7 +175,7 @@ class AlertNotificationDispatcher:
             notification_id = "intentional_" + hashlib.sha256(
                 f'{obligation["group_identity"]}:{obligation["destination_id"]}'.encode()
             ).hexdigest()[:32]
-            if obligation["message_kind"] == "resolved":
+            if obligation["message_kind"] in {"resolved", "cleanup"}:
                 await self._hass.services.async_call(
                     "persistent_notification",
                     "dismiss",
@@ -196,6 +233,8 @@ class AlertDeadlineDriver:
             if deadline is not None and deadline <= now_ms:
                 await self._coordinator.async_advance(now_ms=now_ms)
                 await self._dispatcher.async_dispatch_due(now_ms=now_ms)
+                if self._coordinator.health()["status"] == "degraded":
+                    await asyncio.sleep(1)
                 continue
             self._wake.clear()
             timeout = (

@@ -147,7 +147,7 @@ async def test_alert_truth_remains_visible_while_persistence_retries() -> None:
     assert coordinator.health() == {
         "status": "degraded",
         "dirty": True,
-        "current_error": "storage unavailable",
+        "current_error": "OSError",
     }
     assert store.data is None
 
@@ -191,7 +191,7 @@ async def test_alert_store_load_failure_does_not_escape_coordinator() -> None:
     assert coordinator.health() == {
         "status": "unhealthy",
         "dirty": False,
-        "current_error": "storage unreadable",
+        "current_error": "OSError",
     }
 
 

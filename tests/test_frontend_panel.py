@@ -111,7 +111,7 @@ def test_alert_detail_fetches_instance_and_renders_safe_operational_state() -> N
           instance_id: "instance/1", rule_id: "freezer", name: "FreezerHigh",
           summary: "Freezer is too warm", severity: "critical", state: "firing",
           evaluation_status: "stale", active_at_ms: 1000, firing_at_ms: 2000,
-          labels: {area: "kitchen"}, acknowledgment: {actor: "user-1", at_ms: 3000, comment: "Checking"},
+          labels: {area: "kitchen"}, acknowledged: true,
           suppression: ["silence"], notification_suppressed: true,
         }, audit: [{from: "pending", to: "firing", at_ms: 2000, reason: "for_elapsed"}]};
       };
@@ -120,7 +120,7 @@ def test_alert_detail_fetches_instance_and_renders_safe_operational_state() -> N
     })()''')
 
     assert result["calls"] == [["GET", "alerts/instance%2F1"]]
-    for text in ["Lifecycle", "Evidence", "stale", "Labels", "Acknowledgment and suppression", "Checking", "Available delivery information", "proof of delivery", "Audit", "for_elapsed"]:
+    for text in ["Lifecycle", "Evidence", "stale", "Labels", "Acknowledgment and suppression", "Acknowledged.", "Available delivery information", "proof of delivery", "Audit", "for_elapsed"]:
         assert text in result["html"]
     assert "notify.admin" not in result["html"]
 

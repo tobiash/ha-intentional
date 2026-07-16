@@ -30,8 +30,11 @@ class CapabilityRuntime:
         instance_id: str,
         operation: str,
         destination_id: str,
+        now_ms: int,
         expires_at_ms: int,
     ) -> dict[str, str]:
+        if expires_at_ms <= now_ms or expires_at_ms - now_ms > 86_400_000:
+            raise ValueError("capability lifetime must be between 1ms and 24h")
         record_id = self._id_factory()
         record = {
             "record_id": record_id,
@@ -77,12 +80,25 @@ class CapabilityRuntime:
         return deepcopy(record)
 
     def export_state(self) -> dict[str, Any]:
-        return {"records": deepcopy(list(self._records.values()))}
+        return {"records": deepcopy(list(self._records.values())[-2_048:])}
+
+    def token(self, record_id: str) -> str:
+        record = self._records.get(record_id)
+        if record is None:
+            raise KeyError(record_id)
+        return self._derive(record)
+
+    def record(self, record_id: str) -> dict[str, Any]:
+        if record_id not in self._records:
+            raise KeyError(record_id)
+        return deepcopy(self._records[record_id])
 
     def import_state(self, state: dict[str, Any]) -> None:
         records = state.get("records", [])
         if not isinstance(records, list):
             raise ValueError("invalid capability state")
+        if len(records) > 2_048:
+            raise ValueError("too many capability records")
         self._records = {
             str(record["record_id"]): deepcopy(record)
             for record in records

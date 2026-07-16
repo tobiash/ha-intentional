@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import secrets
 import shutil
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -35,7 +36,7 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import dt as dt_util
 
 from ._engine import Engine, RuleLoadError, __version__
-from ._engine.alerting import AlertCoordinator
+from ._engine.alerting import AlertCoordinator, AlertStateUnavailableError
 from ._engine.alerting.policy import AlertingPolicyRepository
 from ._engine.ha_adapter import (
     clear_state_change_pulses,
@@ -51,6 +52,7 @@ from ._engine.when_parser import referenced_entities
 from ._engine.yaml_loader import Rule
 from .alerting import (
     ALERTING_POLICY_STORAGE_VERSION,
+    ALERTING_SECRET_STORAGE_VERSION,
     ALERTING_STORAGE_VERSION,
     AlertDeadlineDriver,
     AlertNotificationDispatcher,
@@ -59,6 +61,7 @@ from .alerting import (
     alerting_dispatcher_key,
     alerting_policy_repository_key,
     alerting_policy_storage_key,
+    alerting_secret_storage_key,
     alerting_storage_key,
     publish_alerts,
 )
@@ -426,7 +429,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         alert_store,
         publish=lambda: publish_alerts(hass, entry.entry_id),
     )
+    alerting_secret_store: Store = Store(
+        hass,
+        ALERTING_SECRET_STORAGE_VERSION,
+        alerting_secret_storage_key(entry.entry_id),
+    )
+    try:
+        stored_secret = await alerting_secret_store.async_load()
+        secret_hex = (
+            stored_secret.get("secret")
+            if isinstance(stored_secret, dict)
+            and isinstance(stored_secret.get("secret"), str)
+            else None
+        )
+        if secret_hex is None:
+            secret_hex = secrets.token_hex(32)
+            await alerting_secret_store.async_save({"secret": secret_hex})
+        secret = bytes.fromhex(secret_hex)
+        alerting.configure_capabilities(secret, entry_id=entry.entry_id)
+    except Exception as err:  # noqa: BLE001 - optional Alert mobile boundary
+        _LOGGER.error("Alert mobile capabilities unavailable: %s", type(err).__name__)
     await alerting.async_load()
+    alerting.begin_startup_barrier()
     hass.data[DOMAIN][alerting_coordinator_key(entry.entry_id)] = alerting
     alerting_dispatcher = AlertNotificationDispatcher(hass, alerting)
     hass.data[DOMAIN][alerting_dispatcher_key(entry.entry_id)] = alerting_dispatcher
@@ -451,12 +475,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.error("Could not load stored Alert routing policy: %s", err)
     hass.data[DOMAIN][alerting_policy_repository_key(entry.entry_id)] = alerting_policy
     if alerting_policy.contents is not None and alerting.available:
-        await alerting.async_set_policy(
-            alerting_policy.contents,
-            now_ms=engine.now_ms(),
-            default_timezone=hass.config.time_zone,
-        )
-    alerting_deadline_driver.start()
+        try:
+            await alerting.async_set_policy(
+                alerting_policy.contents,
+                now_ms=engine.now_ms(),
+                default_timezone=hass.config.time_zone,
+            )
+        except AlertStateUnavailableError:
+            _LOGGER.error("Stored Alert routing policy could not be applied")
     publication = EntityPublication(hass, entry.entry_id, engine, rule_store)
     hass.data[DOMAIN][publication_key(entry.entry_id)] = publication
     publication.publish_if_changed()
@@ -491,6 +517,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         set(engine.list_active_targets()) | set(_reconciler.pending_withdraw_targets())
     )
     _sync_state_into_engine(hass, engine, entity_ids=set(selector_planner.relevant))
+    engine.evaluate_all()
+    if alerting.available:
+        await alerting.async_observe(
+            engine.alert_observations(), now_ms=engine.now_ms()
+        )
+    alerting_deadline_driver.start()
+
+    async def _handle_mobile_alert_action(event: Any) -> None:
+        action = event.data.get("action") if isinstance(event.data, dict) else None
+        if not isinstance(action, str) or not action.startswith("INTENTIONAL_ALERT|"):
+            return
+        parts = action.split("|")
+        if len(parts) != 5:
+            return
+        _prefix, operation, record_id, token, instance_id = parts
+        try:
+            await alerting.async_consume_mobile_action(
+                record_id=record_id,
+                token=token,
+                operation=operation,
+                instance_id=instance_id,
+                actor=event.context.user_id,
+                now_ms=int(dt_util.utcnow().timestamp() * 1_000),
+            )
+        except (AlertStateUnavailableError, ValueError):
+            record_diagnostic(hass, "mobile_alert_action_rejected")
+
+    entry.async_on_unload(
+        hass.bus.async_listen(
+            "mobile_app_notification_action", _handle_mobile_alert_action
+        )
+    )
     _runtime = TickRuntime(tick_interval_ms=tick_interval_ms)
     hass.data[DOMAIN][runtime_key(entry.entry_id)] = _runtime
     # Event used to signal the tick loop to stop. We use an event rather
@@ -600,7 +658,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             ),
                         )
                         engine.evaluate_all()
-                        alert_observations = engine.alert_observations(pulse_drain.tokens)
+                        alert_observations = engine.alert_observations(
+                            pulse_drain.tokens,
+                            pulse_drain.source_timestamps_ms,
+                        )
                         now_ms = _monotonic_ms()
                         _runtime.active_rule_ids = _record_rule_activity_changes(
                             hass,
