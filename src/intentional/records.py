@@ -7,6 +7,14 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class AlertEscalation:
+    """One severity increase measured from Alert instance activation."""
+
+    after_ms: int
+    severity: str
+
+
+@dataclass(frozen=True)
 class AlertSpec:
     """An authored durable attention assertion."""
 
@@ -15,6 +23,10 @@ class AlertSpec:
     summary: Any
     for_ms: int | None = None
     resolve_after_ms: int | None = None
+    stale_after_ms: int = 120_000
+    labels: dict[str, str] = field(default_factory=dict)
+    annotations: dict[str, str] = field(default_factory=dict)
+    escalations: tuple[AlertEscalation, ...] = ()
 
 
 @dataclass(frozen=True)

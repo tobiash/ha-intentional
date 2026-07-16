@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 
 import pytest
 
-from intentional.alerting import AlertCoordinator, AlertStateUnavailableError
+from intentional.alerting import (
+    AlertCoordinator,
+    AlertObservation,
+    AlertStateUnavailableError,
+)
 from intentional.engine import Engine
 from intentional.yaml_loader import load_rules_from_string
 
@@ -62,7 +67,15 @@ async def test_firing_alert_instance_is_durable_across_coordinator_restart() -> 
     restored = AlertCoordinator(store)
     await restored.async_load()
 
-    assert firing == {
+    assert {key: firing[key] for key in (
+        "rule_id",
+        "name",
+        "severity",
+        "summary",
+        "state",
+        "instance_id",
+        "evaluation_status",
+    )} == {
         "rule_id": "freezer-too-warm",
         "name": "FreezerTemperatureHigh",
         "severity": "critical",
@@ -369,6 +382,117 @@ async def test_alert_identity_cannot_collide_on_colon_boundaries() -> None:
         "instance-one",
         "instance-two",
     }
+
+
+def test_engine_alert_observation_contains_routing_and_definition_context() -> None:
+    from intentional.engine import Engine
+    from intentional.yaml_loader import load_rules_from_string
+
+    engine = Engine(clock_fn=lambda: 12_345)
+    engine.load_rules(load_rules_from_string("""
+- id: freezer
+  while: {sensor.freezer_temperature: {gt: -10}}
+  alert:
+    name: FreezerTemperatureHigh
+    severity: warning
+    stale_after: 5m
+    labels: {category: appliance}
+    annotations:
+      summary: Freezer is too warm
+      description: Check the freezer door
+"""))
+    engine.update_state("sensor.freezer_temperature", -5)
+    engine.evaluate_all()
+
+    observation = engine.alert_observations()[0]
+
+    assert observation.observed_at_ms == 12_345
+    assert observation.labels == {
+        "alertname": "FreezerTemperatureHigh",
+        "rule_id": "freezer",
+        "severity": "warning",
+        "integration": "intentional",
+        "category": "appliance",
+    }
+    assert observation.annotations["description"] == "Check the freezer door"
+    assert observation.stale_after_ms == 300_000
+    assert len(observation.definition_revision) == 64
+
+
+@pytest.mark.asyncio
+async def test_coordinator_retains_resolved_instance_and_transition_audit() -> None:
+    store = MemoryAlertStore()
+    coordinator = AlertCoordinator(store, id_factory=lambda: "instance-1")
+    await coordinator.async_load()
+    firing = AlertObservation(
+        "freezer",
+        "FreezerHigh",
+        "warning",
+        "Freezer is too warm",
+        True,
+        observed_at_ms=1_000,
+        labels={"alertname": "FreezerHigh", "area": "kitchen"},
+        annotations={"summary": "Freezer is too warm"},
+        definition_revision="revision-1",
+    )
+
+    await coordinator.async_observe([firing], now_ms=1_000)
+    projected = coordinator.list_alerts()[0]
+    assert projected["active_at_ms"] == 1_000
+    assert projected["firing_at_ms"] == 1_000
+    assert projected["observed_at_ms"] == 1_000
+    assert projected["labels"]["area"] == "kitchen"
+    assert projected["definition_revision"] == "revision-1"
+
+    await coordinator.async_observe(
+        [replace(firing, active=False, observed_at_ms=2_000)], now_ms=2_000
+    )
+
+    assert coordinator.list_instances()[0] == {
+        "instance_id": "instance-1",
+        "rule_id": "freezer",
+        "name": "FreezerHigh",
+        "state": "resolved",
+        "active_at_ms": 1_000,
+        "firing_at_ms": 1_000,
+        "resolved_at_ms": 2_000,
+        "reason": "condition_inactive",
+    }
+    assert [event["to"] for event in coordinator.list_audit()] == [
+        "firing",
+        "resolved",
+    ]
+
+    restored = AlertCoordinator(store)
+    await restored.async_load()
+    assert restored.list_instances() == coordinator.list_instances()
+    assert restored.list_audit() == coordinator.list_audit()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_advances_durable_deadlines_without_new_observation() -> None:
+    store = MemoryAlertStore()
+    coordinator = AlertCoordinator(store, id_factory=lambda: "instance-1")
+    await coordinator.async_load()
+    observation = AlertObservation(
+        "freezer",
+        "FreezerHigh",
+        "warning",
+        "Freezer is too warm",
+        True,
+        observed_at_ms=0,
+        for_ms=1_000,
+    )
+    await coordinator.async_observe([observation], now_ms=0)
+
+    assert coordinator.next_deadline_ms() == 1_000
+    transitions = await coordinator.async_advance(now_ms=1_000)
+
+    assert transitions[0]["to"] == "firing"
+    assert coordinator.list_alerts()[0]["state"] == "firing"
+    restored = AlertCoordinator(store)
+    await restored.async_load()
+    assert restored.list_alerts()[0]["state"] == "firing"
 
 
 def engine_observation(

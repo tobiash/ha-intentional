@@ -57,6 +57,7 @@ from intentional.durations import parse_duration
 from intentional.generation import ValueGeneratorSpec, parse_generator_spec
 from intentional.intent import Authority
 from intentional.records import (
+    AlertEscalation,
     AlertSpec,
     DynamicHoldAfter,
     Effect,
@@ -1465,6 +1466,10 @@ def _parse_alerts(
             line=line,
         )
     raw_alerts = raw if isinstance(raw, list) else [raw]
+    if len(raw_alerts) > 16:
+        raise RuleLoadError(
+            f"Rule {rule_id!r}: may declare at most 16 Alerts", file=file, line=line
+        )
     alerts: list[AlertSpec] = []
     names: set[str] = set()
     for alert in raw_alerts:
@@ -1472,7 +1477,16 @@ def _parse_alerts(
             raise RuleLoadError(
                 f"Rule {rule_id!r}: each `alert` must be a mapping", file=file, line=line
             )
-        unknown = set(alert) - {"name", "severity", "for", "resolve_after", "annotations"}
+        unknown = set(alert) - {
+            "name",
+            "severity",
+            "for",
+            "resolve_after",
+            "stale_after",
+            "labels",
+            "annotations",
+            "escalations",
+        }
         if unknown:
             raise RuleLoadError(
                 f"Rule {rule_id!r}: unknown fields in `alert`: {sorted(unknown)}",
@@ -1506,6 +1520,43 @@ def _parse_alerts(
                 file=file,
                 line=line,
             )
+        labels = _alert_string_mapping(
+            alert.get("labels", {}),
+            field_name="labels",
+            maximum=32,
+            value_bytes=256,
+            rule_id=rule_id,
+            file=file,
+            line=line,
+        )
+        reserved_labels = {
+            "alertname",
+            "rule_id",
+            "severity",
+            "integration",
+            "entity_id",
+        }
+        if reserved := reserved_labels & labels.keys():
+            raise RuleLoadError(
+                f"Rule {rule_id!r}: reserved label {sorted(reserved)[0]!r}",
+                file=file,
+                line=line,
+            )
+        parsed_annotations = _alert_string_mapping(
+            annotations,
+            field_name="annotations",
+            maximum=16,
+            value_bytes=4_096,
+            rule_id=rule_id,
+            file=file,
+            line=line,
+        )
+        if len(summary.encode()) > 256:
+            raise RuleLoadError(
+                f"Rule {rule_id!r}: alert summary may be at most 256 bytes",
+                file=file,
+                line=line,
+            )
         for_ms = _parse_optional_duration(
             alert.get("for"), f"Rule {rule_id!r}: alert.for", file, line, default=None
         )
@@ -1515,6 +1566,17 @@ def _parse_alerts(
             file,
             line,
             default=None,
+        )
+        stale_after_ms = _parse_optional_duration(
+            alert.get("stale_after"),
+            f"Rule {rule_id!r}: alert.stale_after",
+            file,
+            line,
+            default=120_000,
+        )
+        assert stale_after_ms is not None
+        escalations = _parse_alert_escalations(
+            alert.get("escalations", []), severity, rule_id, file, line
         )
         if pulse and resolve_after_ms is None:
             raise RuleLoadError(
@@ -1541,9 +1603,92 @@ def _parse_alerts(
                 summary=summary,
                 for_ms=for_ms,
                 resolve_after_ms=resolve_after_ms,
+                stale_after_ms=stale_after_ms,
+                labels=labels,
+                annotations=parsed_annotations,
+                escalations=escalations,
             )
         )
     return tuple(alerts)
+
+
+def _alert_string_mapping(
+    value: Any,
+    *,
+    field_name: str,
+    maximum: int,
+    value_bytes: int,
+    rule_id: str,
+    file: Path | None,
+    line: int | None,
+) -> dict[str, str]:
+    if not isinstance(value, dict) or len(value) > maximum:
+        raise RuleLoadError(
+            f"Rule {rule_id!r}: alert {field_name} must contain at most {maximum} entries",
+            file=file,
+            line=line,
+        )
+    result = {}
+    for key, item in value.items():
+        if (
+            not isinstance(key, str)
+            or not key
+            or len(key.encode()) > 64
+            or not isinstance(item, str)
+            or len(item.encode()) > value_bytes
+        ):
+            raise RuleLoadError(
+                f"Rule {rule_id!r}: invalid alert {field_name} entry {key!r}",
+                file=file,
+                line=line,
+            )
+        result[key] = item
+    return result
+
+
+def _parse_alert_escalations(
+    value: Any,
+    initial_severity: str,
+    rule_id: str,
+    file: Path | None,
+    line: int | None,
+) -> tuple[AlertEscalation, ...]:
+    if not isinstance(value, list) or len(value) > 3:
+        raise RuleLoadError(
+            f"Rule {rule_id!r}: alert escalations must contain at most 3 steps",
+            file=file,
+            line=line,
+        )
+    severity_rank = {"info": 0, "warning": 1, "critical": 2}
+    previous_after = 0
+    previous_rank = severity_rank[initial_severity]
+    result = []
+    for step in value:
+        if not isinstance(step, dict) or set(step) != {"after", "severity"}:
+            raise RuleLoadError(
+                f"Rule {rule_id!r}: escalation requires after and severity",
+                file=file,
+                line=line,
+            )
+        after_ms = _parse_optional_duration(
+            step["after"], f"Rule {rule_id!r}: escalation.after", file, line, default=None
+        )
+        severity = step["severity"]
+        if (
+            after_ms is None
+            or after_ms <= previous_after
+            or severity not in severity_rank
+            or severity_rank[severity] <= previous_rank
+        ):
+            raise RuleLoadError(
+                f"Rule {rule_id!r}: escalation times and severities must strictly increase",
+                file=file,
+                line=line,
+            )
+        result.append(AlertEscalation(after_ms, severity))
+        previous_after = after_ms
+        previous_rank = severity_rank[severity]
+    return tuple(result)
 
 
 def _parse_intent_selectors(
@@ -2383,7 +2528,9 @@ def load_rules_from_string(text: str, *, file: Path | None = None) -> RuleSet:
     """
     raw_rules = _load_raw_rule_defs_from_string(text, file=file)
     policies = _policies_from_raw_defs(raw_rules)
-    return RuleSet(_validate_raw_rule_defs(raw_rules), policies)
+    rules = _validate_raw_rule_defs(raw_rules)
+    _validate_alert_definition_count(rules)
+    return RuleSet(rules, policies)
 
 
 def load_rules(directory: str | Path) -> RuleSet:
@@ -2416,7 +2563,19 @@ def load_rules(directory: str | Path) -> RuleSet:
             raw_rules.target_policies[target] = policy
         raw_rules.extend(loaded)
 
-    return RuleSet(_validate_raw_rule_defs(raw_rules), _policies_from_raw_defs(raw_rules))
+    rules = _validate_raw_rule_defs(raw_rules)
+    _validate_alert_definition_count(rules)
+    return RuleSet(rules, _policies_from_raw_defs(raw_rules))
+
+
+def _validate_alert_definition_count(rules: list[Rule]) -> None:
+    definitions = {
+        (rule.authored_rule_id or rule.id, alert.name)
+        for rule in rules
+        for alert in rule.alerts
+    }
+    if len(definitions) > 256:
+        raise RuleLoadError("A document may contain at most 256 Alert definitions")
 
 
 def _policies_from_raw_defs(raw_rules: list[_RawRuleDef]) -> dict[str, TargetPolicy]:

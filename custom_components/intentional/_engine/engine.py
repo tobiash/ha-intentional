@@ -1533,6 +1533,33 @@ class Engine:
                     if status.get("blocked_by")
                     else "condition_inactive"
                 )
+                labels = {
+                    "alertname": alert.name,
+                    "rule_id": rule_id,
+                    "severity": alert.severity,
+                    "integration": "intentional",
+                    **alert.labels,
+                }
+                definition_revision = hashlib.sha256(
+                    json.dumps(
+                        {
+                            "condition": repr(parsed.when_ast),
+                            "name": alert.name,
+                            "severity": alert.severity,
+                            "for_ms": alert.for_ms,
+                            "resolve_after_ms": alert.resolve_after_ms,
+                            "stale_after_ms": alert.stale_after_ms,
+                            "labels": alert.labels,
+                            "annotations": alert.annotations,
+                            "escalations": [
+                                [step.after_ms, step.severity]
+                                for step in alert.escalations
+                            ],
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()
                 observations.append(
                     AlertObservation(
                         rule_id=rule_id,
@@ -1546,6 +1573,14 @@ class Engine:
                             and not status.get("paused")
                             and status.get("enabled", True)
                         ),
+                        observed_at_ms=self.now_ms(),
+                        labels=labels,
+                        annotations=dict(alert.annotations),
+                        definition_revision=definition_revision,
+                        escalations=tuple(
+                            (step.after_ms, step.severity)
+                            for step in alert.escalations
+                        ),
                         for_ms=(
                             alert.for_ms
                             if alert.for_ms is not None
@@ -1554,6 +1589,7 @@ class Engine:
                         quality=(
                             "known" if inactive_reason != "condition_inactive" else quality
                         ),
+                        stale_after_ms=alert.stale_after_ms,
                         resolve_after_ms=(
                             alert.resolve_after_ms
                             if references_state_change_pulse(parsed.when_ast)

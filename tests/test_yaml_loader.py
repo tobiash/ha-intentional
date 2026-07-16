@@ -1567,3 +1567,68 @@ def test_alert_rejects_mixed_pulse_and_state_observation() -> None:
     resolve_after: 5m
     annotations: {summary: Emergency detected}
 """)
+
+
+def test_alert_parses_labels_annotations_staleness_and_escalations() -> None:
+    alert = load_rules_from_string("""
+- id: freezer
+  while: {sensor.freezer_temperature: {gt: -10}}
+  alert:
+    name: FreezerTemperatureHigh
+    severity: info
+    stale_after: 5m
+    labels: {area: kitchen, category: appliance}
+    annotations:
+      summary: Freezer is too warm
+      description: Check the freezer door
+    escalations:
+      - {after: 30m, severity: warning}
+      - {after: 2h, severity: critical}
+""")[0].alerts[0]
+
+    assert alert.labels == {"area": "kitchen", "category": "appliance"}
+    assert alert.annotations == {
+        "summary": "Freezer is too warm",
+        "description": "Check the freezer door",
+    }
+    assert alert.stale_after_ms == 300_000
+    assert [(step.after_ms, step.severity) for step in alert.escalations] == [
+        (1_800_000, "warning"),
+        (7_200_000, "critical"),
+    ]
+
+
+def test_alert_rejects_reserved_labels_and_content_overflow() -> None:
+    with pytest.raises(RuleLoadError, match="reserved label"):
+        load_rules_from_string("""
+- id: freezer
+  while: {binary_sensor.freezer: "on"}
+  alert:
+    name: FreezerOpen
+    severity: warning
+    labels: {severity: custom}
+    annotations: {summary: Freezer is open}
+""")
+    with pytest.raises(RuleLoadError, match="at most 16 Alerts"):
+        alerts = "\n".join(
+            f"    - name: Alert{index}\n      severity: info\n      annotations: {{summary: Alert {index}}}"
+            for index in range(17)
+        )
+        load_rules_from_string(
+            f'- id: many\n  while: {{binary_sensor.test: "on"}}\n  alert:\n{alerts}\n'
+        )
+
+
+def test_document_rejects_more_than_256_alert_definitions() -> None:
+    rules = "\n".join(
+        f"""- id: rule-{index}
+  while: {{binary_sensor.test_{index}: \"on\"}}
+  alert:
+    name: Alert{index}
+    severity: info
+    annotations: {{summary: Alert {index}}}"""
+        for index in range(257)
+    )
+
+    with pytest.raises(RuleLoadError, match="at most 256 Alert definitions"):
+        load_rules_from_string(rules)

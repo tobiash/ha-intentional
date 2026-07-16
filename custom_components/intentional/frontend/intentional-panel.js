@@ -31,6 +31,7 @@ class IntentionalPanel extends HTMLElement {
     this._health = null;
     this._history = [];
     this._world = null;
+    this._workspace = "intent";
     this._screen = "overview";
     this._rules = [];
     this._selectedRuleId = "";
@@ -56,6 +57,20 @@ class IntentionalPanel extends HTMLElement {
     this._formEdited = false;
     this._visualModeError = "";
     this._migration = { automations: [], selected: "", inspection: null, proposal: null, loading: "" };
+    this._alerts = [];
+    this._alertsError = "";
+    this._alertsBusy = false;
+    this._policyDocument = null;
+    this._policyContents = "";
+    this._policyStage = "Draft";
+    this._policyCheckedFingerprint = "";
+    this._policyReviewedFingerprint = "";
+    this._policyCheck = null;
+    this._policyPreview = null;
+    this._policyError = "";
+    this._policyBusy = false;
+    this._policyLoaded = false;
+    this._policySyntheticText = '[\n  {"alertname":"FreezerTemperatureHigh","severity":"critical","rule_id":"example-rule"}\n]';
     this._beforeUnload = (event) => { if (this._dirty) { event.preventDefault(); event.returnValue = ""; } };
   }
 
@@ -112,6 +127,7 @@ class IntentionalPanel extends HTMLElement {
     this._busy = true;
     this._error = "";
     this._render();
+    void this._loadAlerts();
     try {
       const [health, document, history, world] = await Promise.all([
         this._api("GET", "health"),
@@ -135,10 +151,124 @@ class IntentionalPanel extends HTMLElement {
       this._reviewedFingerprint = "";
       await this._validate({ quiet: true });
     } catch (err) {
-      if (request !== this._previewRequest || candidateFingerprint(this._candidateContents()) !== fingerprint) return;
       this._error = err.message || String(err);
     } finally {
       this._busy = false;
+      this._render();
+    }
+  }
+
+  async _loadAlerts() {
+    this._alertsBusy = true;
+    this._alertsError = "";
+    try {
+      const result = await this._api("GET", "alerts");
+      this._alerts = Array.isArray(result?.alerts) ? result.alerts : [];
+    } catch (err) {
+      this._alerts = [];
+      this._alertsError = err.message || String(err);
+    } finally {
+      this._alertsBusy = false;
+      this._render();
+    }
+  }
+
+  async _loadPolicy() {
+    if (this._policyBusy) return;
+    this._policyBusy = true;
+    this._policyError = "";
+    this._render();
+    try {
+      const document = await this._api("GET", "alerting/policy");
+      this._policyDocument = document;
+      this._policyContents = document.contents || "";
+      this._policyStage = "Published";
+      this._policyCheckedFingerprint = "";
+      this._policyReviewedFingerprint = "";
+      this._policyCheck = null;
+      this._policyPreview = null;
+      this._policyLoaded = true;
+    } catch (err) {
+      this._policyError = err.message || String(err);
+    } finally {
+      this._policyBusy = false;
+      this._render();
+    }
+  }
+
+  async _checkPolicy() {
+    const contents = this._policyContents;
+    const fingerprint = candidateFingerprint(contents);
+    this._policyBusy = true;
+    this._policyError = "";
+    this._render();
+    try {
+      const result = await this._api("POST", "alerting/simulate", { contents, alerts: [] });
+      if (candidateFingerprint(this._policyContents) !== fingerprint) return;
+      this._policyCheck = result;
+      this._policyCheckedFingerprint = fingerprint;
+      this._policyReviewedFingerprint = "";
+      this._policyPreview = null;
+      this._policyStage = result.valid === false ? "Draft" : "Checked";
+    } catch (err) {
+      if (candidateFingerprint(this._policyContents) === fingerprint) this._policyError = err.message || String(err);
+    } finally {
+      this._policyBusy = false;
+      this._render();
+    }
+  }
+
+  async _reviewPolicy() {
+    const contents = this._policyContents;
+    const fingerprint = candidateFingerprint(contents);
+    if (this._policyStage !== "Checked" || this._policyCheckedFingerprint !== fingerprint) return;
+    let alerts;
+    try {
+      alerts = JSON.parse(this._policySyntheticText || "[]");
+      if (!Array.isArray(alerts) || containsNonFiniteNumber(alerts)) throw new Error("expected a finite JSON array");
+    } catch (err) {
+      this._policyError = `Synthetic alerts JSON is invalid: ${err.message || err}`;
+      this._render();
+      return;
+    }
+    this._policyBusy = true;
+    this._policyError = "";
+    this._render();
+    try {
+      const result = await this._api("POST", "alerting/simulate", { contents, alerts });
+      if (candidateFingerprint(this._policyContents) !== fingerprint) return;
+      this._policyPreview = result;
+      this._policyReviewedFingerprint = fingerprint;
+      this._policyStage = result.valid === false ? "Draft" : "Reviewed";
+    } catch (err) {
+      if (candidateFingerprint(this._policyContents) === fingerprint) this._policyError = err.message || String(err);
+    } finally {
+      this._policyBusy = false;
+      this._render();
+    }
+  }
+
+  async _publishPolicy() {
+    const contents = this._policyContents;
+    const fingerprint = candidateFingerprint(contents);
+    if (this._policyStage !== "Reviewed" || this._policyReviewedFingerprint !== fingerprint) return;
+    this._policyBusy = true;
+    this._policyError = "";
+    this._render();
+    try {
+      const saved = await this._api("PUT", "alerting/policy", {
+        contents,
+        expected_generation: this._policyDocument?.generation,
+      });
+      if (candidateFingerprint(this._policyContents) !== fingerprint) return;
+      this._policyDocument = { ...this._policyDocument, ...saved, contents };
+      this._policyStage = "Published";
+      this._policyCheckedFingerprint = "";
+      this._policyReviewedFingerprint = "";
+    } catch (err) {
+      this._policyError = err.message || String(err);
+    } finally {
+      this._policyBusy = false;
       this._render();
     }
   }
@@ -532,6 +662,54 @@ class IntentionalPanel extends HTMLElement {
     </section>`;
   }
 
+  _renderAlertWorkspace() {
+    if (this._alertsError) return `<section class="workspace"><div class="ledger-head alert-head"><span class="eyebrow">Alert Ledger</span><h2>Alert state unavailable</h2><p>This workspace could not load. Rules and policy remain available.</p></div><div class="error-box" role="alert">${escapeHtml(this._alertsError)}</div><button class="secondary" data-action="reload-alerts">Retry Alerts</button></section>`;
+    const alerts = sortAlerts(this._alerts);
+    const firing = alerts.filter((alert) => alert.state === "firing").length;
+    return `<section class="workspace">
+      <div class="ledger-head alert-head"><span class="eyebrow">Alert Ledger</span><h2>${firing ? `${firing} firing` : "No Alerts firing"}</h2><p>Read-only durable Alert state reported by the current integration.</p></div>
+      ${this._alertsBusy ? `<div role="status" class="muted">Loading Alerts...</div>` : ""}
+      ${alerts.length ? `<div class="alert-ledger">${alerts.map((alert) => this._renderAlertRow(alert)).join("")}</div>` : `<div class="empty card">No Alert definitions are currently reported.</div>`}
+    </section>`;
+  }
+
+  _renderAlertRow(alert) {
+    const state = ["firing", "pending", "inactive"].includes(alert.state) ? alert.state : "inactive";
+    const severity = ["critical", "warning", "info"].includes(alert.severity) ? alert.severity : "info";
+    const stale = alert.evaluation_status === "stale";
+    const ruleExists = this._uniqueRules().some((rule) => rule.id === alert.rule_id);
+    const rule = ruleExists
+      ? `<button class="link-button" data-action="open-alert-rule" data-rule-id="${escapeHtml(alert.rule_id)}">Rule ${escapeHtml(alert.rule_id)}</button>`
+      : `<span>Rule ${escapeHtml(alert.rule_id || "unknown")}</span>`;
+    return `<article class="alert-row ${state} severity-${severity}${stale ? " stale" : ""}">
+      <div class="alert-row-head"><div><span class="eyebrow">${escapeHtml(severity)}</span><h2>${escapeHtml(alert.summary || alert.name || "Unnamed Alert")}</h2></div><div class="alert-badges"><span class="state-badge">${escapeHtml(state)}</span>${stale ? `<span class="stale-badge">Stale evaluation</span>` : ""}</div></div>
+      <p>${escapeHtml(alert.name || "Unnamed Alert")}</p>
+      <div class="alert-meta">${rule}<span>Evaluation: ${escapeHtml(alert.evaluation_status || "unknown")}</span><span>Instance: ${escapeHtml(alert.instance_id || "none")}</span></div>
+    </article>`;
+  }
+
+  _renderPolicyWorkspace() {
+    if (!this._policyLoaded && !this._policyBusy && !this._policyError) void this._loadPolicy();
+    const fingerprint = candidateFingerprint(this._policyContents);
+    const checked = this._policyStage === "Checked" && this._policyCheckedFingerprint === fingerprint;
+    const reviewed = this._policyStage === "Reviewed" && this._policyReviewedFingerprint === fingerprint;
+    const generation = this._policyDocument?.generation || "not loaded";
+    return `<section class="workspace policy-workspace">
+      <div class="ledger-head policy-head"><span class="eyebrow">Administrator workspace</span><h2>Alerting Policy YAML</h2><p>Edit routing policy, check it without sample traffic, then review an explicitly synthetic preview before publishing.</p></div>
+      ${this._policyError ? `<div class="error-box" role="alert">${escapeHtml(this._policyError)}</div>` : ""}
+      ${!this._policyLoaded ? `<section class="card"><div role="status">${this._policyBusy ? "Loading Alerting Policy..." : "Alerting Policy unavailable."}</div>${this._policyError ? `<button class="secondary" data-action="reload-policy">Retry policy</button>` : ""}</section>` : `
+        <section class="two-pane policy-layout">
+          <div class="card editor-stack"><div class="card-header"><div><h2>Policy document</h2><p>Generation ${escapeHtml(generation)}</p></div><span class="stage-badge">${escapeHtml(this._policyStage)}</span></div><textarea class="yaml-editor policy-yaml" data-policy-yaml data-focus-key="policy-yaml" spellcheck="false">${escapeHtml(this._policyContents)}</textarea></div>
+          <div class="editor-stack">
+            <section class="card form-card"><div><span class="eyebrow">Synthetic preview</span><h2>Synthetic Alert labels</h2><p>These JSON fixtures are sent only to simulation. They are not the live Alert Ledger.</p></div><textarea class="small-textarea mono synthetic-alerts" data-policy-alerts data-focus-key="policy-alerts" spellcheck="false">${escapeHtml(this._policySyntheticText)}</textarea></section>
+            <section class="card"><h2>Check</h2>${this._policyCheck ? `<div class="ok">Policy YAML checked successfully.</div>` : `<p>Check parses and validates the candidate with no synthetic Alerts.</p>`}</section>
+            <section class="card policy-preview"><span class="eyebrow">Synthetic preview</span><h2>Routing result</h2>${renderPolicyPreview(this._policyPreview)}</section>
+          </div>
+        </section>
+        <nav class="publish-bar" aria-label="Alerting Policy draft workflow"><span>${escapeHtml(this._policyStage)}</span><button class="secondary" data-action="policy-check" ${this._policyBusy ? "disabled" : ""}>Check</button><button class="secondary" data-action="policy-review" ${this._policyBusy || !checked ? "disabled" : ""}>Review synthetic preview</button><button data-action="policy-publish" ${this._policyBusy || !reviewed ? "disabled" : ""}>Publish</button></nav>`}
+    </section>`;
+  }
+
   _renderRuleDetail() {
     const rule = this._ledgerRules().find((item) => item.id === this._selectedRuleId);
     if (!rule) return this._renderOverview();
@@ -752,15 +930,20 @@ class IntentionalPanel extends HTMLElement {
     const generation = this._document?.generation ? this._document.generation.slice(0, 12) : "not loaded";
     this.shadowRoot.innerHTML = `
       <style>${styles}</style>
-       <main class="${this._narrow ? "narrow" : ""}" aria-busy="${this._busy}">
+         <main class="${this._narrow ? "narrow" : ""}" aria-busy="${this._busy || this._alertsBusy || this._policyBusy}">
          <header>
            <div><h1>Intentional</h1><p>${escapeHtml(version)} · generation ${escapeHtml(generation)}</p></div>
            <div class="actions"><button class="secondary" data-action="reload" ${this._busy ? "disabled" : ""}>Reload</button></div>
-         </header>
-         <div class="sr-status" aria-live="polite">${escapeHtml(this._stage)}${this._busy ? ", loading" : ""}</div>${this._error ? `<div class="banner" role="alert">${escapeHtml(this._error)}</div>` : ""}
-         <datalist id="entity-list">${this._entityOptions()}</datalist>
-         ${this._screen === "overview" ? this._renderOverview() : this._screen === "detail" ? `<section class="two-pane"><aside class="card rules">${this._renderRules()}</aside>${this._renderRuleDetail()}</section>` : `<section class="two-pane edit-layout"><aside class="card rules">${this._renderRules()}</aside><div>${this._renderEditor()}<details class="card inspector"><summary>Checks, preview, simulation &amp; history</summary><h2>Validation</h2>${this._renderValidation()}<h2>Preview</h2>${this._renderPreview()}<h2>Simulation</h2>${this._renderSimulation()}<h2>History</h2>${this._renderHistory()}</details></div></section>`}
-         ${this._screen === "edit" ? `<nav class="publish-bar" aria-label="Draft workflow"><span>${escapeHtml(this._stage)}</span><button class="secondary" data-action="validate" ${this._busy ? "disabled" : ""}>Check</button><button class="secondary" data-action="review" ${this._busy || this._stage === "Draft" ? "disabled" : ""}>Review Changes</button><button data-action="save" ${this._busy || !this._dirty || this._stage !== "Reviewed" || this._reviewedFingerprint !== candidateFingerprint(this._candidateContents()) ? "disabled" : ""}>Publish</button></nav>` : ""}
+          </header>
+          <nav class="workspace-tabs" aria-label="Intentional workspaces">
+            <button class="${this._workspace === "intent" ? "selected" : ""}" data-action="switch-workspace" data-workspace="intent" ${this._workspace === "intent" ? 'aria-current="page"' : ""}>Intent</button>
+            <button class="${this._workspace === "alert" ? "selected" : ""}" data-action="switch-workspace" data-workspace="alert" ${this._workspace === "alert" ? 'aria-current="page"' : ""}>Alert</button>
+            <button class="${this._workspace === "policy" ? "selected" : ""}" data-action="switch-workspace" data-workspace="policy" ${this._workspace === "policy" ? 'aria-current="page"' : ""}>Alerting Policy</button>
+          </nav>
+          <div class="sr-status" aria-live="polite">${escapeHtml(this._workspace === "policy" ? this._policyStage : this._stage)}${this._busy || this._alertsBusy || this._policyBusy ? ", loading" : ""}</div>${this._workspace === "intent" && this._error ? `<div class="banner" role="alert">${escapeHtml(this._error)}</div>` : ""}
+          <datalist id="entity-list">${this._entityOptions()}</datalist>
+          ${this._workspace === "alert" ? this._renderAlertWorkspace() : this._workspace === "policy" ? this._renderPolicyWorkspace() : this._screen === "overview" ? this._renderOverview() : this._screen === "detail" ? `<section class="two-pane"><aside class="card rules">${this._renderRules()}</aside>${this._renderRuleDetail()}</section>` : `<section class="two-pane edit-layout"><aside class="card rules">${this._renderRules()}</aside><div>${this._renderEditor()}<details class="card inspector"><summary>Checks, preview, simulation &amp; history</summary><h2>Validation</h2>${this._renderValidation()}<h2>Preview</h2>${this._renderPreview()}<h2>Simulation</h2>${this._renderSimulation()}<h2>History</h2>${this._renderHistory()}</details></div></section>`}
+          ${this._workspace === "intent" && this._screen === "edit" ? `<nav class="publish-bar" aria-label="Draft workflow"><span>${escapeHtml(this._stage)}</span><button class="secondary" data-action="validate" ${this._busy ? "disabled" : ""}>Check</button><button class="secondary" data-action="review" ${this._busy || this._stage === "Draft" ? "disabled" : ""}>Review Changes</button><button data-action="save" ${this._busy || !this._dirty || this._stage !== "Reviewed" || this._reviewedFingerprint !== candidateFingerprint(this._candidateContents()) ? "disabled" : ""}>Publish</button></nav>` : ""}
        </main>
     `;
     this._bindEvents();
@@ -774,6 +957,22 @@ class IntentionalPanel extends HTMLElement {
       this._markDirty();
     });
     this.shadowRoot.querySelector("[data-timeline]")?.addEventListener("input", (event) => { this._timelineText = event.target.value; });
+    this.shadowRoot.querySelector("[data-policy-yaml]")?.addEventListener("input", (event) => {
+      this._policyContents = event.target.value;
+      this._policyStage = "Draft";
+      this._policyCheckedFingerprint = "";
+      this._policyReviewedFingerprint = "";
+      this._policyCheck = null;
+      this._policyPreview = null;
+      this._render();
+    });
+    this.shadowRoot.querySelector("[data-policy-alerts]")?.addEventListener("input", (event) => {
+      this._policySyntheticText = event.target.value;
+      if (this._policyStage === "Reviewed") this._policyStage = "Checked";
+      this._policyReviewedFingerprint = "";
+      this._policyPreview = null;
+      this._render();
+    });
     this.shadowRoot.querySelector("[data-form-root]")?.addEventListener("input", (event) => this._onFormInput(event));
     this.shadowRoot.querySelector("[data-form-root]")?.addEventListener("change", (event) => this._onFormInput(event));
     this.shadowRoot.querySelectorAll("[data-action]").forEach((button) => button.addEventListener("click", () => this._handleAction(button)));
@@ -821,7 +1020,22 @@ class IntentionalPanel extends HTMLElement {
 
   _handleAction(button) {
     const action = button.dataset.action;
+    if (action === "switch-workspace") {
+      this._workspace = button.dataset.workspace;
+      this._render();
+      return;
+    }
+    if (action === "open-alert-rule") {
+      this._workspace = "intent";
+      this._selectRule(button.dataset.ruleId);
+      return;
+    }
     if (action === "reload" && (!this._dirty || confirm("Discard unsaved editor changes and reload?"))) this._load();
+    if (action === "reload-alerts") this._loadAlerts();
+    if (action === "reload-policy") this._loadPolicy();
+    if (action === "policy-check") this._checkPolicy();
+    if (action === "policy-review") this._reviewPolicy();
+    if (action === "policy-publish") this._publishPolicy();
     if (action === "save") this._save();
     if (action === "validate") this._validate();
     if (action === "review") this._review();
@@ -1460,6 +1674,39 @@ function formatValue(value) { return value && typeof value === "object" ? Object
 function formatTimestamp(value) { if (!value) return "Previous version"; const date = new Date(value); return Number.isNaN(date.valueOf()) ? String(value) : date.toLocaleString(); }
 function renderSimulationSummary(result) { const steps = result?.steps || []; const active = steps.reduce((count, step) => count + (step.active_rules?.length || 0), 0); return `<div class="consequences"><strong>${steps.length} timeline step${steps.length === 1 ? "" : "s"}</strong><p>${active} active Rule observations across the timeline.</p></div>`; }
 
+function sortAlerts(alerts) {
+  const stateRank = { firing: 0, pending: 1, inactive: 2 };
+  const severityRank = { critical: 0, warning: 1, info: 2 };
+  return [...(alerts || [])].sort((left, right) => {
+    const ranked = (stateRank[left?.state] ?? 3) - (stateRank[right?.state] ?? 3)
+      || (severityRank[left?.severity] ?? 3) - (severityRank[right?.severity] ?? 3);
+    if (ranked) return ranked;
+    for (const key of ["rule_id", "name", "instance_id", "summary", "evaluation_status"]) {
+      const a = String(left?.[key] ?? "");
+      const b = String(right?.[key] ?? "");
+      if (a < b) return -1;
+      if (a > b) return 1;
+    }
+    return 0;
+  });
+}
+
+function renderPolicyPreview(preview) {
+  if (!preview) return `<div class="muted">Run Review synthetic preview after the candidate is checked.</div>`;
+  if (preview.valid === false || preview.errors?.length) return `<div class="error-box" role="alert">${(preview.errors || ["Policy simulation failed"]).map(escapeHtml).join("<br>")}</div>`;
+  const alerts = preview.alerts || [];
+  const generation = preview.candidate_generation ? `<p>Candidate generation ${escapeHtml(preview.candidate_generation)}</p>` : "";
+  const generalWarnings = (preview.warnings || []).map((warning) => `<li>${escapeHtml(formatValue(warning))}</li>`).join("");
+  if (!alerts.length) return `<div class="ok">Synthetic preview is valid. No synthetic Alerts were supplied.</div>${generation}${generalWarnings ? `<h3>Warnings</h3><ul class="attention">${generalWarnings}</ul>` : ""}`;
+  return `${generation}${generalWarnings ? `<h3>Warnings</h3><ul class="attention">${generalWarnings}</ul>` : ""}<div class="policy-results">${alerts.map((item, index) => {
+    const labels = Object.entries(item.labels || {}).map(([key, value]) => `<span><strong>${escapeHtml(key)}</strong>=${escapeHtml(value)}</span>`).join("");
+    const routes = (item.routes || []).map((route) => `<div class="policy-route"><strong>${escapeHtml(route.route_id || "route")} &rarr; ${escapeHtml(route.receiver || "no receiver")}</strong><span>Group keys: ${escapeHtml((route.group_by || []).join(", ") || "none")}</span><span>Group key: ${escapeHtml(formatValue(route.group_key ?? "none"))}</span>${route.suppression ? `<span class="attention">Suppression: ${escapeHtml(formatValue(route.suppression))}</span>` : `<span>Suppression: none</span>`}</div>`).join("") || `<div class="muted">No routes matched.</div>`;
+    const fanout = (item.fanout || []).map((entry) => `<li><strong>${escapeHtml(entry.receiver || "receiver")}</strong> via ${escapeHtml(formatValue(entry.destination || "unknown destination"))}</li>`).join("") || `<li>No Receiver destinations.</li>`;
+    const warnings = (item.warnings || []).map((warning) => `<li>${escapeHtml(formatValue(warning))}</li>`).join("");
+    return `<article class="policy-result"><h3>Synthetic Alert ${index + 1}</h3><div class="policy-labels">${labels || `<span>No labels</span>`}</div><h3>Routes</h3>${routes}<h3>Fanout</h3><ul>${fanout}</ul><h3>Warnings</h3>${warnings ? `<ul class="attention">${warnings}</ul>` : `<p>None</p>`}</article>`;
+  }).join("")}</div>`;
+}
+
 function captureViewState(root) {
   const active = root?.activeElement;
   const key = active?.dataset?.focusKey || active?.getAttribute?.("name") || active?.id;
@@ -1485,6 +1732,9 @@ const styles = `
   button.small { padding: 6px 10px; font-size: 13px; }
   button.icon { min-width: 38px; padding: 8px 10px; font-size: 18px; }
   .actions, .mode-switch { display: flex; gap: 8px; flex-wrap: wrap; }
+  .workspace-tabs { display: flex; gap: 6px; margin: 0 0 22px; border-bottom: 1px solid var(--divider-color); overflow-x: auto; }
+  .workspace-tabs button { flex: 0 0 auto; border-radius: 10px 10px 0 0; background: transparent; color: var(--secondary-text-color); }
+  .workspace-tabs button.selected { color: var(--primary-color); box-shadow: inset 0 -3px var(--primary-color); }
   .two-pane { display: grid; grid-template-columns: minmax(260px, 340px) minmax(0, 1fr); gap: 16px; align-items: start; }
   .narrow .two-pane { grid-template-columns: 1fr; } .narrow header { flex-direction: column; }
   .card { background: var(--card-background-color); border-radius: 16px; box-shadow: var(--ha-card-box-shadow, 0 2px 8px rgba(0,0,0,.15)); padding: 16px; }
@@ -1515,6 +1765,23 @@ const styles = `
   .history-item span { display: block; color: var(--secondary-text-color); font-size: 12px; }
   .empty-state { min-height: 320px; display: grid; place-content: center; text-align: center; }
   .overview { max-width: 920px; margin: auto; } .ledger-head { border-left: 5px solid var(--success-color, #43a047); padding: 8px 18px; margin-bottom: 22px; }
+  .workspace { max-width: 1000px; margin: auto; display: flex; flex-direction: column; gap: 14px; }
+  .alert-head { border-left-color: var(--warning-color, #ffa000); }
+  .policy-head { border-left-color: var(--primary-color); }
+  .alert-ledger { display: flex; flex-direction: column; gap: 10px; }
+  .alert-row { background: var(--card-background-color); border-radius: 14px; border-left: 5px solid var(--divider-color); box-shadow: var(--ha-card-box-shadow, 0 2px 8px rgba(0,0,0,.15)); padding: 16px; }
+  .alert-row.firing { border-left-color: var(--error-color); } .alert-row.pending { border-left-color: var(--warning-color, #ffa000); }
+  .alert-row.stale { outline: 2px dashed var(--warning-color, #ffa000); outline-offset: -2px; }
+  .alert-row-head, .alert-badges, .alert-meta, .policy-labels { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  .alert-badges, .alert-meta, .policy-labels { justify-content: flex-start; }
+  .alert-meta { margin-top: 12px; color: var(--secondary-text-color); font-size: 13px; }
+  .state-badge, .stale-badge, .stage-badge { border-radius: 999px; padding: 5px 9px; background: var(--secondary-background-color); font-size: 12px; font-weight: 700; }
+  .stale-badge { background: color-mix(in srgb, var(--warning-color, #ffa000) 25%, transparent); }
+  .link-button { min-height: 0; padding: 0; border-radius: 0; background: transparent; color: var(--primary-color); text-decoration: underline; }
+  .policy-workspace { padding-bottom: 70px; } .policy-layout { grid-template-columns: minmax(300px, 1fr) minmax(320px, 1fr); }
+  .policy-yaml { min-height: 62vh; } .synthetic-alerts { min-height: 120px; }
+  .policy-results, .policy-result { display: flex; flex-direction: column; gap: 12px; } .policy-result { padding-top: 14px; border-top: 1px solid var(--divider-color); }
+  .policy-route { display: flex; flex-direction: column; gap: 4px; padding: 10px; border-radius: 10px; background: var(--secondary-background-color); font-size: 13px; }
   .ledger { display: grid; gap: 22px; } .ledger-section h2 { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; } .ledger-section h2 span { font-size: 12px; color: var(--secondary-text-color); }
   .ledger-section .rule { width: 100%; margin-bottom: 7px; border-left: 4px solid var(--divider-color); } .ledger-section:first-child .rule { border-left-color: var(--warning-color, #ffa000); }
   .phase { font-size: 12px; color: var(--primary-color); } .create { margin-top: 28px; } summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; }
@@ -1523,7 +1790,7 @@ const styles = `
   .sticky-top { display: none; } .publish-bar { position: sticky; bottom: 0; z-index: 3; margin-top: 16px; padding: 10px; display: flex; justify-content: flex-end; align-items: center; gap: 8px; background: var(--card-background-color); border-top: 1px solid var(--divider-color); }
   .edit-back { display: none; }
   .inline-select { display: flex; flex-direction: column; gap: 3px; } .inline-select span, .sr-status { font-size: 12px; color: var(--secondary-text-color); } .sr-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-  @media (max-width: 700px) { main { padding: 10px; padding-bottom: 72px; } .two-pane, .form-grid, .row { grid-template-columns: 1fr; } .two-pane > .rules { display: none; } .card-header, .section-title, .hero-row, header, .target-line { flex-direction: column; align-items: stretch; } .sticky-top, .edit-back { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 10px; padding: 8px; background: var(--card-background-color); } .edit-back span { color: var(--secondary-text-color); font-size: 12px; } .publish-bar { position: fixed; left: 0; right: 0; margin: 0; } .publish-bar span { display: none; } .publish-bar button { flex: 1; } }
+  @media (max-width: 700px) { main { padding: 10px; padding-bottom: 72px; } .two-pane, .form-grid, .row { grid-template-columns: 1fr; } .two-pane > .rules { display: none; } .card-header, .section-title, .hero-row, header, .target-line, .alert-row-head { flex-direction: column; align-items: stretch; } .sticky-top, .edit-back { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 10px; padding: 8px; background: var(--card-background-color); } .edit-back span { color: var(--secondary-text-color); font-size: 12px; } .publish-bar { position: fixed; left: 0; right: 0; margin: 0; } .publish-bar span { display: none; } .publish-bar button { flex: 1; } }
 `;
 
 customElements.define("intentional-panel", IntentionalPanel);

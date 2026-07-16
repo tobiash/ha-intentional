@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -19,12 +19,18 @@ class AlertObservation:
     severity: str
     summary: str
     active: bool
+    observed_at_ms: int = 0
+    labels: dict[str, str] = field(default_factory=dict)
+    annotations: dict[str, str] = field(default_factory=dict)
+    definition_revision: str = ""
+    escalations: tuple[tuple[int, str], ...] = ()
     for_ms: int = 0
     quality: str = "known"
     stale_after_ms: int = 120_000
     resolve_after_ms: int | None = None
     inactive_reason: str = "condition_inactive"
     pulse_id: str | None = None
+    source_timestamp_ms: int | None = None
     duration_revision: str = ""
 
     @property
@@ -42,6 +48,7 @@ class _AlertInstance:
     instance_id: str
     active_at_ms: int
     state: str
+    firing_at_ms: int | None = None
     resolve_at_ms: int | None = None
     for_ms: int = 0
     last_pulse_id: str | None = None
@@ -103,7 +110,8 @@ class AlertLifecycle:
                         self._id_factory(),
                         now_ms,
                         "firing",
-                        now_ms + observation.resolve_after_ms,
+                        firing_at_ms=now_ms,
+                        resolve_at_ms=now_ms + observation.resolve_after_ms,
                         last_pulse_id=observation.pulse_id,
                     )
                     self._active[observation.key] = instance
@@ -138,6 +146,7 @@ class AlertLifecycle:
                     self._id_factory(),
                     now_ms,
                     state,
+                    firing_at_ms=now_ms if state == "firing" else None,
                     for_ms=observation.for_ms,
                     duration_revision=observation.duration_revision,
                 )
@@ -156,6 +165,7 @@ class AlertLifecycle:
                     instance.duration_revision = observation.duration_revision
                 if now_ms - instance.active_at_ms >= instance.for_ms:
                     instance.state = "firing"
+                    instance.firing_at_ms = now_ms
                     transitions.append(
                         self._transition(observation, instance.instance_id, "firing", now_ms)
                     )
@@ -178,6 +188,27 @@ class AlertLifecycle:
                     "state": instance.state if instance is not None else "inactive",
                     "instance_id": instance.instance_id if instance is not None else None,
                     "evaluation_status": evaluation_status,
+                    "observed_at_ms": observation.observed_at_ms,
+                    "active_at_ms": (
+                        instance.active_at_ms if instance is not None else None
+                    ),
+                    "firing_at_ms": (
+                        instance.firing_at_ms if instance is not None else None
+                    ),
+                    "next_deadline_ms": _minimum_deadline(
+                        instance.resolve_at_ms
+                        if instance is not None and instance.resolve_at_ms is not None
+                        else instance.active_at_ms + instance.for_ms
+                        if instance is not None and instance.state == "pending"
+                        else None,
+                        unknown_since + observation.stale_after_ms
+                        if observation.quality == "unknown"
+                        and evaluation_status == "grace"
+                        else None,
+                    ),
+                    "labels": dict(observation.labels),
+                    "annotations": dict(observation.annotations),
+                    "definition_revision": observation.definition_revision,
                 }
             )
         return projected, transitions
@@ -190,6 +221,7 @@ class AlertLifecycle:
                     "instance_id": instance.instance_id,
                     "active_at_ms": instance.active_at_ms,
                     "state": instance.state,
+                    "firing_at_ms": instance.firing_at_ms,
                     "resolve_at_ms": instance.resolve_at_ms,
                     "for_ms": instance.for_ms,
                     "last_pulse_id": instance.last_pulse_id,
@@ -217,6 +249,11 @@ class AlertLifecycle:
                     instance_id=str(value["instance_id"]),
                     active_at_ms=int(value["active_at_ms"]),
                     state=str(value["state"]),
+                    firing_at_ms=(
+                        int(value["firing_at_ms"])
+                        if value.get("firing_at_ms") is not None
+                        else None
+                    ),
                     resolve_at_ms=int(resolve_at) if resolve_at is not None else None,
                     for_ms=int(value.get("for_ms", 0)),
                     last_pulse_id=(
@@ -364,6 +401,11 @@ def _optional_nonnegative_int(value: Any) -> bool:
     return value is None or _nonnegative_int(value)
 
 
+def _minimum_deadline(*values: int | None) -> int | None:
+    present = [value for value in values if value is not None]
+    return min(present) if present else None
+
+
 class AlertCoordinator:
     """Serialize and durably expose Alert lifecycle state."""
 
@@ -383,6 +425,9 @@ class AlertCoordinator:
         self._desired_snapshot: dict[str, Any] | None = None
         self._dirty = False
         self._current_error: str | None = None
+        self._audit: list[dict[str, object]] = []
+        self._instances: list[dict[str, object]] = []
+        self._observations: dict[str, AlertObservation] = {}
         self.available = True
 
     async def async_load(self) -> None:
@@ -402,6 +447,8 @@ class AlertCoordinator:
             or isinstance(stored.get("generation"), bool)
             or not isinstance(stored.get("lifecycle"), dict)
             or not isinstance(stored.get("alerts"), list)
+            or not isinstance(stored.get("audit", []), list)
+            or not isinstance(stored.get("instances", []), list)
             or not _valid_stored_alert_state(stored)
         ):
             self.available = False
@@ -414,6 +461,22 @@ class AlertCoordinator:
             self._lifecycle.import_state(lifecycle)
             self._alerts = [dict(alert) for alert in alerts if isinstance(alert, dict)]
             self._generation = generation
+            self._audit = [
+                dict(event)
+                for event in stored.get("audit", [])[-10_000:]
+                if isinstance(event, dict)
+            ]
+            self._instances = [
+                dict(instance)
+                for instance in stored.get("instances", [])[-1_000:]
+                if isinstance(instance, dict)
+            ]
+            self._observations = {}
+            for raw_observation in stored.get("observations", []):
+                if not isinstance(raw_observation, dict):
+                    continue
+                observation = AlertObservation(**raw_observation)
+                self._observations[observation.key] = observation
         except (KeyError, TypeError, ValueError, OverflowError):
             self.available = False
             self._current_error = "corrupt_alert_store"
@@ -444,18 +507,52 @@ class AlertCoordinator:
                         inactive_reason="definition_removed",
                     )
                 )
+            self._observations = {
+                observation.key: observation for observation in current
+            }
+            previous_by_instance = {
+                str(alert["instance_id"]): alert
+                for alert in self._alerts
+                if alert.get("instance_id") is not None
+            }
             alerts, transitions = self._lifecycle.advance(current, now_ms=now_ms)
             changed = alerts != self._alerts or bool(transitions)
             if not changed and not self._dirty:
                 return []
             if changed:
                 self._generation += 1
+                for transition in transitions:
+                    self._audit.append(dict(transition))
+                    if transition.get("to") != "resolved":
+                        continue
+                    instance_id = str(transition["instance_id"])
+                    previous = previous_by_instance.get(instance_id, {})
+                    self._instances.append(
+                        {
+                            "instance_id": instance_id,
+                            "rule_id": transition["rule_id"],
+                            "name": transition["name"],
+                            "state": "resolved",
+                            "active_at_ms": previous.get("active_at_ms"),
+                            "firing_at_ms": previous.get("firing_at_ms"),
+                            "resolved_at_ms": transition["at_ms"],
+                            "reason": transition["reason"],
+                        }
+                    )
+                del self._audit[:-10_000]
+                del self._instances[:-1_000]
                 self._alerts = alerts
                 self._desired_snapshot = {
                     "version": 1,
                     "generation": self._generation,
                     "lifecycle": self._lifecycle.export_state(),
                     "alerts": alerts,
+                    "audit": self._audit,
+                    "instances": self._instances,
+                    "observations": [
+                        asdict(observation)
+                        for observation in self._observations.values()
+                    ],
                 }
             assert self._desired_snapshot is not None
             try:
@@ -472,9 +569,30 @@ class AlertCoordinator:
                 self._publish()
             return transitions
 
+    async def async_advance(self, *, now_ms: int) -> list[dict[str, object]]:
+        """Advance durable Alert deadlines without requiring fresh Rule evaluation."""
+        return await self.async_observe(self._observations.values(), now_ms=now_ms)
+
+    def next_deadline_ms(self) -> int | None:
+        """Return the earliest pending lifecycle or evidence deadline."""
+        deadlines = [
+            int(alert["next_deadline_ms"])
+            for alert in self._alerts
+            if alert.get("next_deadline_ms") is not None
+        ]
+        return min(deadlines) if deadlines else None
+
     def list_alerts(self) -> list[dict[str, object]]:
         """Return the current Alert-definition projection."""
         return [dict(alert) for alert in self._alerts]
+
+    def list_instances(self) -> list[dict[str, object]]:
+        """Return retained resolved Alert instances, newest first."""
+        return [dict(instance) for instance in reversed(self._instances)]
+
+    def list_audit(self) -> list[dict[str, object]]:
+        """Return bounded lifecycle transition audit in occurrence order."""
+        return [dict(event) for event in self._audit]
 
     def health(self) -> dict[str, object]:
         """Return Alert persistence health."""

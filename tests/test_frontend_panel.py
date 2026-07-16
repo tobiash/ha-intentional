@@ -49,6 +49,134 @@ def test_frontend_panel_asset_is_bundled() -> None:
     assert '"rules/rollback"' in source
 
 
+def test_alert_frontend_workspaces_use_existing_api_contracts() -> None:
+    source = PANEL_PATH.read_text()
+
+    assert '>Intent</button>' in source
+    assert '>Alert</button>' in source
+    assert '>Alerting Policy</button>' in source
+    assert 'this._api("GET", "alerts")' in source
+    assert 'this._api("GET", "alerting/policy")' in source
+    assert 'this._api("POST", "alerting/simulate"' in source
+    assert 'this._api("PUT", "alerting/policy"' in source
+    assert "expected_generation: this._policyDocument?.generation" in source
+    assert "request !== this._previewRequest || candidateFingerprint(this._candidateContents()) !== fingerprint" not in source.split("async _load()", 1)[1].split("async _validate", 1)[0]
+
+
+def test_alert_ledger_order_is_deterministic_and_does_not_mutate_input() -> None:
+    result = _run_panel_js(r'''(() => {
+      const alerts = [
+        {state: "inactive", severity: "critical", rule_id: "z", name: "Inactive"},
+        {state: "firing", severity: "info", rule_id: "b", name: "Info"},
+        {state: "pending", severity: "critical", rule_id: "a", name: "Pending"},
+        {state: "firing", severity: "critical", rule_id: "c", name: "Critical C"},
+        {state: "firing", severity: "critical", rule_id: "a", name: "Critical A"},
+        {state: "firing", severity: "warning", rule_id: "a", name: "Warning"},
+      ];
+      const original = alerts.map(item => item.name);
+      return {ordered: sortAlerts(alerts).map(item => item.name), original: alerts.map(item => item.name), expectedOriginal: original};
+    })()''')
+
+    assert result["ordered"] == ["Critical A", "Critical C", "Warning", "Info", "Pending", "Inactive"]
+    assert result["original"] == result["expectedOriginal"]
+
+
+def test_alert_ledger_is_truthful_stale_and_rule_linked() -> None:
+    result = _run_panel_js(r'''(() => {
+      const panel = new IntentionalPanel();
+      panel._alerts = [{
+        state: "firing", severity: "critical", evaluation_status: "stale",
+        summary: "Freezer is too warm", rule_id: "freezer", name: "FreezerHigh", instance_id: "instance-1",
+      }];
+      panel._rules = [{id: "freezer", block: "- id: freezer\n"}];
+      return panel._renderAlertWorkspace();
+    })()''')
+
+    assert "Freezer is too warm" in result
+    assert "Stale evaluation" in result
+    assert 'data-action="open-alert-rule"' in result
+    assert "Instance: instance-1" in result
+    assert "Desired" not in result
+    assert "Target" not in result
+    assert "competing" not in result
+
+
+def test_alert_load_failure_is_isolated_from_rule_load() -> None:
+    result = _run_panel_js(r'''(async () => {
+      const panel = new IntentionalPanel(); panel._render = () => {};
+      panel._api = async (method, path) => {
+        if (path === "alerts") throw new Error("alert store unavailable");
+        if (path === "health") return {version: "test"};
+        if (path === "rules/document") return {contents: "", generation: "g1"};
+        if (path === "rules/history") return {history: []};
+        if (path === "world") return {authored_rules: []};
+        if (path === "validate") return {valid: true, normalized: []};
+      };
+      await panel._load();
+      await Promise.resolve();
+      return {ruleError: panel._error, alertsError: panel._alertsError, generation: panel._document.generation};
+    })()''')
+
+    assert result == {"ruleError": "", "alertsError": "alert store unavailable", "generation": "g1"}
+
+
+def test_workspace_switch_preserves_rule_editor_state() -> None:
+    result = _run_panel_js(r'''(() => {
+      const panel = new IntentionalPanel(); panel._render = () => {};
+      panel._screen = "edit"; panel._editorMode = "yaml"; panel._selectedRuleId = "one";
+      panel._selectedRuleContents = "authored draft"; panel._dirty = true;
+      panel._handleAction({dataset: {action: "switch-workspace", workspace: "alert"}});
+      panel._handleAction({dataset: {action: "switch-workspace", workspace: "intent"}});
+      return {workspace: panel._workspace, screen: panel._screen, mode: panel._editorMode, source: panel._selectedRuleContents, dirty: panel._dirty};
+    })()''')
+
+    assert result == {"workspace": "intent", "screen": "edit", "mode": "yaml", "source": "authored draft", "dirty": True}
+
+
+def test_policy_has_independent_checked_reviewed_and_published_workflow() -> None:
+    result = _run_panel_js(r'''(async () => {
+      const panel = new IntentionalPanel(); panel._render = () => {};
+      panel._policyLoaded = true; panel._policyDocument = {generation: "g1"};
+      panel._policyContents = "route: {id: root, receiver: household}";
+      panel._policySyntheticText = '[{"alertname":"Smoke","severity":"critical"}]';
+      const calls = [];
+      panel._api = async (method, path, data) => {
+        calls.push({method, path, data});
+        if (method === "POST" && data.alerts.length === 0) return {valid: true, alerts: []};
+        if (method === "POST") return {valid: true, candidate_generation: "g2", alerts: [{labels: data.alerts[0], routes: [], fanout: [], warnings: []}]};
+        return {valid: true, generation: "g2"};
+      };
+      await panel._checkPolicy(); const checked = panel._policyStage;
+      await panel._reviewPolicy(); const reviewed = panel._policyStage;
+      await panel._publishPolicy();
+      return {checked, reviewed, published: panel._policyStage, calls};
+    })()''')
+
+    assert result["checked"] == "Checked"
+    assert result["reviewed"] == "Reviewed"
+    assert result["published"] == "Published"
+    assert result["calls"][-1] == {
+        "method": "PUT",
+        "path": "alerting/policy",
+        "data": {
+            "contents": "route: {id: root, receiver: household}",
+            "expected_generation": "g1",
+        },
+    }
+
+
+def test_policy_synthetic_preview_renders_structured_routing_fields() -> None:
+    rendered = _run_panel_js(r'''renderPolicyPreview({valid: true, candidate_generation: "g2", alerts: [{
+      labels: {alertname: "Smoke", severity: "critical"},
+      routes: [{route_id: "urgent", receiver: "admins", group_by: ["alertname"], group_key: {alertname: "Smoke"}, suppression: {reason: "mute_interval"}}],
+      fanout: [{receiver: "admins", destination: {type: "notify_entity", entity_id: "notify.admin"}}],
+      warnings: [{code: "duplicate_fanout", receiver: "admins"}],
+    }]})''')
+
+    for text in ["Synthetic Alert 1", "Routes", "Group keys: alertname", "Group key:", "Fanout", "Suppression:", "Warnings", "duplicate_fanout"]:
+        assert text in rendered
+
+
 def test_frontend_panel_has_visual_rule_editor() -> None:
     source = PANEL_PATH.read_text()
 
