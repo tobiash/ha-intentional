@@ -177,6 +177,12 @@ def _alerting_policy_for(hass: HomeAssistant) -> AlertingPolicyRepository | None
     return repository if isinstance(repository, AlertingPolicyRepository) else None
 
 
+def _request_actor(request: web.Request) -> str | None:
+    user = request.get("hass_user")
+    user_id = getattr(user, "id", None)
+    return user_id if isinstance(user_id, str) and user_id else None
+
+
 def _reconciliation_for(hass: HomeAssistant) -> Any | None:
     entry = _entry_for_view(hass)
     if entry is None:
@@ -1131,6 +1137,254 @@ class IntentionalAlertsView(HomeAssistantView):
         )
 
 
+class IntentionalAlertInstanceView(HomeAssistantView):
+    """GET one active or retained Alert instance."""
+
+    url = r"/api/intentional/alerts/{instance_id:.+}"
+    name = "api:intentional:alerts:instance"
+    requires_auth = True
+
+    async def get(self, request: web.Request, instance_id: str) -> web.Response:
+        coordinator = _alerting_for(request.app["hass"])
+        if coordinator is None:
+            return _error("Integration not configured", "not_configured", 503)
+        instance = next(
+            (
+                item
+                for item in [*coordinator.list_alerts(), *coordinator.list_instances()]
+                if item.get("instance_id") == instance_id
+            ),
+            None,
+        )
+        if instance is None:
+            return _error("Alert instance not found", "not_found", 404)
+        audit = [
+            event
+            for event in coordinator.list_audit()
+            if event.get("instance_id") == instance_id
+        ]
+        return web.json_response(
+            {"instance": instance, "audit": audit, "health": coordinator.health()}
+        )
+
+
+class IntentionalAlertAcknowledgeView(HomeAssistantView):
+    url = r"/api/intentional/alerts/{instance_id:.+}/acknowledge"
+    name = "api:intentional:alerts:acknowledge"
+    requires_auth = True
+
+    async def post(self, request: web.Request, instance_id: str) -> web.Response:
+        coordinator = _alerting_for(request.app["hass"])
+        actor = _request_actor(request)
+        if coordinator is None:
+            return _error("Integration not configured", "not_configured", 503)
+        if actor is None:
+            return _error("Authenticated actor required", "actor_required", 403)
+        data, error = await _json_object(request)
+        if error is not None:
+            return error
+        assert data is not None
+        comment = data.get("comment")
+        if comment is not None and not isinstance(comment, str):
+            return _error("`comment` must be a string", "bad_request", 400)
+        try:
+            record = await coordinator.async_acknowledge(
+                instance_id,
+                actor=actor,
+                now_ms=int(datetime.now(UTC).timestamp() * 1_000),
+                comment=comment,
+            )
+        except ValueError as err:
+            return _error(str(err), "not_firing", 409)
+        return web.json_response({"acknowledgment": record})
+
+
+class IntentionalAlertAcknowledgmentView(HomeAssistantView):
+    url = r"/api/intentional/alerts/{instance_id:.+}/acknowledgment"
+    name = "api:intentional:alerts:acknowledgment"
+    requires_auth = True
+
+    async def delete(self, request: web.Request, instance_id: str) -> web.Response:
+        coordinator = _alerting_for(request.app["hass"])
+        actor = _request_actor(request)
+        if coordinator is None:
+            return _error("Integration not configured", "not_configured", 503)
+        if actor is None:
+            return _error("Authenticated actor required", "actor_required", 403)
+        removed = await coordinator.async_revoke_acknowledgment(
+            instance_id,
+            actor=actor,
+            now_ms=int(datetime.now(UTC).timestamp() * 1_000),
+        )
+        if not removed:
+            return _error("Acknowledgment not found", "not_found", 404)
+        return web.json_response({"revoked": True})
+
+
+class IntentionalAlertInstanceSilenceView(HomeAssistantView):
+    url = r"/api/intentional/alerts/{instance_id:.+}/silence"
+    name = "api:intentional:alerts:instance:silence"
+    requires_auth = True
+
+    async def post(self, request: web.Request, instance_id: str) -> web.Response:
+        coordinator = _alerting_for(request.app["hass"])
+        actor = _request_actor(request)
+        if coordinator is None:
+            return _error("Integration not configured", "not_configured", 503)
+        if actor is None:
+            return _error("Authenticated actor required", "actor_required", 403)
+        data, error = await _json_object(request)
+        if error is not None:
+            return error
+        assert data is not None
+        duration_ms = data.get("duration_ms", 3_600_000)
+        reason = data.get("reason")
+        if (
+            not isinstance(duration_ms, int)
+            or isinstance(duration_ms, bool)
+            or not isinstance(reason, str)
+            or not reason
+        ):
+            return _error("`duration_ms` and `reason` are required", "bad_request", 400)
+        try:
+            silence = await coordinator.async_create_instance_silence(
+                instance_id,
+                actor=actor,
+                reason=reason,
+                now_ms=int(datetime.now(UTC).timestamp() * 1_000),
+                duration_ms=duration_ms,
+            )
+        except ValueError as err:
+            return _error(str(err), "bad_request", 400)
+        return web.json_response({"silence": silence})
+
+
+class IntentionalSilencesView(HomeAssistantView):
+    url = "/api/intentional/silences"
+    name = "api:intentional:silences"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        coordinator = _alerting_for(request.app["hass"])
+        if coordinator is None:
+            return _error("Integration not configured", "not_configured", 503)
+        return web.json_response({"silences": coordinator.list_silences()})
+
+    @require_admin
+    async def post(self, request: web.Request) -> web.Response:
+        coordinator = _alerting_for(request.app["hass"])
+        actor = _request_actor(request)
+        if coordinator is None:
+            return _error("Integration not configured", "not_configured", 503)
+        if actor is None:
+            return _error("Authenticated actor required", "actor_required", 403)
+        data, error = await _json_object(request)
+        if error is not None:
+            return error
+        assert data is not None
+        matchers = data.get("matchers", [])
+        reason = data.get("reason")
+        duration_ms = data.get("duration_ms")
+        match_all = data.get("match_all", False)
+        if (
+            not isinstance(matchers, list)
+            or not all(isinstance(item, str) for item in matchers)
+            or not isinstance(reason, str)
+            or not reason
+            or not isinstance(duration_ms, int)
+            or isinstance(duration_ms, bool)
+            or not isinstance(match_all, bool)
+        ):
+            return _error("Invalid matcher Silence", "bad_request", 400)
+        try:
+            silence = await coordinator.async_create_matcher_silence(
+                matchers,
+                match_all=match_all,
+                actor=actor,
+                reason=reason,
+                now_ms=int(datetime.now(UTC).timestamp() * 1_000),
+                duration_ms=duration_ms,
+            )
+        except ValueError as err:
+            return _error(str(err), "bad_request", 400)
+        return web.json_response({"silence": silence})
+
+
+class IntentionalSilenceView(HomeAssistantView):
+    url = r"/api/intentional/silences/{silence_id:.+}"
+    name = "api:intentional:silences:silence"
+    requires_auth = True
+
+    async def delete(self, request: web.Request, silence_id: str) -> web.Response:
+        coordinator = _alerting_for(request.app["hass"])
+        actor = _request_actor(request)
+        if coordinator is None:
+            return _error("Integration not configured", "not_configured", 503)
+        if actor is None:
+            return _error("Authenticated actor required", "actor_required", 403)
+        removed = await coordinator.async_delete_silence(
+            silence_id,
+            actor=actor,
+            now_ms=int(datetime.now(UTC).timestamp() * 1_000),
+        )
+        if not removed:
+            return _error("Silence not found", "not_found", 404)
+        return web.json_response({"deleted": True})
+
+
+class IntentionalAlertingStatusView(HomeAssistantView):
+    """GET bounded aggregate Alerting runtime status."""
+
+    url = "/api/intentional/alerting/status"
+    name = "api:intentional:alerting:status"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        coordinator = _alerting_for(request.app["hass"])
+        if coordinator is None:
+            return _error("Integration not configured", "not_configured", 503)
+        alerts = coordinator.list_alerts()
+        obligations = coordinator.list_notifications()
+        return web.json_response(
+            {
+                "health": coordinator.health(),
+                "firing": sum(item.get("state") == "firing" for item in alerts),
+                "pending": sum(item.get("state") == "pending" for item in alerts),
+                "notification_backlog": sum(
+                    item.get("status") in {"planned", "in_flight"}
+                    for item in obligations
+                ),
+                "dead_letters": sum(
+                    item.get("status") == "dead_lettered" for item in obligations
+                ),
+            }
+        )
+
+
+class IntentionalAlertingNotificationsView(HomeAssistantView):
+    """GET redacted durable Notification obligation audit."""
+
+    url = "/api/intentional/alerting/notifications"
+    name = "api:intentional:alerting:notifications"
+    requires_auth = True
+
+    @require_admin
+    async def get(self, request: web.Request) -> web.Response:
+        coordinator = _alerting_for(request.app["hass"])
+        if coordinator is None:
+            return _error("Integration not configured", "not_configured", 503)
+        notifications = []
+        for obligation in coordinator.list_notifications():
+            notifications.append(
+                {
+                    key: value
+                    for key, value in obligation.items()
+                    if key not in {"payload", "destination"}
+                }
+            )
+        return web.json_response({"notifications": notifications})
+
+
 class IntentionalAlertingPolicyView(HomeAssistantView):
     """Read or generation-guard the durable Alert routing policy document."""
 
@@ -1170,9 +1424,26 @@ class IntentionalAlertingPolicyView(HomeAssistantView):
             )
         if len(contents.encode()) > 1_000_000:
             return _error("`contents` may not exceed 1000000 bytes", "request_too_large", 400)
+        confirm_spike = data.get("confirm_spike", False)
+        if not isinstance(confirm_spike, bool):
+            return _error("`confirm_spike` must be a boolean", "bad_request", 400)
+        coordinator = _alerting_for(request.app["hass"])
+        current_labels = (
+            [
+                dict(alert["labels"])
+                for alert in coordinator.list_alerts()
+                if alert.get("state") in {"pending", "firing"}
+                and isinstance(alert.get("labels"), dict)
+            ]
+            if coordinator is not None
+            else []
+        )
         try:
             result = await repository.async_publish(
-                contents, expected_generation=expected_generation
+                contents,
+                expected_generation=expected_generation,
+                alerts=current_labels,
+                confirm_spike=confirm_spike,
             )
         except ValueError as err:
             return web.json_response(
@@ -1180,6 +1451,14 @@ class IntentionalAlertingPolicyView(HomeAssistantView):
             )
         if result.get("error") == "generation_mismatch":
             return _error("Policy generation changed", "generation_mismatch", 409)
+        if result.get("error") == "confirmation_required":
+            return web.json_response(result, status=409)
+        if coordinator is not None:
+            await coordinator.async_set_policy(
+                contents,
+                now_ms=int(datetime.now(UTC).timestamp() * 1_000),
+                default_timezone=request.app["hass"].config.time_zone,
+            )
         return web.json_response({"valid": True, **result, "errors": []})
 
 
@@ -1249,6 +1528,13 @@ class IntentionalAlertingPolicyRollbackView(HomeAssistantView):
             return _error("Policy generation changed", "generation_mismatch", 409)
         if result.get("error") == "history_not_found":
             return _error("Policy history not found", "not_found", 404)
+        coordinator = _alerting_for(request.app["hass"])
+        if coordinator is not None and repository.contents is not None:
+            await coordinator.async_set_policy(
+                repository.contents,
+                now_ms=int(datetime.now(UTC).timestamp() * 1_000),
+                default_timezone=request.app["hass"].config.time_zone,
+            )
         return web.json_response(result)
 
 
@@ -1783,6 +2069,14 @@ def register_api(hass: HomeAssistant) -> None:
         IntentionalCardView,
         IntentionalDashboardView,
         IntentionalAlertsView,
+        IntentionalAlertInstanceView,
+        IntentionalAlertAcknowledgeView,
+        IntentionalAlertAcknowledgmentView,
+        IntentionalAlertInstanceSilenceView,
+        IntentionalSilencesView,
+        IntentionalSilenceView,
+        IntentionalAlertingStatusView,
+        IntentionalAlertingNotificationsView,
         IntentionalAlertingPolicyView,
         IntentionalAlertingPolicyHistoryView,
         IntentionalAlertingPolicyHistoryGenerationView,

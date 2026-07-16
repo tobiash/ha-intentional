@@ -64,6 +64,20 @@ async def async_setup_entry(
         )
     }
     alerting = alerting_coordinator_for(hass, entry.entry_id)
+    alert_aggregates = (
+        [
+            IntentionalAlertAggregateSensor(alerting, entry, kind)
+            for kind in (
+                "firing",
+                "unacknowledged",
+                "pending",
+                "backlog",
+                "health",
+            )
+        ]
+        if alerting is not None
+        else []
+    )
     alert_entities = {
         (str(alert["rule_id"]), str(alert["name"])): IntentionalAlertSensor(
             alerting, entry, str(alert["rule_id"]), str(alert["name"])
@@ -82,7 +96,9 @@ async def async_setup_entry(
             lambda area_id=area_id, entity=entity: room_entities.pop(area_id, None)
             if room_entities.get(area_id) is entity else None
         )
-    async_add_entities([summary, *room_entities.values(), *alert_entities.values()])
+    async_add_entities(
+        [summary, *room_entities.values(), *alert_entities.values(), *alert_aggregates]
+    )
 
     _cleanup_legacy_target_sensors(hass, entry)
 
@@ -140,6 +156,8 @@ async def async_setup_entry(
             for key in current & set(alert_entities):
                 alert_entities[key].mark_desired()
                 alert_entities[key].async_write_if_registered()
+            for entity in alert_aggregates:
+                entity.async_write_ha_state()
             if new_entities:
                 async_add_entities(new_entities)
 
@@ -256,16 +274,64 @@ class IntentionalAlertSensor(RegistrationAwareEntity, SensorEntity):
         if projection is None:
             return {}
         return {
-            key: projection.get(key)
-            for key in (
-                "rule_id",
-                "name",
-                "severity",
-                "summary",
-                "instance_id",
-                "evaluation_status",
-            )
+            **{
+                key: projection.get(key)
+                for key in (
+                    "rule_id",
+                    "name",
+                    "severity",
+                    "summary",
+                    "instance_id",
+                    "evaluation_status",
+                    "active_at_ms",
+                    "firing_at_ms",
+                    "next_deadline_ms",
+                )
+            },
+            "labels": dict(list(dict(projection.get("labels", {})).items())[:32]),
+            "acknowledged": projection.get("acknowledgment") is not None,
+            "suppression": list(projection.get("suppression", [])),
+            "panel_url": "/intentional/alerts",
         }
+
+
+class IntentionalAlertAggregateSensor(SensorEntity):
+    """One bounded aggregate over durable Alert and Notification state."""
+
+    _attr_icon = "mdi:alert-circle-outline"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self, coordinator: AlertCoordinator, entry: ConfigEntry, kind: str
+    ) -> None:
+        self._coordinator = coordinator
+        self._kind = kind
+        self._attr_name = f"Intentional Alert {kind.title()}"
+        self._attr_unique_id = f"{entry.entry_id}_alert_{kind}"
+
+    @property
+    def available(self) -> bool:
+        return self._coordinator.available
+
+    @property
+    def native_value(self) -> int | str:
+        alerts = self._coordinator.list_alerts()
+        if self._kind == "firing":
+            return sum(alert.get("state") == "firing" for alert in alerts)
+        if self._kind == "unacknowledged":
+            return sum(
+                alert.get("state") == "firing"
+                and alert.get("acknowledgment") is None
+                for alert in alerts
+            )
+        if self._kind == "pending":
+            return sum(alert.get("state") == "pending" for alert in alerts)
+        if self._kind == "backlog":
+            return sum(
+                item.get("status") in {"planned", "in_flight"}
+                for item in self._coordinator.list_notifications()
+            )
+        return str(self._coordinator.health()["status"])
 
 
 class IntentionalTargetSensor(SensorEntity):

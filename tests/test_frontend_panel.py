@@ -33,7 +33,7 @@ globalThis.confirm = () => true;
 {source}
 Promise.resolve({expression}).then((value) => console.log(JSON.stringify(value)));
 """
-    result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    result = subprocess.run(["node"], input=script, check=True, capture_output=True, text=True)
     return json.loads(result.stdout)
 
 
@@ -101,6 +101,58 @@ def test_alert_ledger_is_truthful_stale_and_rule_linked() -> None:
     assert "competing" not in result
 
 
+def test_alert_detail_fetches_instance_and_renders_safe_operational_state() -> None:
+    result = _run_panel_js(r'''(async () => {
+      const panel = new IntentionalPanel(); panel._render = () => {};
+      const calls = [];
+      panel._api = async (method, path) => {
+        calls.push([method, path]);
+        return {instance: {
+          instance_id: "instance/1", rule_id: "freezer", name: "FreezerHigh",
+          summary: "Freezer is too warm", severity: "critical", state: "firing",
+          evaluation_status: "stale", active_at_ms: 1000, firing_at_ms: 2000,
+          labels: {area: "kitchen"}, acknowledgment: {actor: "user-1", at_ms: 3000, comment: "Checking"},
+          suppression: ["silence"], notification_suppressed: true,
+        }, audit: [{from: "pending", to: "firing", at_ms: 2000, reason: "for_elapsed"}]};
+      };
+      await panel._loadAlertDetail("instance/1");
+      return {calls, html: panel._renderAlertDetail()};
+    })()''')
+
+    assert result["calls"] == [["GET", "alerts/instance%2F1"]]
+    for text in ["Lifecycle", "Evidence", "stale", "Labels", "Acknowledgment and suppression", "Checking", "Available delivery information", "proof of delivery", "Audit", "for_elapsed"]:
+        assert text in result["html"]
+    assert "notify.admin" not in result["html"]
+
+
+def test_alert_controls_use_instance_endpoints_and_refresh_ledger_and_detail() -> None:
+    result = _run_panel_js(r'''(async () => {
+      const panel = new IntentionalPanel(); panel._render = () => {};
+      panel._selectedAlertId = "instance-1"; panel._alertComment = "Investigating"; panel._silenceReason = "Repair in progress";
+      const calls = [];
+      panel._api = async (method, path, data) => {
+        calls.push({method, path, data});
+        if (path === "alerts") return {alerts: []};
+        if (method === "GET") return {instance: {instance_id: "instance-1", state: "firing"}, audit: []};
+        return {};
+      };
+      await panel._mutateAlert("acknowledge-alert");
+      panel._silenceReason = "Repair in progress";
+      await panel._mutateAlert("silence-alert");
+      await panel._mutateAlert("revoke-acknowledgment");
+      return calls;
+    })()''')
+
+    mutations = [call for call in result if call["method"] != "GET"]
+    assert mutations == [
+        {"method": "POST", "path": "alerts/instance-1/acknowledge", "data": {"comment": "Investigating"}},
+        {"method": "POST", "path": "alerts/instance-1/silence", "data": {"reason": "Repair in progress", "duration_ms": 3_600_000}},
+        {"method": "DELETE", "path": "alerts/instance-1/acknowledgment"},
+    ]
+    assert sum(call["path"] == "alerts" for call in result) == 3
+    assert sum(call["path"] == "alerts/instance-1" and call["method"] == "GET" for call in result) == 3
+
+
 def test_alert_load_failure_is_isolated_from_rule_load() -> None:
     result = _run_panel_js(r'''(async () => {
       const panel = new IntentionalPanel(); panel._render = () => {};
@@ -163,6 +215,29 @@ def test_policy_has_independent_checked_reviewed_and_published_workflow() -> Non
             "expected_generation": "g1",
         },
     }
+
+
+def test_policy_fanout_spike_requires_explicit_confirmed_retry() -> None:
+    result = _run_panel_js(r'''(async () => {
+      const panel = new IntentionalPanel(); panel._render = () => {};
+      panel._policyLoaded = true;
+      panel._policyDocument = {generation: "g1"}; panel._policyContents = "route: {}";
+      panel._policyStage = "Reviewed"; panel._policyReviewedFingerprint = candidateFingerprint(panel._policyContents);
+      const calls = [];
+      panel._api = async (method, path, data) => {
+        calls.push(data);
+        if (!data.confirm_spike) { const error = new Error("confirm"); error.body = {error: "confirmation_required", preview: {fanout: 5}}; throw error; }
+        return {generation: "g2"};
+      };
+      await panel._publishPolicy(); const warning = panel._renderPolicyWorkspace();
+      await panel._publishPolicy(true);
+      return {calls, warning, stage: panel._policyStage};
+    })()''')
+
+    assert "Confirm delivery fanout increase" in result["warning"]
+    assert "5 Receiver destinations" in result["warning"]
+    assert result["calls"][1]["confirm_spike"] is True
+    assert result["stage"] == "Published"
 
 
 def test_policy_synthetic_preview_renders_structured_routing_fields() -> None:
@@ -235,6 +310,73 @@ def test_compound_conditions_parse_and_round_trip() -> None:
         {"entity": "sensor.level", "operator": "gt", "value": "3"},
     ]
     assert "    any:" in result["output"]
+
+
+def test_guided_alert_only_rule_round_trips_current_alert_fields() -> None:
+    generated = _run_panel_js(r'''(() => {
+      const yaml = `- id: freezer\n  while:\n    sensor.freezer_temperature:\n      gt: -10\n  alert:\n    name: FreezerTemperatureHigh\n    severity: info\n    annotations:\n      summary: Freezer is too warm\n    for: 5m\n    stale_after: 3m\n    labels: {area: kitchen, category: appliance}\n    escalations:\n      - {after: 30m, severity: warning}\n      - {after: 2h, severity: critical}\n`;
+      const form = parseRuleForm(yaml, null);
+      return {error: visualModeError(yaml), form, output: stringifyRule(form)};
+    })()''')
+
+    assert generated["error"] == ""
+    assert generated["form"]["alert"]["mode"] == "state"
+    assert generated["form"]["alert"]["labels"] == "area=kitchen, category=appliance"
+    assert "  intent:" not in generated["output"]
+    rule = load_rules_from_string(generated["output"])[0]
+    assert rule.target == ""
+    assert rule.effects == ()
+    alert = rule.alerts[0]
+    assert alert.name == "FreezerTemperatureHigh"
+    assert alert.for_ms == 300_000
+    assert alert.stale_after_ms == 180_000
+    assert alert.labels == {"area": "kitchen", "category": "appliance"}
+    assert [(step.after_ms, step.severity) for step in alert.escalations] == [(1_800_000, "warning"), (7_200_000, "critical")]
+
+
+def test_guided_pulse_alert_serializes_resolve_after_not_for() -> None:
+    result = _run_panel_js(r'''(() => {
+      const form = EMPTY_RULE(); form.id = "doorbell";
+      form.conditions = [{entity: "event.doorbell.triggered", operator: "is", value: "true"}];
+      form.intents = []; form.alert = emptyAlertForm();
+      Object.assign(form.alert, {name: "DoorbellPressed", severity: "info", summary: "Doorbell pressed", mode: "pulse", for: "1m", resolveAfter: "5m"});
+      return stringifyRule(form);
+    })()''')
+
+    assert "resolve_after: 5m" in result
+    assert "    for:" not in result
+    alert = load_rules_from_string(result)[0].alerts[0]
+    assert alert.resolve_after_ms == 300_000
+
+
+def test_unsupported_alert_yaml_refuses_visual_mode_without_data_loss() -> None:
+    result = _run_panel_js(r'''(() => {
+      const examples = [
+        `- id: described\n  while:\n    sensor.x: on\n  alert:\n    name: X\n    severity: warning\n    annotations:\n      summary: X happened\n      description: Preserve me\n`,
+        `- id: multiple\n  while:\n    sensor.x: on\n  alert:\n    - name: X\n      severity: warning\n      annotations: {summary: X}\n    - name: Y\n      severity: critical\n      annotations: {summary: Y}\n`,
+      ];
+      return examples.map((yaml) => {
+        const panel = new IntentionalPanel(); panel._render = () => {}; panel._contents = yaml;
+        panel._selectedRuleId = extractRuleBlocks(yaml)[0].id; panel._selectedRuleContents = extractRuleBlocks(yaml)[0].block;
+        panel._editorMode = "yaml"; panel._showVisualRule();
+        return {mode: panel._editorMode, error: panel._visualModeError, unchanged: panel._candidateContents() === yaml};
+      });
+    })()''')
+
+    assert all(item["mode"] == "yaml" for item in result)
+    assert all("prevent data loss" in item["error"] for item in result)
+    assert all(item["unchanged"] for item in result)
+
+
+def test_simulation_renders_alert_consequences_and_transitions_separately() -> None:
+    rendered = _run_panel_js(r'''renderSimulationSummary({steps: [{
+      active_rules: ["freezer"], targets: [{target: "light.one"}], effects: [{service: "notify.one"}],
+      alerts: [{name: "FreezerHigh", state: "firing", evaluation_status: "current"}],
+      alert_transitions: [{name: "FreezerHigh", to: "firing", reason: "condition_active"}],
+    }]})''')
+
+    for text in ["Targets", "1 Target projection", "Effects", "1 Effect would fire", "Alert consequences", "current evidence", "Alert transitions", "condition_active"]:
+        assert text in rendered
 
 
 def test_all_effects_and_nested_json_are_serialized() -> None:

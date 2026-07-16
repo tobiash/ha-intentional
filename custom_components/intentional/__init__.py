@@ -52,7 +52,11 @@ from ._engine.yaml_loader import Rule
 from .alerting import (
     ALERTING_POLICY_STORAGE_VERSION,
     ALERTING_STORAGE_VERSION,
+    AlertDeadlineDriver,
+    AlertNotificationDispatcher,
     alerting_coordinator_key,
+    alerting_deadline_driver_key,
+    alerting_dispatcher_key,
     alerting_policy_repository_key,
     alerting_policy_storage_key,
     alerting_storage_key,
@@ -424,6 +428,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     await alerting.async_load()
     hass.data[DOMAIN][alerting_coordinator_key(entry.entry_id)] = alerting
+    alerting_dispatcher = AlertNotificationDispatcher(hass, alerting)
+    hass.data[DOMAIN][alerting_dispatcher_key(entry.entry_id)] = alerting_dispatcher
+    alerting_deadline_driver = AlertDeadlineDriver(
+        hass, alerting, alerting_dispatcher
+    )
+    hass.data[DOMAIN][alerting_deadline_driver_key(entry.entry_id)] = (
+        alerting_deadline_driver
+    )
     alerting_policy_store: Store = Store(
         hass,
         ALERTING_POLICY_STORAGE_VERSION,
@@ -438,6 +450,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except ValueError as err:
         _LOGGER.error("Could not load stored Alert routing policy: %s", err)
     hass.data[DOMAIN][alerting_policy_repository_key(entry.entry_id)] = alerting_policy
+    if alerting_policy.contents is not None and alerting.available:
+        await alerting.async_set_policy(
+            alerting_policy.contents,
+            now_ms=engine.now_ms(),
+            default_timezone=hass.config.time_zone,
+        )
+    alerting_deadline_driver.start()
     publication = EntityPublication(hass, entry.entry_id, engine, rule_store)
     hass.data[DOMAIN][publication_key(entry.entry_id)] = publication
     publication.publish_if_changed()
@@ -611,6 +630,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         continue
                 if alerting.available:
                     await alerting.async_observe(alert_observations, now_ms=engine.now_ms())
+                    alerting_deadline_driver.wake()
                 # Effect activation is not dispatchable until its outbox
                 # snapshot has crossed the lifecycle storage boundary.
                 await lifecycle_writer.async_flush()
@@ -798,6 +818,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
     publication = hass.data[DOMAIN].get(publication_key(entry.entry_id))
+    alerting_deadline_driver = hass.data[DOMAIN].get(
+        alerting_deadline_driver_key(entry.entry_id)
+    )
     async with runtime.mutation_lock:
         runtime.unloading = True
         runtime.advance_revision()
@@ -833,6 +856,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as err:  # noqa: BLE001
             _LOGGER.exception("Intentional tick task failed during unload")
             record_diagnostic(hass, "tick_task_failed", error=str(err))
+    if isinstance(alerting_deadline_driver, AlertDeadlineDriver):
+        await alerting_deadline_driver.async_stop()
     hass.data[DOMAIN].pop(entry.entry_id, None)
     hass.data[DOMAIN].pop(rule_store_key(entry.entry_id), None)
     hass.data[DOMAIN].pop(runtime_key(entry.entry_id), None)
@@ -842,6 +867,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN].pop(reconciliation_key(entry.entry_id), None)
     hass.data[DOMAIN].pop(mutation_coordinator_key(entry.entry_id), None)
     hass.data[DOMAIN].pop(alerting_coordinator_key(entry.entry_id), None)
+    hass.data[DOMAIN].pop(alerting_dispatcher_key(entry.entry_id), None)
+    hass.data[DOMAIN].pop(alerting_deadline_driver_key(entry.entry_id), None)
     hass.data[DOMAIN].pop(alerting_policy_repository_key(entry.entry_id), None)
     return True
 

@@ -383,6 +383,46 @@ receivers:
     assert store.save_count == 3
 
 
+async def test_policy_publication_requires_confirmation_for_large_fanout_spike() -> None:
+    store = _PolicyStore()
+    repository = AlertingPolicyRepository(store)
+    await repository.async_load()
+    initial = """
+route: {id: root, receiver: one}
+receivers:
+  - {name: one, destinations: [{type: persistent_notification}]}
+"""
+    initial_result = await repository.async_publish(
+        initial, expected_generation=repository.generation
+    )
+    destinations = ", ".join(
+        f"{{type: notify_entity, entity_id: notify.user{index}}}" for index in range(5)
+    )
+    expanded = f"""
+route: {{id: root, receiver: many}}
+receivers:
+  - name: many
+    destinations: [{destinations}]
+"""
+    alerts = [{"alertname": "Smoke", "area": "hall"}]
+
+    blocked = await repository.async_publish(
+        expanded,
+        expected_generation=initial_result["generation"],
+        alerts=alerts,
+    )
+
+    assert blocked["error"] == "confirmation_required"
+    assert blocked["preview"]["fanout"] == 5
+    published = await repository.async_publish(
+        expanded,
+        expected_generation=initial_result["generation"],
+        alerts=alerts,
+        confirm_spike=True,
+    )
+    assert "generation" in published
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [

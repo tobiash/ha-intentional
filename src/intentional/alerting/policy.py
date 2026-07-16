@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -108,12 +108,51 @@ class AlertingPolicyRepository:
         }
 
     async def async_publish(
-        self, contents: str, *, expected_generation: str
-    ) -> dict[str, str]:
+        self,
+        contents: str,
+        *,
+        expected_generation: str,
+        alerts: list[dict[str, str]] | None = None,
+        confirm_spike: bool = False,
+        at: datetime | None = None,
+    ) -> dict[str, Any]:
         _load_policy(contents, default_timezone=self._default_timezone)
         async with self._lock:
             if self.generation != expected_generation:
                 return {"error": "generation_mismatch"}
+            if alerts:
+                instant = at or datetime.now(UTC)
+                candidate = _preview_cardinality(
+                    simulate_alerting_policy(
+                        contents,
+                        alerts,
+                        at=instant,
+                        default_timezone=self._default_timezone,
+                    )
+                )
+                if candidate["groups"] > 1_024 or candidate["fanout"] > 2_048:
+                    raise ValueError("policy preview exceeds runtime cardinality caps")
+                current = (
+                    _preview_cardinality(
+                        simulate_alerting_policy(
+                            self._contents,
+                            alerts,
+                            at=instant,
+                            default_timezone=self._default_timezone,
+                        )
+                    )
+                    if self._contents is not None
+                    else {"groups": 0, "fanout": 0}
+                )
+                spike = (
+                    candidate["groups"] > 4 * max(1, current["groups"])
+                    or candidate["fanout"] > 4 * max(1, current["fanout"])
+                )
+                if spike and not confirm_spike:
+                    return {
+                        "error": "confirmation_required",
+                        "preview": {**candidate, "current": current},
+                    }
             if contents == self._contents:
                 return {"generation": self.generation}
             history = list(self._history)
@@ -270,6 +309,11 @@ def simulate_alerting_policy(
     return result
 
 
+def match_alert_labels(matchers: list[str] | tuple[str, ...], labels: dict[str, str]) -> bool:
+    """Evaluate shared safe Alert matchers for routing and suppression."""
+    return _matches(tuple(matchers), labels)
+
+
 def _load_policy(
     contents: str,
     *,
@@ -319,6 +363,17 @@ def _load_policy(
                 for key, value in destination.items()
                 if key != "allow_duplicate"
             }
+            destination_type = data["type"]
+            if destination_type == "notify_entity":
+                entity_id = data.get("entity_id")
+                if not isinstance(entity_id, str) or not entity_id.startswith("notify."):
+                    raise ValueError("notify_entity destinations require a notify entity_id")
+            elif destination_type == "legacy_action":
+                action = data.get("action")
+                if not isinstance(action, str) or not action.startswith("notify."):
+                    raise ValueError("legacy_action destinations require a notify action")
+            elif destination_type != "persistent_notification":
+                raise ValueError("unsupported Receiver destination type")
             identity = json.dumps(data, sort_keys=True, separators=(",", ":"))
             parsed_destinations.append(
                 ReceiverDestination(data, identity, allow_duplicate)
@@ -855,3 +910,16 @@ def _walk_routes(route: Route) -> list[Route]:
 
 def _policy_generation(contents: str | None) -> str:
     return hashlib.sha256((contents or "").encode()).hexdigest()
+
+
+def _preview_cardinality(results: list[dict[str, Any]]) -> dict[str, int]:
+    groups = {
+        json.dumps(route["group_key"], sort_keys=True, separators=(",", ":"))
+        for result in results
+        for route in result["routes"]
+        if "suppression" not in route
+    }
+    return {
+        "groups": len(groups),
+        "fanout": sum(len(result["fanout"]) for result in results),
+    }

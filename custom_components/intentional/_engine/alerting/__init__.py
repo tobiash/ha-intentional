@@ -9,6 +9,9 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 from uuid import uuid4
 
+from .alerting.delivery import NotificationRuntime
+from .alerting.policy import match_alert_labels
+
 
 @dataclass(frozen=True)
 class AlertObservation:
@@ -53,6 +56,7 @@ class _AlertInstance:
     for_ms: int = 0
     last_pulse_id: str | None = None
     duration_revision: str = ""
+    severity: str = ""
 
 
 class AlertLifecycle:
@@ -113,6 +117,7 @@ class AlertLifecycle:
                         firing_at_ms=now_ms,
                         resolve_at_ms=now_ms + observation.resolve_after_ms,
                         last_pulse_id=observation.pulse_id,
+                        severity=observation.severity,
                     )
                     self._active[observation.key] = instance
                     self._remember_pulse(observation.key, observation.pulse_id)
@@ -149,6 +154,7 @@ class AlertLifecycle:
                     firing_at_ms=now_ms if state == "firing" else None,
                     for_ms=observation.for_ms,
                     duration_revision=observation.duration_revision,
+                    severity=observation.severity,
                 )
                 self._active[observation.key] = instance
                 transitions.append(
@@ -179,11 +185,53 @@ class AlertLifecycle:
                 )
                 self._active.pop(observation.key)
                 instance = None
+            if instance is not None and instance.state == "firing":
+                severity_rank = {"info": 0, "warning": 1, "critical": 2}
+                effective_severity = observation.severity
+                elapsed = now_ms - instance.active_at_ms
+                for after_ms, severity in observation.escalations:
+                    if elapsed >= after_ms:
+                        effective_severity = severity
+                if instance.severity and (
+                    severity_rank[effective_severity] > severity_rank[instance.severity]
+                ):
+                    transitions.append(
+                        {
+                            **self._transition(
+                                observation, instance.instance_id, "firing", now_ms
+                            ),
+                            "reason": "severity_escalation",
+                            "from_severity": instance.severity,
+                            "severity": effective_severity,
+                        }
+                    )
+                instance.severity = effective_severity
+            next_escalation = (
+                min(
+                    (
+                        instance.active_at_ms + after_ms
+                        for after_ms, _severity in observation.escalations
+                        if instance is not None
+                        and instance.state == "firing"
+                        and instance.active_at_ms + after_ms > now_ms
+                    ),
+                    default=None,
+                )
+                if instance is not None
+                else None
+            )
+            effective_labels = dict(observation.labels)
+            if instance is not None and instance.severity:
+                effective_labels["severity"] = instance.severity
             projected.append(
                 {
                     "rule_id": observation.rule_id,
                     "name": observation.name,
-                    "severity": observation.severity,
+                    "severity": (
+                        instance.severity
+                        if instance is not None and instance.severity
+                        else observation.severity
+                    ),
                     "summary": observation.summary,
                     "state": instance.state if instance is not None else "inactive",
                     "instance_id": instance.instance_id if instance is not None else None,
@@ -205,8 +253,9 @@ class AlertLifecycle:
                         if observation.quality == "unknown"
                         and evaluation_status == "grace"
                         else None,
+                        next_escalation,
                     ),
-                    "labels": dict(observation.labels),
+                    "labels": effective_labels,
                     "annotations": dict(observation.annotations),
                     "definition_revision": observation.definition_revision,
                 }
@@ -226,6 +275,7 @@ class AlertLifecycle:
                     "for_ms": instance.for_ms,
                     "last_pulse_id": instance.last_pulse_id,
                     "duration_revision": instance.duration_revision,
+                    "severity": instance.severity,
                 }
                 for key, instance in self._active.items()
             },
@@ -262,6 +312,7 @@ class AlertLifecycle:
                         else None
                     ),
                     duration_revision=str(value.get("duration_revision", "")),
+                    severity=str(value.get("severity", "")),
                 )
         unknown_since = state.get("unknown_since")
         self._unknown_since = (
@@ -428,6 +479,11 @@ class AlertCoordinator:
         self._audit: list[dict[str, object]] = []
         self._instances: list[dict[str, object]] = []
         self._observations: dict[str, AlertObservation] = {}
+        self._notifications = NotificationRuntime()
+        self._policy_contents: str | None = None
+        self._default_timezone = "UTC"
+        self._acknowledgments: dict[str, dict[str, object]] = {}
+        self._silences: list[dict[str, object]] = []
         self.available = True
 
     async def async_load(self) -> None:
@@ -477,6 +533,19 @@ class AlertCoordinator:
                     continue
                 observation = AlertObservation(**raw_observation)
                 self._observations[observation.key] = observation
+            notifications = stored.get("notifications")
+            if isinstance(notifications, dict):
+                self._notifications.import_state(notifications)
+            self._acknowledgments = {
+                str(instance_id): dict(record)
+                for instance_id, record in stored.get("acknowledgments", {}).items()
+                if isinstance(record, dict)
+            }
+            self._silences = [
+                dict(record)
+                for record in stored.get("silences", [])
+                if isinstance(record, dict)
+            ]
         except (KeyError, TypeError, ValueError, OverflowError):
             self.available = False
             self._current_error = "corrupt_alert_store"
@@ -491,6 +560,11 @@ class AlertCoordinator:
         async with self._lock:
             if not self.available:
                 raise AlertStateUnavailableError("Alert state is unavailable")
+            self._silences = [
+                silence
+                for silence in self._silences
+                if int(silence["expires_at_ms"]) > now_ms
+            ]
             current = list(observations)
             keys = {observation.key for observation in current}
             for alert in self._alerts:
@@ -516,7 +590,33 @@ class AlertCoordinator:
                 if alert.get("instance_id") is not None
             }
             alerts, transitions = self._lifecycle.advance(current, now_ms=now_ms)
-            changed = alerts != self._alerts or bool(transitions)
+            for transition in transitions:
+                if transition.get("reason") == "severity_escalation":
+                    self._acknowledgments.pop(str(transition["instance_id"]), None)
+            active_instance_ids = {
+                str(alert["instance_id"])
+                for alert in alerts
+                if alert.get("state") == "firing" and alert.get("instance_id") is not None
+            }
+            self._acknowledgments = {
+                instance_id: record
+                for instance_id, record in self._acknowledgments.items()
+                if instance_id in active_instance_ids
+            }
+            self._apply_operational_state(alerts, now_ms)
+            notifications_before = self._notifications.export_state()
+            if self._policy_contents is not None:
+                self._notifications.reconcile(
+                    alerts,
+                    self._policy_contents,
+                    now_ms=now_ms,
+                    default_timezone=self._default_timezone,
+                )
+            changed = (
+                alerts != self._alerts
+                or bool(transitions)
+                or self._notifications.export_state() != notifications_before
+            )
             if not changed and not self._dirty:
                 return []
             if changed:
@@ -553,6 +653,9 @@ class AlertCoordinator:
                         asdict(observation)
                         for observation in self._observations.values()
                     ],
+                    "notifications": self._notifications.export_state(),
+                    "acknowledgments": self._acknowledgments,
+                    "silences": self._silences,
                 }
             assert self._desired_snapshot is not None
             try:
@@ -573,6 +676,221 @@ class AlertCoordinator:
         """Advance durable Alert deadlines without requiring fresh Rule evaluation."""
         return await self.async_observe(self._observations.values(), now_ms=now_ms)
 
+    async def async_acknowledge(
+        self,
+        instance_id: str,
+        *,
+        actor: str,
+        now_ms: int,
+        comment: str | None = None,
+    ) -> dict[str, object]:
+        async with self._lock:
+            existing = self._acknowledgments.get(instance_id)
+            if existing is not None:
+                return dict(existing)
+            alert = self._firing_instance(instance_id)
+            record: dict[str, object] = {
+                "actor": actor,
+                "at_ms": now_ms,
+                "comment": comment,
+                "severity": alert.get("severity"),
+            }
+            self._acknowledgments[instance_id] = record
+            self._audit.append(
+                {
+                    "instance_id": instance_id,
+                    "event": "acknowledged",
+                    "at_ms": now_ms,
+                    "actor": actor,
+                }
+            )
+            self._apply_operational_state(self._alerts, now_ms)
+            self._reconcile_notifications(now_ms)
+            await self._persist_operational_mutation()
+            return dict(record)
+
+    async def async_revoke_acknowledgment(
+        self, instance_id: str, *, actor: str, now_ms: int
+    ) -> bool:
+        async with self._lock:
+            if self._acknowledgments.pop(instance_id, None) is None:
+                return False
+            self._audit.append(
+                {
+                    "instance_id": instance_id,
+                    "event": "acknowledgment_revoked",
+                    "at_ms": now_ms,
+                    "actor": actor,
+                }
+            )
+            self._apply_operational_state(self._alerts, now_ms)
+            self._reconcile_notifications(now_ms)
+            await self._persist_operational_mutation()
+            return True
+
+    async def async_create_instance_silence(
+        self,
+        instance_id: str,
+        *,
+        actor: str,
+        reason: str,
+        now_ms: int,
+        duration_ms: int,
+    ) -> dict[str, object]:
+        if duration_ms <= 0 or duration_ms > 86_400_000:
+            raise ValueError("instance Silence duration must be between 1ms and 24h")
+        async with self._lock:
+            self._firing_instance(instance_id)
+            record: dict[str, object] = {
+                "silence_id": str(uuid4()),
+                "instance_id": instance_id,
+                "actor": actor,
+                "reason": reason,
+                "created_at_ms": now_ms,
+                "expires_at_ms": now_ms + duration_ms,
+            }
+            self._silences.append(record)
+            self._apply_operational_state(self._alerts, now_ms)
+            self._reconcile_notifications(now_ms)
+            await self._persist_operational_mutation()
+            return dict(record)
+
+    async def async_create_matcher_silence(
+        self,
+        matchers: list[str],
+        *,
+        match_all: bool,
+        actor: str,
+        reason: str,
+        now_ms: int,
+        duration_ms: int,
+    ) -> dict[str, object]:
+        if duration_ms <= 0 or duration_ms > 31_536_000_000:
+            raise ValueError("matcher Silence duration must be at most one year")
+        if not matchers and not match_all:
+            raise ValueError("match-all Silence requires match_all confirmation")
+        if len(matchers) > 16:
+            raise ValueError("Silence may contain at most 16 matchers")
+        match_alert_labels(matchers, {})
+        async with self._lock:
+            record: dict[str, object] = {
+                "silence_id": str(uuid4()),
+                "matchers": list(matchers),
+                "match_all": match_all,
+                "actor": actor,
+                "reason": reason,
+                "created_at_ms": now_ms,
+                "expires_at_ms": now_ms + duration_ms,
+            }
+            self._silences.append(record)
+            self._apply_operational_state(self._alerts, now_ms)
+            self._reconcile_notifications(now_ms)
+            await self._persist_operational_mutation()
+            return dict(record)
+
+    async def async_delete_silence(
+        self, silence_id: str, *, actor: str, now_ms: int
+    ) -> bool:
+        async with self._lock:
+            retained = [
+                silence
+                for silence in self._silences
+                if silence.get("silence_id") != silence_id
+            ]
+            if len(retained) == len(self._silences):
+                return False
+            self._silences = retained
+            self._audit.append(
+                {
+                    "silence_id": silence_id,
+                    "event": "silence_deleted",
+                    "at_ms": now_ms,
+                    "actor": actor,
+                }
+            )
+            self._apply_operational_state(self._alerts, now_ms)
+            self._reconcile_notifications(now_ms)
+            await self._persist_operational_mutation()
+            return True
+
+    async def async_set_policy(
+        self,
+        contents: str,
+        *,
+        now_ms: int,
+        default_timezone: str = "UTC",
+    ) -> None:
+        """Apply routing policy and durably reconcile current firing Alerts."""
+        async with self._lock:
+            self._policy_contents = contents
+            self._default_timezone = default_timezone
+            self._notifications.reconcile(
+                self._alerts,
+                contents,
+                now_ms=now_ms,
+                default_timezone=default_timezone,
+            )
+            self._generation += 1
+            self._desired_snapshot = self._current_snapshot()
+            await self._save_current_snapshot()
+
+    async def async_notification_advance(
+        self, *, now_ms: int
+    ) -> list[dict[str, Any]]:
+        """Plan due obligations and persist them before dispatch exposure."""
+        async with self._lock:
+            due = self._notifications.advance(now_ms=now_ms)
+            if not due:
+                return []
+            self._generation += 1
+            self._desired_snapshot = self._current_snapshot()
+            if not await self._save_current_snapshot():
+                return []
+            return due
+
+    async def async_begin_notification_dispatch(
+        self, obligation_id: str, *, now_ms: int
+    ) -> dict[str, Any] | None:
+        """Persist an in-flight attempt before allowing an external call."""
+        async with self._lock:
+            self._notifications.mark_in_flight(obligation_id, now_ms=now_ms)
+            self._generation += 1
+            self._desired_snapshot = self._current_snapshot()
+            if not await self._save_current_snapshot():
+                return None
+            return next(
+                (
+                    item
+                    for item in self._notifications.list_obligations()
+                    if item["obligation_id"] == obligation_id
+                ),
+                None,
+            )
+
+    async def async_accept_notification(
+        self, obligation_id: str, *, now_ms: int
+    ) -> None:
+        async with self._lock:
+            self._notifications.accept(obligation_id, now_ms=now_ms)
+            self._generation += 1
+            self._desired_snapshot = self._current_snapshot()
+            await self._save_current_snapshot()
+
+    async def async_reject_notification(
+        self,
+        obligation_id: str,
+        *,
+        now_ms: int,
+        error_class: str,
+    ) -> None:
+        async with self._lock:
+            self._notifications.reject(
+                obligation_id, now_ms=now_ms, error_class=error_class
+            )
+            self._generation += 1
+            self._desired_snapshot = self._current_snapshot()
+            await self._save_current_snapshot()
+
     def next_deadline_ms(self) -> int | None:
         """Return the earliest pending lifecycle or evidence deadline."""
         deadlines = [
@@ -580,6 +898,10 @@ class AlertCoordinator:
             for alert in self._alerts
             if alert.get("next_deadline_ms") is not None
         ]
+        notification_deadline = self._notifications.next_deadline_ms()
+        if notification_deadline is not None:
+            deadlines.append(notification_deadline)
+        deadlines.extend(int(silence["expires_at_ms"]) for silence in self._silences)
         return min(deadlines) if deadlines else None
 
     def list_alerts(self) -> list[dict[str, object]]:
@@ -593,6 +915,116 @@ class AlertCoordinator:
     def list_audit(self) -> list[dict[str, object]]:
         """Return bounded lifecycle transition audit in occurrence order."""
         return [dict(event) for event in self._audit]
+
+    def list_notifications(self) -> list[dict[str, Any]]:
+        """Return immutable Notification obligations and current statuses."""
+        return self._notifications.list_obligations()
+
+    def list_silences(self) -> list[dict[str, object]]:
+        return [dict(silence) for silence in self._silences]
+
+    def _current_snapshot(self) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "generation": self._generation,
+            "lifecycle": self._lifecycle.export_state(),
+            "alerts": self._alerts,
+            "audit": self._audit,
+            "instances": self._instances,
+            "observations": [
+                asdict(observation) for observation in self._observations.values()
+            ],
+            "notifications": self._notifications.export_state(),
+            "acknowledgments": self._acknowledgments,
+            "silences": self._silences,
+        }
+
+    async def _save_current_snapshot(self) -> bool:
+        assert self._desired_snapshot is not None
+        try:
+            await self._store.async_save(self._desired_snapshot)
+        except Exception as err:  # noqa: BLE001 - health exposes Store failure
+            self._dirty = True
+            self._current_error = str(err)
+            if self._publish is not None:
+                self._publish()
+            return False
+        self._dirty = False
+        self._current_error = None
+        if self._publish is not None:
+            self._publish()
+        return True
+
+    async def _persist_operational_mutation(self) -> None:
+        self._generation += 1
+        self._desired_snapshot = self._current_snapshot()
+        if not await self._save_current_snapshot():
+            raise AlertStateUnavailableError("Alert mutation could not be persisted")
+
+    def _firing_instance(self, instance_id: str) -> dict[str, object]:
+        alert = next(
+            (
+                item
+                for item in self._alerts
+                if item.get("instance_id") == instance_id
+                and item.get("state") == "firing"
+            ),
+            None,
+        )
+        if alert is None:
+            raise ValueError("Alert instance is not firing")
+        return alert
+
+    def _apply_operational_state(
+        self, alerts: list[dict[str, object]], now_ms: int
+    ) -> None:
+        active_silences = {
+            str(silence["instance_id"])
+            for silence in self._silences
+            if int(silence["expires_at_ms"]) > now_ms
+            and silence.get("instance_id") is not None
+        }
+        for alert in alerts:
+            instance_id = alert.get("instance_id")
+            matcher_silenced = any(
+                int(silence["expires_at_ms"]) > now_ms
+                and silence.get("instance_id") is None
+                and (
+                    silence.get("match_all") is True
+                    or match_alert_labels(
+                        list(silence.get("matchers", [])),
+                        dict(alert.get("labels", {})),
+                    )
+                )
+                for silence in self._silences
+            )
+            alert["acknowledgment"] = (
+                dict(self._acknowledgments[str(instance_id)])
+                if instance_id is not None
+                and str(instance_id) in self._acknowledgments
+                else None
+            )
+            alert["suppression"] = (
+                ["silence"]
+                if (
+                    instance_id is not None and str(instance_id) in active_silences
+                )
+                or matcher_silenced
+                else []
+            )
+            alert["notification_suppressed"] = (
+                alert["acknowledgment"] is not None or bool(alert["suppression"])
+            )
+
+    def _reconcile_notifications(self, now_ms: int) -> None:
+        if self._policy_contents is None:
+            return
+        self._notifications.reconcile(
+            self._alerts,
+            self._policy_contents,
+            now_ms=now_ms,
+            default_timezone=self._default_timezone,
+        )
 
     def health(self) -> dict[str, object]:
         """Return Alert persistence health."""

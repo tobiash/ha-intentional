@@ -21,6 +21,7 @@ const EMPTY_RULE = () => ({
   holdFor: "",
   intents: [{ target: "", fields: [{ name: "state", operator: "value", value: "on" }], transitionAssert: "", transitionChange: "", transitionWithdraw: "", ttl: "", linger: "", easing: "linear" }],
   effects: [],
+  alert: null,
 });
 
 class IntentionalPanel extends HTMLElement {
@@ -60,6 +61,11 @@ class IntentionalPanel extends HTMLElement {
     this._alerts = [];
     this._alertsError = "";
     this._alertsBusy = false;
+    this._selectedAlertId = "";
+    this._alertDetail = null;
+    this._alertDetailError = "";
+    this._alertComment = "";
+    this._silenceReason = "";
     this._policyDocument = null;
     this._policyContents = "";
     this._policyStage = "Draft";
@@ -69,6 +75,7 @@ class IntentionalPanel extends HTMLElement {
     this._policyPreview = null;
     this._policyError = "";
     this._policyBusy = false;
+    this._policyConfirmation = null;
     this._policyLoaded = false;
     this._policySyntheticText = '[\n  {"alertname":"FreezerTemperatureHigh","severity":"critical","rule_id":"example-rule"}\n]';
     this._beforeUnload = (event) => { if (this._dirty) { event.preventDefault(); event.returnValue = ""; } };
@@ -118,7 +125,10 @@ class IntentionalPanel extends HTMLElement {
     });
     const body = await response.json();
     if (!response.ok) {
-      throw new Error(body.error || body.message || (body.errors || []).join("; ") || response.statusText);
+      const error = new Error(body.message || (body.errors || []).join("; ") || body.error || response.statusText);
+      error.body = body;
+      error.status = response.status;
+      throw error;
     }
     return body;
   }
@@ -173,6 +183,50 @@ class IntentionalPanel extends HTMLElement {
     }
   }
 
+  async _loadAlertDetail(instanceId) {
+    if (!instanceId) return;
+    this._selectedAlertId = instanceId;
+    this._alertDetail = null;
+    this._alertDetailError = "";
+    this._alertsBusy = true;
+    this._render();
+    try {
+      this._alertDetail = await this._api("GET", `alerts/${encodeURIComponent(instanceId)}`);
+    } catch (err) {
+      this._alertDetailError = err.message || String(err);
+    } finally {
+      this._alertsBusy = false;
+      this._render();
+    }
+  }
+
+  async _mutateAlert(action) {
+    const instanceId = this._selectedAlertId;
+    if (!instanceId || this._alertsBusy) return;
+    this._alertsBusy = true;
+    this._alertDetailError = "";
+    this._render();
+    try {
+      const path = `alerts/${encodeURIComponent(instanceId)}`;
+      if (action === "acknowledge-alert") await this._api("POST", `${path}/acknowledge`, { comment: this._alertComment.trim() || null });
+      if (action === "revoke-acknowledgment") await this._api("DELETE", `${path}/acknowledgment`);
+      if (action === "silence-alert") {
+        const reason = this._silenceReason.trim();
+        if (!reason) throw new Error("A reason is required for the one-hour Silence.");
+        await this._api("POST", `${path}/silence`, { reason, duration_ms: 3_600_000 });
+      }
+      this._alertComment = "";
+      this._silenceReason = "";
+      await this._loadAlerts();
+      await this._loadAlertDetail(instanceId);
+    } catch (err) {
+      this._alertDetailError = err.message || String(err);
+    } finally {
+      this._alertsBusy = false;
+      this._render();
+    }
+  }
+
   async _loadPolicy() {
     if (this._policyBusy) return;
     this._policyBusy = true;
@@ -187,6 +241,7 @@ class IntentionalPanel extends HTMLElement {
       this._policyReviewedFingerprint = "";
       this._policyCheck = null;
       this._policyPreview = null;
+      this._policyConfirmation = null;
       this._policyLoaded = true;
     } catch (err) {
       this._policyError = err.message || String(err);
@@ -248,7 +303,7 @@ class IntentionalPanel extends HTMLElement {
     }
   }
 
-  async _publishPolicy() {
+  async _publishPolicy(confirmSpike = false) {
     const contents = this._policyContents;
     const fingerprint = candidateFingerprint(contents);
     if (this._policyStage !== "Reviewed" || this._policyReviewedFingerprint !== fingerprint) return;
@@ -259,14 +314,20 @@ class IntentionalPanel extends HTMLElement {
       const saved = await this._api("PUT", "alerting/policy", {
         contents,
         expected_generation: this._policyDocument?.generation,
+        ...(confirmSpike ? { confirm_spike: true } : {}),
       });
       if (candidateFingerprint(this._policyContents) !== fingerprint) return;
       this._policyDocument = { ...this._policyDocument, ...saved, contents };
       this._policyStage = "Published";
       this._policyCheckedFingerprint = "";
       this._policyReviewedFingerprint = "";
+      this._policyConfirmation = null;
     } catch (err) {
-      this._policyError = err.message || String(err);
+      const body = err.body || err.response || err;
+      if (body?.error === "confirmation_required") {
+        this._policyConfirmation = body.preview || {};
+        this._policyError = "";
+      } else this._policyError = err.message || String(err);
     } finally {
       this._policyBusy = false;
       this._render();
@@ -582,7 +643,15 @@ class IntentionalPanel extends HTMLElement {
     if (!/^[a-zA-Z0-9_.:-]+$/.test(form.id.trim())) errors.push("Rule ID may only contain letters, numbers, dot, underscore, colon, and dash.");
     if (this._selectedRuleId === "__new__" && this._uniqueRules().some((rule) => rule.id === form.id.trim())) errors.push("Rule ID already exists.");
     if (!form.conditions.some((condition) => condition.entity.trim())) errors.push("Add at least one When condition.");
-    if (!form.intents.some((intent) => intent.target.trim()) && !form.effects.some((effect) => effect.service.trim())) errors.push("Add at least one target intent or effect.");
+    if (!form.intents.some((intent) => intent.target.trim()) && !form.effects.some((effect) => effect.service.trim()) && !form.alert) errors.push("Add at least one target intent, Alert, or effect.");
+    if (form.alert) {
+      if (!form.alert.name.trim()) errors.push("Alert name is required.");
+      if (!form.alert.summary.trim()) errors.push("Alert summary is required.");
+      if (form.alert.mode === "pulse" && !form.alert.resolveAfter.trim()) errors.push("Pulse Alerts require Resolve after.");
+      if (form.alert.mode === "state" && form.alert.resolveAfter.trim()) errors.push("State Alerts cannot use Resolve after.");
+      if (parseAlertLabels(form.alert.labels) === null) errors.push("Alert labels must be comma-separated key=value pairs.");
+      for (const step of form.alert.escalations) if (!step.after.trim()) errors.push("Each Alert escalation requires an After duration.");
+    }
     for (const intent of form.intents.filter((item) => item.target.trim())) {
       if (!intent.fields.some((field) => field.name.trim())) errors.push(`Target ${intent.target} has no desired state fields.`);
     }
@@ -663,11 +732,12 @@ class IntentionalPanel extends HTMLElement {
   }
 
   _renderAlertWorkspace() {
+    if (this._selectedAlertId) return this._renderAlertDetail();
     if (this._alertsError) return `<section class="workspace"><div class="ledger-head alert-head"><span class="eyebrow">Alert Ledger</span><h2>Alert state unavailable</h2><p>This workspace could not load. Rules and policy remain available.</p></div><div class="error-box" role="alert">${escapeHtml(this._alertsError)}</div><button class="secondary" data-action="reload-alerts">Retry Alerts</button></section>`;
     const alerts = sortAlerts(this._alerts);
     const firing = alerts.filter((alert) => alert.state === "firing").length;
     return `<section class="workspace">
-      <div class="ledger-head alert-head"><span class="eyebrow">Alert Ledger</span><h2>${firing ? `${firing} firing` : "No Alerts firing"}</h2><p>Read-only durable Alert state reported by the current integration.</p></div>
+      <div class="ledger-head alert-head"><span class="eyebrow">Alert Ledger</span><h2>${firing ? `${firing} firing` : "No Alerts firing"}</h2><p>Durable Alert state reported by the current integration.</p></div>
       ${this._alertsBusy ? `<div role="status" class="muted">Loading Alerts...</div>` : ""}
       ${alerts.length ? `<div class="alert-ledger">${alerts.map((alert) => this._renderAlertRow(alert)).join("")}</div>` : `<div class="empty card">No Alert definitions are currently reported.</div>`}
     </section>`;
@@ -685,6 +755,31 @@ class IntentionalPanel extends HTMLElement {
       <div class="alert-row-head"><div><span class="eyebrow">${escapeHtml(severity)}</span><h2>${escapeHtml(alert.summary || alert.name || "Unnamed Alert")}</h2></div><div class="alert-badges"><span class="state-badge">${escapeHtml(state)}</span>${stale ? `<span class="stale-badge">Stale evaluation</span>` : ""}</div></div>
       <p>${escapeHtml(alert.name || "Unnamed Alert")}</p>
       <div class="alert-meta">${rule}<span>Evaluation: ${escapeHtml(alert.evaluation_status || "unknown")}</span><span>Instance: ${escapeHtml(alert.instance_id || "none")}</span></div>
+      ${alert.instance_id ? `<div class="detail-actions"><button class="secondary" data-action="open-alert-detail" data-instance-id="${escapeHtml(alert.instance_id)}">View Alert instance</button></div>` : ""}
+    </article>`;
+  }
+
+  _renderAlertDetail() {
+    if (this._alertDetailError) return `<section class="workspace"><div class="sticky-top visible"><button class="secondary back" data-action="back-alerts">Back to Alerts</button></div><div class="error-box" role="alert">${escapeHtml(this._alertDetailError)}</div><button class="secondary" data-action="reload-alert-detail">Retry detail</button></section>`;
+    if (!this._alertDetail) return `<section class="workspace"><div class="sticky-top visible"><button class="secondary back" data-action="back-alerts">Back to Alerts</button></div><div role="status" class="card">Loading Alert instance...</div></section>`;
+    const instance = this._alertDetail.instance || {};
+    const firing = instance.state === "firing";
+    const acknowledgment = instance.acknowledgment;
+    const suppression = Array.isArray(instance.suppression) ? instance.suppression : [];
+    const labels = Object.entries(instance.labels || {}).map(([key, value]) => `<span><strong>${escapeHtml(key)}</strong>=${escapeHtml(value)}</span>`).join("");
+    const audit = (this._alertDetail.audit || []).map((event) => `<li><strong>${escapeHtml(event.event || `${event.from || "inactive"} to ${event.to || "unknown"}`)}</strong><span>${escapeHtml(formatMsTimestamp(event.at_ms))}${event.reason ? ` · ${escapeHtml(event.reason)}` : ""}${event.actor ? ` · ${escapeHtml(event.actor)}` : ""}</span></li>`).join("");
+    const delivery = instance.notification_suppressed === true
+      ? `Notifications currently suppressed${suppression.length ? ` by ${suppression.join(", ")}` : acknowledgment ? " by acknowledgment" : ""}.`
+      : firing ? "Eligible for policy routing. Delivery and destinations are not exposed by this endpoint." : "Not eligible for ordinary delivery in the current lifecycle state.";
+    return `<article class="workspace alert-detail">
+      <div class="sticky-top visible"><button class="secondary back" data-action="back-alerts">Back to Alerts</button><span>${escapeHtml(instance.name || "Alert instance")}</span></div>
+      <section class="card"><div class="alert-row-head"><div><span class="eyebrow">${escapeHtml(instance.severity || "info")}</span><h2>${escapeHtml(instance.summary || instance.name || "Alert instance")}</h2></div><span class="state-badge">${escapeHtml(instance.state || "unknown")}</span></div><p>${escapeHtml(instance.name || "Unnamed Alert")} · Rule ${escapeHtml(instance.rule_id || "unknown")}</p></section>
+      <section class="card detail-grid"><div><h3>Lifecycle</h3>${renderDetailValues([["Active", instance.active_at_ms], ["Firing", instance.firing_at_ms], ["Resolved", instance.resolved_at_ms], ["Observed", instance.observed_at_ms], ["Next deadline", instance.next_deadline_ms]], formatMsTimestamp)}${instance.reason ? `<p><strong>Reason:</strong> ${escapeHtml(instance.reason)}</p>` : ""}</div><div><h3>Evidence</h3><p><strong>${escapeHtml(instance.evaluation_status || "unavailable")}</strong></p><p>${instance.evaluation_status === "stale" ? "Evidence is stale; lifecycle state is retained until a successful observation." : instance.evaluation_status === "grace" ? "Evidence is temporarily unknown within its grace period." : instance.evaluation_status === "current" ? "Latest evidence is current." : "Evidence status is not available for this retained instance."}</p></div></section>
+      <section class="card"><h3>Labels</h3><div class="policy-labels">${labels || `<span class="muted">No labels available.</span>`}</div></section>
+      <section class="card"><h3>Acknowledgment and suppression</h3>${acknowledgment ? `<p>Acknowledged by <strong>${escapeHtml(acknowledgment.actor || "unknown")}</strong> at ${escapeHtml(formatMsTimestamp(acknowledgment.at_ms))}${acknowledgment.comment ? `: ${escapeHtml(acknowledgment.comment)}` : ""}</p>` : `<p>Not acknowledged.</p>`}<p>Suppression: ${escapeHtml(suppression.join(", ") || "none")}</p></section>
+      <section class="card"><h3>Available delivery information</h3><p>${escapeHtml(delivery)}</p><p class="muted">This view does not expose Receiver destinations, payloads, or proof of delivery.</p></section>
+      <section class="card"><h3>Audit</h3>${audit ? `<ol class="audit-list">${audit}</ol>` : `<p class="muted">No audit events retained for this instance.</p>`}</section>
+      ${firing ? `<section class="card form-card"><h3>Controls</h3>${acknowledgment ? `<button class="secondary" data-action="revoke-acknowledgment" ${this._alertsBusy ? "disabled" : ""}>Revoke acknowledgment</button>` : `<label class="field"><span>Acknowledgment comment (optional)</span><input data-alert-comment data-focus-key="alert-comment" value="${escapeHtml(this._alertComment)}"></label><button data-action="acknowledge-alert" ${this._alertsBusy ? "disabled" : ""}>Acknowledge</button>`}<label class="field"><span>One-hour Silence reason</span><input data-silence-reason data-focus-key="silence-reason" value="${escapeHtml(this._silenceReason)}" required></label><button class="secondary" data-action="silence-alert" ${this._alertsBusy ? "disabled" : ""}>Silence notifications for 1 hour</button></section>` : ""}
     </article>`;
   }
 
@@ -697,6 +792,7 @@ class IntentionalPanel extends HTMLElement {
     return `<section class="workspace policy-workspace">
       <div class="ledger-head policy-head"><span class="eyebrow">Administrator workspace</span><h2>Alerting Policy YAML</h2><p>Edit routing policy, check it without sample traffic, then review an explicitly synthetic preview before publishing.</p></div>
       ${this._policyError ? `<div class="error-box" role="alert">${escapeHtml(this._policyError)}</div>` : ""}
+      ${this._policyConfirmation ? `<div class="warning-box" role="alert"><strong>Confirm delivery fanout increase</strong><p>The server projected ${escapeHtml(this._policyConfirmation.fanout ?? "a larger")} Receiver destination${this._policyConfirmation.fanout === 1 ? "" : "s"}. Publish only if this spike is intentional.</p><button data-action="policy-confirm-spike" ${this._policyBusy ? "disabled" : ""}>Confirm spike and publish</button></div>` : ""}
       ${!this._policyLoaded ? `<section class="card"><div role="status">${this._policyBusy ? "Loading Alerting Policy..." : "Alerting Policy unavailable."}</div>${this._policyError ? `<button class="secondary" data-action="reload-policy">Retry policy</button>` : ""}</section>` : `
         <section class="two-pane policy-layout">
           <div class="card editor-stack"><div class="card-header"><div><h2>Policy document</h2><p>Generation ${escapeHtml(generation)}</p></div><span class="stage-badge">${escapeHtml(this._policyStage)}</span></div><textarea class="yaml-editor policy-yaml" data-policy-yaml data-focus-key="policy-yaml" spellcheck="false">${escapeHtml(this._policyContents)}</textarea></div>
@@ -706,14 +802,14 @@ class IntentionalPanel extends HTMLElement {
             <section class="card policy-preview"><span class="eyebrow">Synthetic preview</span><h2>Routing result</h2>${renderPolicyPreview(this._policyPreview)}</section>
           </div>
         </section>
-        <nav class="publish-bar" aria-label="Alerting Policy draft workflow"><span>${escapeHtml(this._policyStage)}</span><button class="secondary" data-action="policy-check" ${this._policyBusy ? "disabled" : ""}>Check</button><button class="secondary" data-action="policy-review" ${this._policyBusy || !checked ? "disabled" : ""}>Review synthetic preview</button><button data-action="policy-publish" ${this._policyBusy || !reviewed ? "disabled" : ""}>Publish</button></nav>`}
+        <nav class="publish-bar" aria-label="Alerting Policy draft workflow"><span>${escapeHtml(this._policyStage)}</span><button class="secondary" data-action="policy-check" ${this._policyBusy ? "disabled" : ""}>Check</button><button class="secondary" data-action="policy-review" ${this._policyBusy || !checked ? "disabled" : ""}>Review synthetic preview</button><button data-action="policy-publish" ${this._policyBusy || !reviewed || this._policyConfirmation ? "disabled" : ""}>Publish</button></nav>`}
     </section>`;
   }
 
   _renderRuleDetail() {
     const rule = this._ledgerRules().find((item) => item.id === this._selectedRuleId);
     if (!rule) return this._renderOverview();
-    const targets = rule.targets.map((target) => `<div class="target-line"><div><strong>${escapeHtml(target.title)}</strong><small>${escapeHtml(target.id)}</small></div><div><span>Desired: ${escapeHtml(formatValue(target.desired))}</span><span class="${target.aligned ? "aligned" : "attention"}">${target.aligned ? "Aligned" : `Actual: ${escapeHtml(formatValue(target.actual))}`}</span></div></div>`).join("") || `<div class="empty">No durable targets. This Rule may only produce Effects.</div>`;
+    const targets = rule.targets.map((target) => `<div class="target-line"><div><strong>${escapeHtml(target.title)}</strong><small>${escapeHtml(target.id)}</small></div><div><span>Desired: ${escapeHtml(formatValue(target.desired))}</span><span class="${target.aligned ? "aligned" : "attention"}">${target.aligned ? "Aligned" : `Actual: ${escapeHtml(formatValue(target.actual))}`}</span></div></div>`).join("") || `<div class="empty">No durable Targets. This Rule may only produce Alerts or Effects.</div>`;
     const competing = rule.competing.length ? `<section><h3>Competing Intentions</h3>${rule.competing.map((item) => `<p>${escapeHtml(item.rule_id || item.id || "Another intention")}</p>`).join("")}</section>` : "";
     return `<article class="detail card"><div class="sticky-top"><button class="secondary back" data-action="back">Back</button><span>${escapeHtml(rule.title)}</span></div>
       <span class="eyebrow">${escapeHtml(rule.phaseText)}</span><h2>${escapeHtml(rule.title)}</h2><p class="summary">${escapeHtml(describeRule(rule))}</p>
@@ -761,6 +857,10 @@ class IntentionalPanel extends HTMLElement {
           <details class="advanced"><summary>Organisation</summary><div class="form-grid">${inputField("Labels", "labels", form.labels, "living-room, lighting", "Comma-separated")}${inputField("Group", "group", form.group, "living-room-lighting")}${inputField("Profile", "profile", form.profile, "settled")}</div></details>
         </section>
         <section class="card form-card">
+          <div class="section-title"><div><h3>Alert</h3><p>Assert a durable situation independently of Targets and Effects.</p></div>${form.alert ? `<button class="secondary" data-action="remove-alert">Remove Alert</button>` : `<button class="secondary" data-action="add-alert">Add Alert</button>`}</div>
+          ${form.alert ? this._renderAlertForm(form.alert) : `<div class="empty inline-empty">No Alert configured.</div>`}
+        </section>
+        <section class="card form-card">
            <div class="section-title"><div><h3>When</h3><p>Conditions that make the intent active.</p></div>${selectInline("Condition matching", "conditionMode", form.conditionMode, [["all", "All conditions"], ["any", "Any condition"], ["none", "None match"], ["not", "Not first condition"]])}</div>
           <div class="rows">${form.conditions.map((condition, index) => this._renderCondition(condition, index, "condition")).join("")}</div>
           <button class="secondary" data-action="add-condition">Add Condition</button>
@@ -781,6 +881,14 @@ class IntentionalPanel extends HTMLElement {
          <details class="card form-card advanced"><summary>Resolution</summary><div class="form-grid">${selectField("Authority", "authority", form.authority, [["sensor", "Sensor"], ["automation", "Automation"], ["user", "User"]])}${inputField("Confidence", "confidence", form.confidence, "0.8")}</div></details>
       </section>
     `;
+  }
+
+  _renderAlertForm(alert) {
+    return `<div class="subcard" data-alert-form>
+      <div class="form-grid">${inputField("Name", "alertName", alert.name, "FreezerTemperatureHigh")}${selectField("Severity", "alertSeverity", alert.severity, [["info", "Info"], ["warning", "Warning"], ["critical", "Critical"]])}${inputField("Summary", "alertSummary", alert.summary, "Freezer is too warm")}${selectField("Observation", "alertMode", alert.mode, [["state", "State: resolve when condition stops"], ["pulse", "Pulse: resolve after duration"]])}${alert.mode === "pulse" ? inputField("Resolve after", "alertResolveAfter", alert.resolveAfter, "5m", "Required for pulse Alerts") : inputField("Pending for", "alertFor", alert.for, "5m", "Optional time before firing")}${inputField("Stale after", "alertStaleAfter", alert.staleAfter, "2m")}${inputField("Labels", "alertLabels", alert.labels, "area=kitchen, category=appliance", "Comma-separated key=value pairs")}</div>
+      <div class="section-title"><h3>Escalations</h3><button class="secondary small" data-action="add-alert-escalation">Add escalation</button></div>
+      <div class="rows">${alert.escalations.map((step, index) => `<div class="row alert-escalation" data-alert-escalation-index="${index}"><label><span>After</span><input data-alert-escalation-field="after" data-focus-key="alert-escalation-${index}-after" value="${escapeHtml(step.after)}" placeholder="30m"></label><label><span>Severity</span><select data-alert-escalation-field="severity" data-focus-key="alert-escalation-${index}-severity">${[["warning", "Warning"], ["critical", "Critical"]].map(([value, label]) => `<option value="${value}" ${step.severity === value ? "selected" : ""}>${label}</option>`).join("")}</select></label><button class="icon secondary" data-action="remove-alert-escalation" data-index="${index}" aria-label="Remove Alert escalation">×</button></div>`).join("")}</div>
+    </div>`;
   }
 
   _renderCondition(condition, index, prefix) {
@@ -964,6 +1072,7 @@ class IntentionalPanel extends HTMLElement {
       this._policyReviewedFingerprint = "";
       this._policyCheck = null;
       this._policyPreview = null;
+      this._policyConfirmation = null;
       this._render();
     });
     this.shadowRoot.querySelector("[data-policy-alerts]")?.addEventListener("input", (event) => {
@@ -975,6 +1084,8 @@ class IntentionalPanel extends HTMLElement {
     });
     this.shadowRoot.querySelector("[data-form-root]")?.addEventListener("input", (event) => this._onFormInput(event));
     this.shadowRoot.querySelector("[data-form-root]")?.addEventListener("change", (event) => this._onFormInput(event));
+    this.shadowRoot.querySelector("[data-alert-comment]")?.addEventListener("input", (event) => { this._alertComment = event.target.value; });
+    this.shadowRoot.querySelector("[data-silence-reason]")?.addEventListener("input", (event) => { this._silenceReason = event.target.value; });
     this.shadowRoot.querySelectorAll("[data-action]").forEach((button) => button.addEventListener("click", () => this._handleAction(button)));
     this.shadowRoot.querySelectorAll("[data-rule-id]").forEach((button) => button.addEventListener("click", () => this._selectRule(button.dataset.ruleId)));
     this.shadowRoot.querySelectorAll("[data-rollback]").forEach((button) => button.addEventListener("click", () => this._reviewRollback(button.dataset.rollback)));
@@ -986,7 +1097,7 @@ class IntentionalPanel extends HTMLElement {
     if (!form) return;
     const target = event.target;
     this._formEdited = true;
-    if (target.dataset.field) {
+    if (target.dataset.field && !target.dataset.field.startsWith("alert")) {
       form[target.dataset.field] = target.dataset.field === "enabled" ? target.value === "true" : target.value;
     }
     const conditionIndex = nearestIndex(target, "conditionIndex");
@@ -1002,6 +1113,10 @@ class IntentionalPanel extends HTMLElement {
     if (target.dataset.intentFieldRow && intentIndex >= 0 && fieldIndex >= 0) form.intents[intentIndex].fields[fieldIndex][target.dataset.intentFieldRow] = target.value;
     const effectIndex = nearestIndex(target, "effectIndex");
     if (target.dataset.effectField && effectIndex >= 0) form.effects[effectIndex][target.dataset.effectField] = target.value;
+    const alertFields = { alertName: "name", alertSeverity: "severity", alertSummary: "summary", alertMode: "mode", alertFor: "for", alertResolveAfter: "resolveAfter", alertStaleAfter: "staleAfter", alertLabels: "labels" };
+    if (form.alert && target.dataset.field && alertFields[target.dataset.field]) form.alert[alertFields[target.dataset.field]] = target.value;
+    const escalationIndex = nearestIndex(target, "alertEscalationIndex");
+    if (form.alert && target.dataset.alertEscalationField && escalationIndex >= 0) form.alert.escalations[escalationIndex][target.dataset.alertEscalationField] = target.value;
     this._markDirty();
   }
 
@@ -1030,12 +1145,17 @@ class IntentionalPanel extends HTMLElement {
       this._selectRule(button.dataset.ruleId);
       return;
     }
+    if (action === "open-alert-detail") this._loadAlertDetail(button.dataset.instanceId);
+    if (action === "back-alerts") { this._selectedAlertId = ""; this._alertDetail = null; this._alertDetailError = ""; this._render(); }
+    if (action === "reload-alert-detail") this._loadAlertDetail(this._selectedAlertId);
+    if (["acknowledge-alert", "revoke-acknowledgment", "silence-alert"].includes(action)) this._mutateAlert(action);
     if (action === "reload" && (!this._dirty || confirm("Discard unsaved editor changes and reload?"))) this._load();
     if (action === "reload-alerts") this._loadAlerts();
     if (action === "reload-policy") this._loadPolicy();
     if (action === "policy-check") this._checkPolicy();
     if (action === "policy-review") this._reviewPolicy();
     if (action === "policy-publish") this._publishPolicy();
+    if (action === "policy-confirm-spike") this._publishPolicy(true);
     if (action === "save") this._save();
     if (action === "validate") this._validate();
     if (action === "review") this._review();
@@ -1059,6 +1179,10 @@ class IntentionalPanel extends HTMLElement {
     if (action === "remove-intent-field") this._mutateForm((form) => form.intents[Number(button.dataset.intentIndex)].fields.splice(Number(button.dataset.fieldIndex), 1));
     if (action === "add-effect") this._mutateForm((form) => form.effects.push({ service: "", target: "", data: "" }));
     if (action === "remove-effect") this._mutateForm((form) => form.effects.splice(Number(button.dataset.index), 1));
+    if (action === "add-alert") this._mutateForm((form) => { form.alert = emptyAlertForm(); });
+    if (action === "remove-alert") this._mutateForm((form) => { form.alert = null; });
+    if (action === "add-alert-escalation") this._mutateForm((form) => form.alert?.escalations.push({ after: "", severity: "warning" }));
+    if (action === "remove-alert-escalation") this._mutateForm((form) => form.alert?.escalations.splice(Number(button.dataset.index), 1));
   }
 
   _mutateForm(mutator) {
@@ -1072,7 +1196,7 @@ class IntentionalPanel extends HTMLElement {
 
 function parseRuleForm(block, apiRule) {
   const form = EMPTY_RULE();
-  form.id = extractScalar(block, "id") || apiRule?.id || "";
+  form.id = stripQuotes(String(block || "").match(/^\s*-\s+id:\s*(.+?)\s*$/m)?.[1] || "") || apiRule?.id || "";
   const enabled = extractScalar(block, "enabled");
   form.enabled = enabled === "" ? apiRule?.enabled !== false : !["false", "False", "off", "0"].includes(enabled);
   form.reason = extractScalar(block, "reason") || "";
@@ -1095,6 +1219,7 @@ function parseRuleForm(block, apiRule) {
   form.intents = parseIntentSection(sectionLines(block, "intent"), apiRule);
   if (!form.intents.length) form.intents = [{ target: apiRule?.target || "", fields: objectToFields(apiRule?.set || {}), transitionAssert: "", transitionChange: "", transitionWithdraw: "", ttl: "", linger: "", easing: "linear" }];
   form.effects = parseEffects(block, apiRule);
+  form.alert = parseAlertSection(sectionLines(block, "alert"));
   return form;
 }
 
@@ -1127,9 +1252,76 @@ function stringifyRule(form) {
   writeConditions(lines, "while", form.conditionMode, form.conditions, 2);
   if (form.after.trim()) lines.push(`  after: ${yamlScalar(form.after.trim())}`);
   writeHold(lines, form);
+  writeAlert(lines, form.alert);
   writeIntents(lines, form.intents);
   writeEffects(lines, form.effects);
   return `${lines.join("\n")}\n`;
+}
+
+function emptyAlertForm() {
+  return { name: "", severity: "warning", summary: "", mode: "state", for: "", resolveAfter: "", staleAfter: "2m", labels: "", escalations: [] };
+}
+
+function parseAlertSection(lines) {
+  if (!lines.length) return null;
+  const alert = emptyAlertForm();
+  const text = lines.join("\n");
+  const scalar = (key) => stripQuotes(text.match(new RegExp(`^\\s{4}${key}:\\s*(.+?)\\s*$`, "m"))?.[1] || "");
+  alert.name = scalar("name");
+  alert.severity = scalar("severity") || "warning";
+  alert.for = scalar("for");
+  alert.resolveAfter = scalar("resolve_after");
+  alert.staleAfter = scalar("stale_after") || "2m";
+  alert.mode = alert.resolveAfter ? "pulse" : "state";
+  alert.summary = stripQuotes(text.match(/^\s{6}summary:\s*(.+?)\s*$/m)?.[1] || "");
+  const labels = text.match(/^\s{4}labels:\s*\{([^\n]*)\}\s*$/m)?.[1] || "";
+  alert.labels = splitFlowItems(labels).map((item) => {
+    const separator = item.indexOf(":");
+    return separator < 0 ? item : `${stripQuotes(item.slice(0, separator))}=${stripQuotes(item.slice(separator + 1))}`;
+  }).filter(Boolean).join(", ");
+  alert.escalations = [...text.matchAll(/^\s{6}-\s*\{\s*after:\s*([^,}]+),\s*severity:\s*([^,}]+)\s*\}\s*$/gm)].map((match) => ({ after: stripQuotes(match[1]), severity: stripQuotes(match[2]) }));
+  return alert;
+}
+
+function writeAlert(lines, alert) {
+  if (!alert) return;
+  lines.push("  alert:", `    name: ${yamlScalar(alert.name)}`, `    severity: ${yamlScalar(alert.severity)}`, "    annotations:", `      summary: ${yamlScalar(alert.summary)}`);
+  if (alert.mode === "pulse" && alert.resolveAfter.trim()) lines.push(`    resolve_after: ${yamlScalar(alert.resolveAfter.trim())}`);
+  if (alert.mode !== "pulse" && alert.for.trim()) lines.push(`    for: ${yamlScalar(alert.for.trim())}`);
+  if (alert.staleAfter.trim() && alert.staleAfter.trim() !== "2m") lines.push(`    stale_after: ${yamlScalar(alert.staleAfter.trim())}`);
+  const labels = parseAlertLabels(alert.labels);
+  if (labels && labels.length) lines.push(`    labels: {${labels.map(([key, value]) => `${yamlScalar(key)}: ${yamlScalar(value)}`).join(", ")}}`);
+  const escalations = alert.escalations.filter((step) => step.after.trim());
+  if (escalations.length) {
+    lines.push("    escalations:");
+    for (const step of escalations) lines.push(`      - {after: ${yamlScalar(step.after.trim())}, severity: ${yamlScalar(step.severity)}}`);
+  }
+}
+
+function parseAlertLabels(value) {
+  if (!String(value || "").trim()) return [];
+  const labels = [];
+  for (const item of String(value).split(",")) {
+    const separator = item.indexOf("=");
+    const key = item.slice(0, separator).trim();
+    const labelValue = item.slice(separator + 1).trim();
+    if (separator < 1 || !key || !labelValue || !/^[A-Za-z_][\w.-]*$/.test(key)) return null;
+    labels.push([key, labelValue]);
+  }
+  return labels;
+}
+
+function splitFlowItems(value) {
+  const items = [];
+  let quote = "";
+  let current = "";
+  for (const character of String(value || "")) {
+    if (!quote && (character === "'" || character === '"')) quote = character;
+    else if (character === quote) quote = "";
+    if (character === "," && !quote) { items.push(current.trim()); current = ""; } else current += character;
+  }
+  if (current.trim()) items.push(current.trim());
+  return items;
 }
 
 function writeConditions(lines, key, mode, conditions, indent) {
@@ -1280,7 +1472,7 @@ function parseEffects(_block, apiRule) {
 }
 
 function visualModeError(block) {
-  const supportedTopLevel = new Set(["id", "enabled", "reason", "labels", "group", "profile", "notes", "authority", "confidence", "while", "observe", "after", "hold", "intent", "effect"]);
+  const supportedTopLevel = new Set(["id", "enabled", "reason", "labels", "group", "profile", "notes", "authority", "confidence", "while", "observe", "after", "hold", "intent", "effect", "alert"]);
   for (const line of String(block || "").split("\n")) {
     const key = line.match(/^  ([\w.-]+):/);
     if (key && !supportedTopLevel.has(key[1])) return `Visual mode cannot safely edit the unsupported '${key[1]}' field.`;
@@ -1289,15 +1481,41 @@ function visualModeError(block) {
   if (/^\s+time_window:\s*(?:\{|$)/m.test(block) || /^\s+-?\s*window:\s*\S+/m.test(block)) return "Visual mode is unavailable to prevent data loss: named time windows are not represented by the visual editor. Edit this rule as YAML.";
   if (/^\s{4}power:\s*(?:\{|$)/m.test(block)) return "Visual mode is unavailable to prevent data loss: semantic power observations are not represented by the visual editor. Edit this rule as YAML.";
   if (/^  labels:\s*(?:#.*)?$/m.test(block)) return "Visual mode is unavailable to prevent data loss: block-style 'labels' are not represented by the visual editor. Edit this rule as YAML.";
+  if (/^  alert:[ \t]*\S+/m.test(block)) return "Visual mode is unavailable to prevent data loss: inline Alert mappings are not represented by the visual editor. Edit this rule as YAML.";
   if (inlineLabelsContainQuotedComma(block)) return "Visual mode is unavailable to prevent data loss: inline 'labels' containing commas cannot be represented by the comma-separated visual editor. Edit this rule as YAML.";
   const blockScalar = String(block || "").match(/^  ([\w.-]+):\s*[>|](?:[1-9]?[-+]?|[-+]?[1-9]?)?\s*(?:#.*)?$/m);
   if (blockScalar) return `Visual mode is unavailable to prevent data loss: block scalar '${blockScalar[1]}' metadata is not represented by the visual editor. Edit this rule as YAML.`;
   if (/[&*][A-Za-z0-9_-]+|(^|\s)<<:\s/m.test(block)) return "Visual mode cannot safely edit YAML anchors, aliases, or merge keys.";
-  if (/^\s{4}for:\s/m.test(block) || /^\s{6}-?\s*(all|any|none|not):\s*$/m.test(block)) return "Visual mode cannot safely edit nested or duration-qualified conditions.";
+  const observationLines = [...sectionLines(block, "while"), ...sectionLines(block, "observe")];
+  if (observationLines.some((line) => /^\s{4}for:\s/.test(line)) || observationLines.some((line) => /^\s{6}-?\s*(all|any|none|not):\s*$/.test(line))) return "Visual mode cannot safely edit nested or duration-qualified conditions.";
   if (hasDynamicHoldMapping(sectionLines(block, "hold"))) return "Visual mode is unavailable to prevent data loss: dynamic hold mappings are not represented by the visual editor. Edit this rule as YAML.";
+  const alertError = unsupportedAlertConstruct(sectionLines(block, "alert"));
+  if (alertError) return `Visual mode is unavailable to prevent data loss: ${alertError} Edit this rule as YAML.`;
   const intentError = unsupportedIntentConstruct(sectionLines(block, "intent"));
   if (intentError) return `Visual mode is unavailable to prevent data loss: ${intentError} Edit this rule as YAML.`;
   if (String(block || "").split("\n").some(hasUnquotedInlineComment)) return "Visual mode is unavailable to prevent data loss: YAML scalar inline comments cannot be preserved by the visual editor. Edit this rule as YAML.";
+  return "";
+}
+
+function unsupportedAlertConstruct(lines) {
+  if (!lines.length) return "";
+  if (lines.some((line) => /^\s{4}-\s/.test(line))) return "multiple Alerts are not represented by the visual editor.";
+  const known = new Set(["name", "severity", "for", "resolve_after", "stale_after", "labels", "annotations", "escalations"]);
+  for (const line of lines) {
+    if (/^\s{8,}\S/.test(line) && !/^\s*#/.test(line)) return "nested or block-scalar Alert content is not represented by the visual editor.";
+    const field = line.match(/^\s{4}([\w.-]+):/);
+    if (field && !known.has(field[1])) return `Alert field '${field[1]}' is not represented by the visual editor.`;
+    if (/^\s{4}labels:/.test(line) && !/^\s{4}labels:[ \t]*\{[^\n]*\}[ \t]*$/.test(line)) return "block or complex Alert labels are not represented by the visual editor.";
+    if (/^\s{4}labels:/.test(line) && /"[^"]*,[^"]*"|'[^']*,[^']*'/.test(line)) return "Alert label values containing commas are not represented by the visual editor.";
+    const annotation = line.match(/^\s{6}([\w.-]+):/);
+    if (annotation && !/^\s{4}escalations:/.test(lines[lines.indexOf(line) - 1] || "") && annotation[1] !== "summary") return `Alert annotation '${annotation[1]}' is not represented by the visual editor.`;
+    if (/^\s{6}summary:[ \t]*[>|]/.test(line)) return "block-scalar Alert summaries are not represented by the visual editor.";
+  }
+  const text = lines.join("\n");
+  if (/^\s{2}alert:[ \t]*\S+/m.test(text)) return "inline Alert mappings are not represented by the visual editor.";
+  const escalationLines = lines.filter((line) => /^\s{6}-/.test(line));
+  if (escalationLines.some((line) => !/^\s{6}-\s*\{\s*after:\s*[^,}]+,\s*severity:\s*[^,}]+\s*\}\s*$/.test(line))) return "complex Alert escalations are not represented by the visual editor.";
+  if (/^\s{4}annotations:[ \t]*\S+/m.test(text)) return "inline Alert annotations are not represented by the visual editor.";
   return "";
 }
 
@@ -1592,6 +1810,7 @@ function describeCondition(rule) {
 
 function describeIntent(rule) {
   const intents = rule?.form?.intents || rule?.intents || [];
+  if (!intents.length && rule?.form?.alert) return `assert Alert ${rule.form.alert.name || "output"}`;
   if (!intents.length) return "run its Effects";
   return intents.map((intent) => `${intent.target} should ${intent.fields.map((field) => `${field.name} ${field.operator === "value" ? "be" : field.operator} ${field.value}`).join(" and ")}`).join("; ");
 }
@@ -1672,7 +1891,25 @@ function draftStageTransition(stage, event) {
 function candidateFingerprint(contents) { let hash = 2166136261; for (const char of String(contents)) { hash ^= char.charCodeAt(0); hash = Math.imul(hash, 16777619); } return (hash >>> 0).toString(16); }
 function formatValue(value) { return value && typeof value === "object" ? Object.entries(value).map(([key, item]) => `${key}: ${typeof item === "object" ? JSON.stringify(item) : item}`).join(", ") : String(value ?? "unknown"); }
 function formatTimestamp(value) { if (!value) return "Previous version"; const date = new Date(value); return Number.isNaN(date.valueOf()) ? String(value) : date.toLocaleString(); }
-function renderSimulationSummary(result) { const steps = result?.steps || []; const active = steps.reduce((count, step) => count + (step.active_rules?.length || 0), 0); return `<div class="consequences"><strong>${steps.length} timeline step${steps.length === 1 ? "" : "s"}</strong><p>${active} active Rule observations across the timeline.</p></div>`; }
+function renderSimulationSummary(result) {
+  const steps = result?.steps || [];
+  const active = steps.reduce((count, step) => count + (step.active_rules?.length || 0), 0);
+  const targets = steps.flatMap((step) => step.targets || []);
+  const effects = steps.flatMap((step) => step.effects || []);
+  const alerts = steps.flatMap((step, index) => (step.alerts || []).map((alert) => ({ ...alert, step: index + 1 })));
+  const transitions = steps.flatMap((step, index) => (step.alert_transitions || []).map((transition) => ({ ...transition, step: index + 1 })));
+  return `<div class="simulation-results"><div class="consequences"><strong>${steps.length} timeline step${steps.length === 1 ? "" : "s"}</strong><p>${active} active Rule observations across the timeline.</p></div><section><h3>Targets</h3><p>${targets.length ? `${targets.length} Target projection${targets.length === 1 ? "" : "s"}.` : "No Target consequences."}</p></section><section><h3>Effects</h3><p>${effects.length ? `${effects.length} Effect${effects.length === 1 ? "" : "s"} would fire.` : "No Effects."}</p></section><section><h3>Alert consequences</h3>${alerts.length ? `<ul>${alerts.map((alert) => `<li>Step ${alert.step}: <strong>${escapeHtml(alert.name || "Alert")}</strong> is ${escapeHtml(alert.state || "unknown")}${alert.evaluation_status ? ` (${escapeHtml(alert.evaluation_status)} evidence)` : ""}</li>`).join("")}</ul>` : `<p>No Alert consequences.</p>`}</section><section><h3>Alert transitions</h3>${transitions.length ? `<ul>${transitions.map((transition) => `<li>Step ${transition.step}: ${escapeHtml(transition.name || "Alert")} &rarr; ${escapeHtml(transition.to || "unknown")}${transition.reason ? ` (${escapeHtml(transition.reason)})` : ""}</li>`).join("")}</ul>` : `<p>No Alert transitions.</p>`}</section></div>`;
+}
+
+function renderDetailValues(values, formatter = String) {
+  return `<dl class="detail-values">${values.filter(([, value]) => value != null).map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(formatter(value))}</dd></div>`).join("") || `<div class="muted">No timestamps available.</div>`}</dl>`;
+}
+
+function formatMsTimestamp(value) {
+  if (value == null) return "Unavailable";
+  const date = new Date(Number(value));
+  return Number.isNaN(date.valueOf()) ? String(value) : date.toLocaleString();
+}
 
 function sortAlerts(alerts) {
   const stateRank = { firing: 0, pending: 1, inactive: 2 };
@@ -1782,6 +2019,11 @@ const styles = `
   .policy-yaml { min-height: 62vh; } .synthetic-alerts { min-height: 120px; }
   .policy-results, .policy-result { display: flex; flex-direction: column; gap: 12px; } .policy-result { padding-top: 14px; border-top: 1px solid var(--divider-color); }
   .policy-route { display: flex; flex-direction: column; gap: 4px; padding: 10px; border-radius: 10px; background: var(--secondary-background-color); font-size: 13px; }
+  .alert-detail { max-width: 860px; } .sticky-top.visible { display: flex; align-items: center; gap: 10px; }
+  .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+  .detail-values { margin: 10px 0 0; } .detail-values div { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; } .detail-values dt { color: var(--secondary-text-color); } .detail-values dd { margin: 0; text-align: right; }
+  .audit-list { margin: 10px 0 0; padding-left: 22px; } .audit-list li { padding: 5px 0; } .audit-list span { display: block; color: var(--secondary-text-color); font-size: 12px; }
+  .simulation-results > section { padding: 12px 0; border-top: 1px solid var(--divider-color); }
   .ledger { display: grid; gap: 22px; } .ledger-section h2 { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; } .ledger-section h2 span { font-size: 12px; color: var(--secondary-text-color); }
   .ledger-section .rule { width: 100%; margin-bottom: 7px; border-left: 4px solid var(--divider-color); } .ledger-section:first-child .rule { border-left-color: var(--warning-color, #ffa000); }
   .phase { font-size: 12px; color: var(--primary-color); } .create { margin-top: 28px; } summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; }
@@ -1790,7 +2032,7 @@ const styles = `
   .sticky-top { display: none; } .publish-bar { position: sticky; bottom: 0; z-index: 3; margin-top: 16px; padding: 10px; display: flex; justify-content: flex-end; align-items: center; gap: 8px; background: var(--card-background-color); border-top: 1px solid var(--divider-color); }
   .edit-back { display: none; }
   .inline-select { display: flex; flex-direction: column; gap: 3px; } .inline-select span, .sr-status { font-size: 12px; color: var(--secondary-text-color); } .sr-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-  @media (max-width: 700px) { main { padding: 10px; padding-bottom: 72px; } .two-pane, .form-grid, .row { grid-template-columns: 1fr; } .two-pane > .rules { display: none; } .card-header, .section-title, .hero-row, header, .target-line, .alert-row-head { flex-direction: column; align-items: stretch; } .sticky-top, .edit-back { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 10px; padding: 8px; background: var(--card-background-color); } .edit-back span { color: var(--secondary-text-color); font-size: 12px; } .publish-bar { position: fixed; left: 0; right: 0; margin: 0; } .publish-bar span { display: none; } .publish-bar button { flex: 1; } }
+  @media (max-width: 700px) { main { padding: 10px; padding-bottom: 72px; } .two-pane, .form-grid, .row, .detail-grid { grid-template-columns: 1fr; } .two-pane > .rules { display: none; } .card-header, .section-title, .hero-row, header, .target-line, .alert-row-head { flex-direction: column; align-items: stretch; } .sticky-top, .edit-back { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 10px; padding: 8px; background: var(--card-background-color); } .edit-back span { color: var(--secondary-text-color); font-size: 12px; } .publish-bar { position: fixed; left: 0; right: 0; margin: 0; } .publish-bar span { display: none; } .publish-bar button { flex: 1; } }
 `;
 
 customElements.define("intentional-panel", IntentionalPanel);
