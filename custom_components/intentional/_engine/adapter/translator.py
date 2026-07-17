@@ -298,7 +298,7 @@ LIGHT_FIELD_ALIASES = {
 
 
 def manual_set_from_service_data(data: dict[str, Any]) -> dict[str, Any]:
-    """Extract supported set fields from .fire service data."""
+    """Extract supported set fields from ..fire service data."""
     return {
         field: data[field]
         for field in MANUAL_SET_FIELDS

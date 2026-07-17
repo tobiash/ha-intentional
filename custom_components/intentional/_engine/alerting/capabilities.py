@@ -35,6 +35,13 @@ class CapabilityRuntime:
     ) -> dict[str, str]:
         if expires_at_ms <= now_ms or expires_at_ms - now_ms > 86_400_000:
             raise ValueError("capability lifetime must be between 1ms and 24h")
+        self._prune(now_ms)
+        active = sum(
+            not record["consumed"] and record["expires_at_ms"] >= now_ms
+            for record in self._records.values()
+        )
+        if active >= 2_048:
+            raise ValueError("too many active capability records")
         record_id = self._id_factory()
         record = {
             "record_id": record_id,
@@ -64,7 +71,7 @@ class CapabilityRuntime:
             raise ValueError("authenticated actor required")
         if record is None or record["consumed"]:
             raise ValueError("capability unavailable")
-        if now_ms > record["expires_at_ms"]:
+        if now_ms >= record["expires_at_ms"]:
             raise ValueError("capability expired")
         if (
             record["entry_id"] != entry_id
@@ -80,7 +87,11 @@ class CapabilityRuntime:
         return deepcopy(record)
 
     def export_state(self) -> dict[str, Any]:
-        return {"records": deepcopy(list(self._records.values())[-2_048:])}
+        active = [record for record in self._records.values() if not record["consumed"]]
+        terminal = [record for record in self._records.values() if record["consumed"]]
+        terminal_capacity = max(0, 2_048 - len(active))
+        retained = [*active, *(terminal[-terminal_capacity:] if terminal_capacity else [])]
+        return {"records": deepcopy(retained)}
 
     def token(self, record_id: str) -> str:
         record = self._records.get(record_id)
@@ -122,3 +133,12 @@ class CapabilityRuntime:
             separators=(",", ":"),
         ).encode()
         return hmac.new(self._secret, binding, hashlib.sha256).hexdigest()
+
+    def _prune(self, now_ms: int) -> None:
+        terminal = [
+            record_id
+            for record_id, record in self._records.items()
+            if record["consumed"] or record["expires_at_ms"] < now_ms
+        ]
+        for record_id in terminal[:-1_024]:
+            self._records.pop(record_id, None)

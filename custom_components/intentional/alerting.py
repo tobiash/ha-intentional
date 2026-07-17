@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import logging
 import secrets
 import time
 from typing import Any
+from urllib.parse import quote
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_send
@@ -18,6 +20,8 @@ from ._engine.alerting.policy import AlertingPolicyRepository
 ALERTING_STORAGE_VERSION = 1
 ALERTING_POLICY_STORAGE_VERSION = 1
 ALERTING_SECRET_STORAGE_VERSION = 1
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def alerting_coordinator_key(entry_id: str) -> str:
@@ -105,6 +109,15 @@ class AlertNotificationDispatcher:
                 continue
             try:
                 await self._async_call(obligation)
+            except asyncio.CancelledError:
+                await asyncio.shield(
+                    self._coordinator.async_reject_notification(
+                        obligation_id,
+                        now_ms=int(time.time() * 1_000),
+                        error_class="CancelledError",
+                    )
+                )
+                raise
             except Exception as err:  # noqa: BLE001 - durable retry stores error class
                 await self._coordinator.async_reject_notification(
                     obligation_id,
@@ -123,6 +136,8 @@ class AlertNotificationDispatcher:
         payload = obligation["payload"]
         destination_type = destination.get("type")
         if destination_type == "notify_entity":
+            if not self._hass.services.has_service("notify", "send_message"):
+                raise ValueError("notify.send_message is unavailable")
             capabilities = obligation.get("capabilities", [])
             actions = [
                 {
@@ -143,11 +158,19 @@ class AlertNotificationDispatcher:
                 }
                 for capability in capabilities
             ]
+            instance_ids = {
+                str(capability["instance_id"]) for capability in capabilities
+            }
+            singleton_instance = next(iter(instance_ids)) if len(instance_ids) == 1 else None
             actions.append(
                 {
                     "action": "URI",
-                    "title": "Open Alerts",
-                    "uri": "/intentional/alerts",
+                    "title": "Open Alert" if singleton_instance else "Open Alerts",
+                    "uri": (
+                        f"/intentional/alerts/{quote(singleton_instance, safe='')}"
+                        if singleton_instance
+                        else "/intentional/alerts"
+                    ),
                 }
             )
             await self._hass.services.async_call(
@@ -164,6 +187,8 @@ class AlertNotificationDispatcher:
             return
         if destination_type == "legacy_action":
             domain, service = destination["action"].split(".", 1)
+            if not self._hass.services.has_service(domain, service):
+                raise ValueError("configured legacy notify action is unavailable")
             await self._hass.services.async_call(
                 domain,
                 service,
@@ -176,6 +201,10 @@ class AlertNotificationDispatcher:
                 f'{obligation["group_identity"]}:{obligation["destination_id"]}'.encode()
             ).hexdigest()[:32]
             if obligation["message_kind"] in {"resolved", "cleanup"}:
+                if not self._hass.services.has_service(
+                    "persistent_notification", "dismiss"
+                ):
+                    raise ValueError("persistent_notification.dismiss is unavailable")
                 await self._hass.services.async_call(
                     "persistent_notification",
                     "dismiss",
@@ -183,6 +212,10 @@ class AlertNotificationDispatcher:
                     blocking=True,
                 )
             else:
+                if not self._hass.services.has_service(
+                    "persistent_notification", "create"
+                ):
+                    raise ValueError("persistent_notification.create is unavailable")
                 await self._hass.services.async_call(
                     "persistent_notification",
                     "create",
@@ -195,6 +228,24 @@ class AlertNotificationDispatcher:
                 )
             return
         raise ValueError("unsupported Receiver destination")
+
+    async def async_test_destination(
+        self, destination: dict[str, Any], *, receiver: str
+    ) -> None:
+        """Send one explicit administrator-requested Receiver test."""
+        identity = hashlib.sha256(repr(sorted(destination.items())).encode()).hexdigest()
+        await self._async_call(
+            {
+                "group_identity": f"receiver-test:{receiver}",
+                "destination_id": identity,
+                "destination": destination,
+                "message_kind": "test",
+                "payload": {
+                    "title": "Intentional Receiver test",
+                    "message": f"Receiver {receiver} is configured correctly.",
+                },
+            }
+        )
 
 
 class AlertDeadlineDriver:
@@ -215,7 +266,14 @@ class AlertDeadlineDriver:
 
     def start(self) -> None:
         if self._task is None:
-            self._task = self._hass.async_create_task(self._run())
+            if hasattr(self._hass, "async_create_background_task"):
+                self._task = self._hass.async_create_background_task(
+                    self._run(), name="intentional_alert_deadlines"
+                )
+            else:
+                self._task = self._hass.async_create_task(
+                    self._run(), name="intentional_alert_deadlines"
+                )
 
     def wake(self) -> None:
         self._wake.set()
@@ -231,8 +289,13 @@ class AlertDeadlineDriver:
             now_ms = int(time.time() * 1_000)
             deadline = self._coordinator.next_deadline_ms()
             if deadline is not None and deadline <= now_ms:
-                await self._coordinator.async_advance(now_ms=now_ms)
-                await self._dispatcher.async_dispatch_due(now_ms=now_ms)
+                try:
+                    await self._coordinator.async_advance(now_ms=now_ms)
+                    await self._dispatcher.async_dispatch_due(now_ms=now_ms)
+                except Exception as err:  # noqa: BLE001 - keep the sole deadline driver alive
+                    self._coordinator.record_runtime_error(type(err).__name__)
+                    _LOGGER.exception("Alert deadline processing failed")
+                    await asyncio.sleep(1)
                 if self._coordinator.health()["status"] == "degraded":
                     await asyncio.sleep(1)
                 continue

@@ -43,10 +43,9 @@
 #
 # Pinning the HA version
 # ──────────────────────
-# HA 2026.5 is the current stable as of writing. We pin to that
-# explicitly so CI tests the same version users run, not whatever
-# ``pytest-homeassistant-custom-component`` happens to pull. Bump
-# this pin when doing a HA compatibility review. The
+# CI covers current and previous HA releases through harness versions
+# that strictly pin those Home Assistant versions. Bump this matrix
+# together during each HA compatibility review. The
 # ``test_e2e_config_flow.py`` tests catch the kinds of
 # HA-version-specific config-flow bugs that bit us in v0.3.x
 # (OptionsFlow.config_entry read-only property, invalid
@@ -65,6 +64,14 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ha-version: "2026.2.3"
+            harness-version: "0.13.316"
+          - ha-version: "2026.1.0"
+            harness-version: "0.13.305"
 
     steps:
       - name: Checkout
@@ -76,7 +83,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
+          python-version: "3.13"
           cache: "pip"
 
       - name: Install dependencies
@@ -86,11 +93,9 @@ jobs:
           # (unit + integration). The integration deps include
           # homeassistant, which is ~500MB — this is the slow step.
           pip install -e ".[all-tests]"
-          # Pin the HA version explicitly. This is what catches
-          # HA-version-specific config-flow bugs (see header comment).
-          pip install "homeassistant==2026.7.2"
-          # Pin the test harness to a known-good version
-          pip install "pytest-homeassistant-custom-component==0.13.316"
+          # The harness strictly pins the corresponding HA version.
+          pip install "pytest-homeassistant-custom-component==${{ matrix.harness-version }}"
+          python -c "import homeassistant.const as c; assert c.__version__ == '${{ matrix.ha-version }}'"
 
       - name: Lint
         run: |

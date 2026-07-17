@@ -22,6 +22,7 @@ const EMPTY_RULE = () => ({
   intents: [{ target: "", fields: [{ name: "state", operator: "value", value: "on" }], transitionAssert: "", transitionChange: "", transitionWithdraw: "", ttl: "", linger: "", easing: "linear" }],
   effects: [],
   alert: null,
+  alerts: [],
 });
 
 class IntentionalPanel extends HTMLElement {
@@ -77,6 +78,9 @@ class IntentionalPanel extends HTMLElement {
     this._policyBusy = false;
     this._policyConfirmation = null;
     this._policyLoaded = false;
+    this._policyHistory = [];
+    this._receiverTestName = "";
+    this._receiverTestResult = "";
     this._policySyntheticText = '[\n  {"alertname":"FreezerTemperatureHigh","severity":"critical","rule_id":"example-rule"}\n]';
     this._beforeUnload = (event) => { if (this._dirty) { event.preventDefault(); event.returnValue = ""; } };
   }
@@ -233,7 +237,10 @@ class IntentionalPanel extends HTMLElement {
     this._policyError = "";
     this._render();
     try {
-      const document = await this._api("GET", "alerting/policy");
+      const [document, history] = await Promise.all([
+        this._api("GET", "alerting/policy"),
+        this._api("GET", "alerting/policy/history"),
+      ]);
       this._policyDocument = document;
       this._policyContents = document.contents || "";
       this._policyStage = "Published";
@@ -243,6 +250,7 @@ class IntentionalPanel extends HTMLElement {
       this._policyPreview = null;
       this._policyConfirmation = null;
       this._policyLoaded = true;
+      this._policyHistory = history.history || [];
     } catch (err) {
       this._policyError = err.message || String(err);
     } finally {
@@ -322,12 +330,55 @@ class IntentionalPanel extends HTMLElement {
       this._policyCheckedFingerprint = "";
       this._policyReviewedFingerprint = "";
       this._policyConfirmation = null;
+      try {
+        const history = await this._api("GET", "alerting/policy/history");
+        this._policyHistory = history.history || [];
+      } catch (_err) { /* Publication succeeded; stale history can be retried safely. */ }
     } catch (err) {
       const body = err.body || err.response || err;
       if (body?.error === "confirmation_required") {
         this._policyConfirmation = body.preview || {};
         this._policyError = "";
       } else this._policyError = err.message || String(err);
+    } finally {
+      this._policyBusy = false;
+      this._render();
+    }
+  }
+
+  async _rollbackPolicy(generation) {
+    if (!generation || !confirm("Restore this Alerting Policy generation?")) return;
+    this._policyBusy = true;
+    this._policyError = "";
+    this._render();
+    try {
+      await this._api("POST", "alerting/policy/rollback", {
+        generation,
+        expected_generation: this._policyDocument?.generation,
+      });
+      this._policyBusy = false;
+      await this._loadPolicy();
+    } catch (err) {
+      this._policyError = err.message || String(err);
+    } finally {
+      this._policyBusy = false;
+      this._render();
+    }
+  }
+
+  async _testReceiver() {
+    const receiver = this._receiverTestName.trim();
+    if (!receiver) return;
+    this._policyBusy = true;
+    this._receiverTestResult = "";
+    this._render();
+    try {
+      const result = await this._api("POST", "alerting/test-receiver", { receiver });
+      this._receiverTestResult = result.success
+        ? `${result.destinations_tested} destination${result.destinations_tested === 1 ? "" : "s"} accepted the test.`
+        : (result.results || []).map((item) => `${item.type}: ${item.status}${item.error_class ? ` (${item.error_class})` : ""}`).join("; ");
+    } catch (err) {
+      this._receiverTestResult = err.message || String(err);
     } finally {
       this._policyBusy = false;
       this._render();
@@ -643,14 +694,18 @@ class IntentionalPanel extends HTMLElement {
     if (!/^[a-zA-Z0-9_.:-]+$/.test(form.id.trim())) errors.push("Rule ID may only contain letters, numbers, dot, underscore, colon, and dash.");
     if (this._selectedRuleId === "__new__" && this._uniqueRules().some((rule) => rule.id === form.id.trim())) errors.push("Rule ID already exists.");
     if (!form.conditions.some((condition) => condition.entity.trim())) errors.push("Add at least one When condition.");
-    if (!form.intents.some((intent) => intent.target.trim()) && !form.effects.some((effect) => effect.service.trim()) && !form.alert) errors.push("Add at least one target intent, Alert, or effect.");
-    if (form.alert) {
-      if (!form.alert.name.trim()) errors.push("Alert name is required.");
-      if (!form.alert.summary.trim()) errors.push("Alert summary is required.");
-      if (form.alert.mode === "pulse" && !form.alert.resolveAfter.trim()) errors.push("Pulse Alerts require Resolve after.");
-      if (form.alert.mode === "state" && form.alert.resolveAfter.trim()) errors.push("State Alerts cannot use Resolve after.");
-      if (parseAlertLabels(form.alert.labels) === null) errors.push("Alert labels must be comma-separated key=value pairs.");
-      for (const step of form.alert.escalations) if (!step.after.trim()) errors.push("Each Alert escalation requires an After duration.");
+    const alerts = [form.alert, ...(form.alerts || [])].filter(Boolean);
+    if (!form.intents.some((intent) => intent.target.trim()) && !form.effects.some((effect) => effect.service.trim()) && !alerts.length) errors.push("Add at least one target intent, Alert, or effect.");
+    if (alerts.length > 16) errors.push("A Rule may define at most 16 Alerts.");
+    if (new Set(alerts.map((alert) => alert.name.trim())).size !== alerts.length) errors.push("Alert names must be unique within a Rule.");
+    for (const alert of alerts) {
+      if (!alert.name.trim()) errors.push("Alert name is required.");
+      if (!alert.summary.trim()) errors.push("Alert summary is required.");
+      if (alert.mode === "pulse" && !alert.resolveAfter.trim()) errors.push("Pulse Alerts require Resolve after.");
+      if (alert.mode === "state" && alert.resolveAfter.trim()) errors.push("State Alerts cannot use Resolve after.");
+      if (parseAlertLabels(alert.labels) === null) errors.push("Alert labels must be comma-separated key=value pairs.");
+      if (alert.escalations.length > 3) errors.push("An Alert may define at most three escalations.");
+      for (const step of alert.escalations) if (!step.after.trim()) errors.push("Each Alert escalation requires an After duration.");
     }
     for (const intent of form.intents.filter((item) => item.target.trim())) {
       if (!intent.fields.some((field) => field.name.trim())) errors.push(`Target ${intent.target} has no desired state fields.`);
@@ -744,7 +799,7 @@ class IntentionalPanel extends HTMLElement {
   }
 
   _renderAlertRow(alert) {
-    const state = ["firing", "pending", "inactive"].includes(alert.state) ? alert.state : "inactive";
+    const state = ["firing", "pending", "resolved", "inactive"].includes(alert.state) ? alert.state : "inactive";
     const severity = ["critical", "warning", "info"].includes(alert.severity) ? alert.severity : "info";
     const stale = alert.evaluation_status === "stale";
     const ruleExists = this._uniqueRules().some((rule) => rule.id === alert.rule_id);
@@ -768,16 +823,16 @@ class IntentionalPanel extends HTMLElement {
     const suppression = Array.isArray(instance.suppression) ? instance.suppression : [];
     const labels = Object.entries(instance.labels || {}).map(([key, value]) => `<span><strong>${escapeHtml(key)}</strong>=${escapeHtml(value)}</span>`).join("");
     const audit = (this._alertDetail.audit || []).map((event) => `<li><strong>${escapeHtml(event.event || `${event.from || "inactive"} to ${event.to || "unknown"}`)}</strong><span>${escapeHtml(formatMsTimestamp(event.at_ms))}${event.reason ? ` · ${escapeHtml(event.reason)}` : ""}${event.actor ? ` · ${escapeHtml(event.actor)}` : ""}</span></li>`).join("");
-    const delivery = instance.notification_suppressed === true
-      ? `Notifications currently suppressed${suppression.length ? ` by ${suppression.join(", ")}` : acknowledgment ? " by acknowledgment" : ""}.`
-      : firing ? "Eligible for policy routing. Delivery and destinations are not exposed by this endpoint." : "Not eligible for ordinary delivery in the current lifecycle state.";
+    const routes = (this._alertDetail.routing || []).flatMap((result) => result.routes || []).map((route) => `<li><strong>${escapeHtml(route.route_id || "route")}</strong><span>${route.receiver ? `Receiver ${escapeHtml(route.receiver)} · ` : ""}group ${escapeHtml(JSON.stringify(route.group_key || {}))}${route.suppression ? ` · suppressed: ${escapeHtml(typeof route.suppression === "string" ? route.suppression : JSON.stringify(route.suppression))}` : ""}</span></li>`).join("");
+    const deliveries = (this._alertDetail.delivery || []).map((item) => `<li><strong>${escapeHtml(item.status || "unknown")}</strong><span>${escapeHtml(item.destination?.type || "destination")} · ${escapeHtml(item.message_kind || "notification")} · attempt ${escapeHtml(item.attempt ?? 0)}${item.accepted_at_ms ? ` · accepted ${escapeHtml(formatMsTimestamp(item.accepted_at_ms))}` : ""}${item.next_attempt_at_ms ? ` · next ${escapeHtml(formatMsTimestamp(item.next_attempt_at_ms))}` : ""}${item.error_class ? ` · ${escapeHtml(item.error_class)}` : ""}</span></li>`).join("");
     return `<article class="workspace alert-detail">
       <div class="sticky-top visible"><button class="secondary back" data-action="back-alerts">Back to Alerts</button><span>${escapeHtml(instance.name || "Alert instance")}</span></div>
-      <section class="card"><div class="alert-row-head"><div><span class="eyebrow">${escapeHtml(instance.severity || "info")}</span><h2>${escapeHtml(instance.summary || instance.name || "Alert instance")}</h2></div><span class="state-badge">${escapeHtml(instance.state || "unknown")}</span></div><p>${escapeHtml(instance.name || "Unnamed Alert")} · Rule ${escapeHtml(instance.rule_id || "unknown")}</p></section>
+      <section class="card"><div class="alert-row-head"><div><span class="eyebrow">${escapeHtml(instance.severity || "info")}</span><h2>${escapeHtml(instance.summary || instance.name || "Alert instance")}</h2></div><span class="state-badge">${escapeHtml(instance.state || "unknown")}</span></div><p>${escapeHtml(instance.name || "Unnamed Alert")} · <button class="link-button" data-action="open-alert-rule" data-rule-id="${escapeHtml(instance.rule_id || "")}">Rule ${escapeHtml(instance.rule_id || "unknown")}</button></p><p class="muted">Definition revision: ${escapeHtml(instance.definition_revision || "unavailable")} · Alerting health: ${escapeHtml(this._alertDetail.health?.status || "unknown")}</p></section>
       <section class="card detail-grid"><div><h3>Lifecycle</h3>${renderDetailValues([["Active", instance.active_at_ms], ["Firing", instance.firing_at_ms], ["Resolved", instance.resolved_at_ms], ["Observed", instance.observed_at_ms], ["Next deadline", instance.next_deadline_ms]], formatMsTimestamp)}${instance.reason ? `<p><strong>Reason:</strong> ${escapeHtml(instance.reason)}</p>` : ""}</div><div><h3>Evidence</h3><p><strong>${escapeHtml(instance.evaluation_status || "unavailable")}</strong></p><p>${instance.evaluation_status === "stale" ? "Evidence is stale; lifecycle state is retained until a successful observation." : instance.evaluation_status === "grace" ? "Evidence is temporarily unknown within its grace period." : instance.evaluation_status === "current" ? "Latest evidence is current." : "Evidence status is not available for this retained instance."}</p></div></section>
       <section class="card"><h3>Labels</h3><div class="policy-labels">${labels || `<span class="muted">No labels available.</span>`}</div></section>
       <section class="card"><h3>Acknowledgment and suppression</h3>${acknowledgment ? `<p>Acknowledged.</p>` : `<p>Not acknowledged.</p>`}<p>Suppression: ${escapeHtml(suppression.join(", ") || "none")}</p></section>
-      <section class="card"><h3>Available delivery information</h3><p>${escapeHtml(delivery)}</p><p class="muted">This view does not expose Receiver destinations, payloads, or proof of delivery.</p></section>
+      <section class="card"><h3>Routing and grouping</h3>${routes ? `<ol class="audit-list">${routes}</ol>` : `<p class="muted">No matching route retained.</p>`}</section>
+      <section class="card"><h3>Notification delivery</h3>${deliveries ? `<ol class="audit-list">${deliveries}</ol>` : `<p class="muted">No delivery obligations retained for this instance.</p>`}</section>
       <section class="card"><h3>Audit</h3>${audit ? `<ol class="audit-list">${audit}</ol>` : `<p class="muted">No audit events retained for this instance.</p>`}</section>
       ${firing ? `<section class="card form-card"><h3>Controls</h3>${acknowledgment ? `<button class="secondary" data-action="revoke-acknowledgment" ${this._alertsBusy ? "disabled" : ""}>Revoke acknowledgment</button>` : `<label class="field"><span>Acknowledgment comment (optional)</span><input data-alert-comment data-focus-key="alert-comment" value="${escapeHtml(this._alertComment)}"></label><button data-action="acknowledge-alert" ${this._alertsBusy ? "disabled" : ""}>Acknowledge</button>`}<label class="field"><span>One-hour Silence reason</span><input data-silence-reason data-focus-key="silence-reason" value="${escapeHtml(this._silenceReason)}" required></label><button class="secondary" data-action="silence-alert" ${this._alertsBusy ? "disabled" : ""}>Silence notifications for 1 hour</button></section>` : ""}
     </article>`;
@@ -790,16 +845,18 @@ class IntentionalPanel extends HTMLElement {
     const reviewed = this._policyStage === "Reviewed" && this._policyReviewedFingerprint === fingerprint;
     const generation = this._policyDocument?.generation || "not loaded";
     return `<section class="workspace policy-workspace">
-      <div class="ledger-head policy-head"><span class="eyebrow">Administrator workspace</span><h2>Alerting Policy YAML</h2><p>Edit routing policy, check it without sample traffic, then review an explicitly synthetic preview before publishing.</p></div>
+      <div class="ledger-head policy-head"><span class="eyebrow">Administrator workspace</span><h2>Alerting Policy YAML</h2><p>Edit routing policy, check it against current firing Alerts, then add optional synthetic cases before publishing.</p></div>
       ${this._policyError ? `<div class="error-box" role="alert">${escapeHtml(this._policyError)}</div>` : ""}
       ${this._policyConfirmation ? `<div class="warning-box" role="alert"><strong>Confirm delivery fanout increase</strong><p>The server projected ${escapeHtml(this._policyConfirmation.fanout ?? "a larger")} Receiver destination${this._policyConfirmation.fanout === 1 ? "" : "s"}. Publish only if this spike is intentional.</p><button data-action="policy-confirm-spike" ${this._policyBusy ? "disabled" : ""}>Confirm spike and publish</button></div>` : ""}
       ${!this._policyLoaded ? `<section class="card"><div role="status">${this._policyBusy ? "Loading Alerting Policy..." : "Alerting Policy unavailable."}</div>${this._policyError ? `<button class="secondary" data-action="reload-policy">Retry policy</button>` : ""}</section>` : `
         <section class="two-pane policy-layout">
           <div class="card editor-stack"><div class="card-header"><div><h2>Policy document</h2><p>Generation ${escapeHtml(generation)}</p></div><span class="stage-badge">${escapeHtml(this._policyStage)}</span></div><textarea class="yaml-editor policy-yaml" data-policy-yaml data-focus-key="policy-yaml" spellcheck="false">${escapeHtml(this._policyContents)}</textarea></div>
           <div class="editor-stack">
-            <section class="card form-card"><div><span class="eyebrow">Synthetic preview</span><h2>Synthetic Alert labels</h2><p>These JSON fixtures are sent only to simulation. They are not the live Alert Ledger.</p></div><textarea class="small-textarea mono synthetic-alerts" data-policy-alerts data-focus-key="policy-alerts" spellcheck="false">${escapeHtml(this._policySyntheticText)}</textarea></section>
-            <section class="card"><h2>Check</h2>${this._policyCheck ? `<div class="ok">Policy YAML checked successfully.</div>` : `<p>Check parses and validates the candidate with no synthetic Alerts.</p>`}</section>
+            <section class="card form-card"><div><span class="eyebrow">Current + synthetic preview</span><h2>Additional Alert labels</h2><p>Current firing Alerts are included automatically. Add JSON fixtures for situations not currently firing.</p></div><textarea class="small-textarea mono synthetic-alerts" data-policy-alerts data-focus-key="policy-alerts" spellcheck="false">${escapeHtml(this._policySyntheticText)}</textarea></section>
+            <section class="card"><h2>Check</h2>${this._policyCheck?.valid === true ? `<div class="ok">Policy YAML checked successfully.</div>` : this._policyCheck?.errors?.length ? `<div class="error-box" role="alert">${this._policyCheck.errors.map(escapeHtml).join("<br>")}</div>` : `<p>Check parses and validates the candidate with no synthetic Alerts.</p>`}</section>
             <section class="card policy-preview"><span class="eyebrow">Synthetic preview</span><h2>Routing result</h2>${renderPolicyPreview(this._policyPreview)}</section>
+            <section class="card form-card"><h2>Test Receiver</h2><p>Send one administrator-requested, rate-limited test through every destination in a configured Receiver.</p><label class="field"><span>Receiver name</span><input data-receiver-test-name value="${escapeHtml(this._receiverTestName)}" placeholder="household"></label><button class="secondary" data-action="policy-test-receiver" ${this._policyBusy || !this._receiverTestName.trim() ? "disabled" : ""}>Send test</button>${this._receiverTestResult ? `<p role="status">${escapeHtml(this._receiverTestResult)}</p>` : ""}</section>
+            <section class="card"><h2>Policy history</h2>${this._policyHistory.length ? `<ol class="audit-list">${this._policyHistory.map((item) => `<li><code>${escapeHtml(item.generation)}</code><button class="secondary small" data-action="policy-rollback" data-generation="${escapeHtml(item.generation)}">Restore</button></li>`).join("")}</ol>` : `<p class="muted">No prior policy generations retained.</p>`}</section>
           </div>
         </section>
         <nav class="publish-bar" aria-label="Alerting Policy draft workflow"><span>${escapeHtml(this._policyStage)}</span><button class="secondary" data-action="policy-check" ${this._policyBusy ? "disabled" : ""}>Check</button><button class="secondary" data-action="policy-review" ${this._policyBusy || !checked ? "disabled" : ""}>Review synthetic preview</button><button data-action="policy-publish" ${this._policyBusy || !reviewed || this._policyConfirmation ? "disabled" : ""}>Publish</button></nav>`}
@@ -857,8 +914,8 @@ class IntentionalPanel extends HTMLElement {
           <details class="advanced"><summary>Organisation</summary><div class="form-grid">${inputField("Labels", "labels", form.labels, "living-room, lighting", "Comma-separated")}${inputField("Group", "group", form.group, "living-room-lighting")}${inputField("Profile", "profile", form.profile, "settled")}</div></details>
         </section>
         <section class="card form-card">
-          <div class="section-title"><div><h3>Alert</h3><p>Assert a durable situation independently of Targets and Effects.</p></div>${form.alert ? `<button class="secondary" data-action="remove-alert">Remove Alert</button>` : `<button class="secondary" data-action="add-alert">Add Alert</button>`}</div>
-          ${form.alert ? this._renderAlertForm(form.alert) : `<div class="empty inline-empty">No Alert configured.</div>`}
+          <div class="section-title"><div><h3>Alerts</h3><p>Assert durable situations independently of Targets and Effects.</p></div><button class="secondary" data-action="add-alert" ${[form.alert, ...(form.alerts || [])].filter(Boolean).length >= 16 ? "disabled" : ""}>Add Alert</button></div>
+          ${[form.alert, ...(form.alerts || [])].filter(Boolean).map((alert, index) => this._renderAlertForm(alert, index)).join("") || `<div class="empty inline-empty">No Alerts configured.</div>`}
         </section>
         <section class="card form-card">
            <div class="section-title"><div><h3>When</h3><p>Conditions that make the intent active.</p></div>${selectInline("Condition matching", "conditionMode", form.conditionMode, [["all", "All conditions"], ["any", "Any condition"], ["none", "None match"], ["not", "Not first condition"]])}</div>
@@ -883,11 +940,12 @@ class IntentionalPanel extends HTMLElement {
     `;
   }
 
-  _renderAlertForm(alert) {
-    return `<div class="subcard" data-alert-form>
-      <div class="form-grid">${inputField("Name", "alertName", alert.name, "FreezerTemperatureHigh")}${selectField("Severity", "alertSeverity", alert.severity, [["info", "Info"], ["warning", "Warning"], ["critical", "Critical"]])}${inputField("Summary", "alertSummary", alert.summary, "Freezer is too warm")}${selectField("Observation", "alertMode", alert.mode, [["state", "State: resolve when condition stops"], ["pulse", "Pulse: resolve after duration"]])}${alert.mode === "pulse" ? inputField("Resolve after", "alertResolveAfter", alert.resolveAfter, "5m", "Required for pulse Alerts") : inputField("Pending for", "alertFor", alert.for, "5m", "Optional time before firing")}${inputField("Stale after", "alertStaleAfter", alert.staleAfter, "2m")}${inputField("Labels", "alertLabels", alert.labels, "area=kitchen, category=appliance", "Comma-separated key=value pairs")}</div>
-      <div class="section-title"><h3>Escalations</h3><button class="secondary small" data-action="add-alert-escalation">Add escalation</button></div>
-      <div class="rows">${alert.escalations.map((step, index) => `<div class="row alert-escalation" data-alert-escalation-index="${index}"><label><span>After</span><input data-alert-escalation-field="after" data-focus-key="alert-escalation-${index}-after" value="${escapeHtml(step.after)}" placeholder="30m"></label><label><span>Severity</span><select data-alert-escalation-field="severity" data-focus-key="alert-escalation-${index}-severity">${[["warning", "Warning"], ["critical", "Critical"]].map(([value, label]) => `<option value="${value}" ${step.severity === value ? "selected" : ""}>${label}</option>`).join("")}</select></label><button class="icon secondary" data-action="remove-alert-escalation" data-index="${index}" aria-label="Remove Alert escalation">×</button></div>`).join("")}</div>
+  _renderAlertForm(alert, alertIndex) {
+    return `<div class="subcard" data-alert-form data-alert-index="${alertIndex}">
+      <div class="section-title"><h3>Alert ${alertIndex + 1}</h3><button class="secondary small" data-action="remove-alert" data-alert-index="${alertIndex}">Remove</button></div>
+      <div class="form-grid">${inputField("Name", "alertName", alert.name, "FreezerTemperatureHigh")}${selectField("Severity", "alertSeverity", alert.severity, [["info", "Info"], ["warning", "Warning"], ["critical", "Critical"]])}${inputField("Summary", "alertSummary", alert.summary, "Freezer is too warm")}${inputField("Description", "alertDescription", alert.description, "Check the freezer door", "Optional Notification context")}${selectField("Observation", "alertMode", alert.mode, [["state", "State: resolve when condition stops"], ["pulse", "Pulse: resolve after duration"]])}${alert.mode === "pulse" ? inputField("Resolve after", "alertResolveAfter", alert.resolveAfter, "5m", "Required for pulse Alerts") : inputField("Pending for", "alertFor", alert.for, "5m", "Optional time before firing")}${inputField("Stale after", "alertStaleAfter", alert.staleAfter, "2m")}${inputField("Labels", "alertLabels", alert.labels, "area=kitchen, category=appliance", "Comma-separated key=value pairs")}</div>
+      <div class="section-title"><h3>Escalations</h3><button class="secondary small" data-action="add-alert-escalation" data-alert-index="${alertIndex}" ${alert.escalations.length >= 3 ? "disabled" : ""}>Add escalation</button></div>
+      <div class="rows">${alert.escalations.map((step, index) => `<div class="row alert-escalation" data-alert-escalation-index="${index}"><label><span>After</span><input data-alert-escalation-field="after" data-focus-key="alert-${alertIndex}-escalation-${index}-after" value="${escapeHtml(step.after)}" placeholder="30m"></label><label><span>Severity</span><select data-alert-escalation-field="severity" data-focus-key="alert-${alertIndex}-escalation-${index}-severity">${[["warning", "Warning"], ["critical", "Critical"]].map(([value, label]) => `<option value="${value}" ${step.severity === value ? "selected" : ""}>${label}</option>`).join("")}</select></label><button class="icon secondary" data-action="remove-alert-escalation" data-alert-index="${alertIndex}" data-index="${index}" aria-label="Remove Alert escalation">×</button></div>`).join("")}</div>
     </div>`;
   }
 
@@ -1082,6 +1140,9 @@ class IntentionalPanel extends HTMLElement {
       this._policyPreview = null;
       this._render();
     });
+    this.shadowRoot.querySelector("[data-receiver-test-name]")?.addEventListener("input", (event) => {
+      this._receiverTestName = event.target.value;
+    });
     this.shadowRoot.querySelector("[data-form-root]")?.addEventListener("input", (event) => this._onFormInput(event));
     this.shadowRoot.querySelector("[data-form-root]")?.addEventListener("change", (event) => this._onFormInput(event));
     this.shadowRoot.querySelector("[data-alert-comment]")?.addEventListener("input", (event) => { this._alertComment = event.target.value; });
@@ -1113,10 +1174,12 @@ class IntentionalPanel extends HTMLElement {
     if (target.dataset.intentFieldRow && intentIndex >= 0 && fieldIndex >= 0) form.intents[intentIndex].fields[fieldIndex][target.dataset.intentFieldRow] = target.value;
     const effectIndex = nearestIndex(target, "effectIndex");
     if (target.dataset.effectField && effectIndex >= 0) form.effects[effectIndex][target.dataset.effectField] = target.value;
-    const alertFields = { alertName: "name", alertSeverity: "severity", alertSummary: "summary", alertMode: "mode", alertFor: "for", alertResolveAfter: "resolveAfter", alertStaleAfter: "staleAfter", alertLabels: "labels" };
-    if (form.alert && target.dataset.field && alertFields[target.dataset.field]) form.alert[alertFields[target.dataset.field]] = target.value;
+    const alertFields = { alertName: "name", alertSeverity: "severity", alertSummary: "summary", alertDescription: "description", alertMode: "mode", alertFor: "for", alertResolveAfter: "resolveAfter", alertStaleAfter: "staleAfter", alertLabels: "labels" };
+    const alertIndex = nearestIndex(target, "alertIndex");
+    const alert = alertIndex === 0 ? form.alert : (form.alerts || [])[alertIndex - 1];
+    if (alert && target.dataset.field && alertFields[target.dataset.field]) alert[alertFields[target.dataset.field]] = target.value;
     const escalationIndex = nearestIndex(target, "alertEscalationIndex");
-    if (form.alert && target.dataset.alertEscalationField && escalationIndex >= 0) form.alert.escalations[escalationIndex][target.dataset.alertEscalationField] = target.value;
+    if (alert && target.dataset.alertEscalationField && escalationIndex >= 0) alert.escalations[escalationIndex][target.dataset.alertEscalationField] = target.value;
     this._markDirty();
   }
 
@@ -1156,6 +1219,8 @@ class IntentionalPanel extends HTMLElement {
     if (action === "policy-review") this._reviewPolicy();
     if (action === "policy-publish") this._publishPolicy();
     if (action === "policy-confirm-spike") this._publishPolicy(true);
+    if (action === "policy-rollback") this._rollbackPolicy(button.dataset.generation);
+    if (action === "policy-test-receiver") this._testReceiver();
     if (action === "save") this._save();
     if (action === "validate") this._validate();
     if (action === "review") this._review();
@@ -1179,10 +1244,24 @@ class IntentionalPanel extends HTMLElement {
     if (action === "remove-intent-field") this._mutateForm((form) => form.intents[Number(button.dataset.intentIndex)].fields.splice(Number(button.dataset.fieldIndex), 1));
     if (action === "add-effect") this._mutateForm((form) => form.effects.push({ service: "", target: "", data: "" }));
     if (action === "remove-effect") this._mutateForm((form) => form.effects.splice(Number(button.dataset.index), 1));
-    if (action === "add-alert") this._mutateForm((form) => { form.alert = emptyAlertForm(); });
-    if (action === "remove-alert") this._mutateForm((form) => { form.alert = null; });
-    if (action === "add-alert-escalation") this._mutateForm((form) => form.alert?.escalations.push({ after: "", severity: "warning" }));
-    if (action === "remove-alert-escalation") this._mutateForm((form) => form.alert?.escalations.splice(Number(button.dataset.index), 1));
+    if (action === "add-alert") this._mutateForm((form) => { if (!form.alert) form.alert = emptyAlertForm(); else (form.alerts ||= []).push(emptyAlertForm()); });
+    if (action === "remove-alert") this._mutateForm((form) => {
+      const index = Number(button.dataset.alertIndex || 0);
+      const alerts = [form.alert, ...(form.alerts || [])].filter(Boolean);
+      alerts.splice(index, 1);
+      form.alert = alerts[0] || null;
+      form.alerts = alerts.slice(1);
+    });
+    if (action === "add-alert-escalation") this._mutateForm((form) => {
+      const index = Number(button.dataset.alertIndex || 0);
+      const alert = index === 0 ? form.alert : (form.alerts || [])[index - 1];
+      alert?.escalations.push({ after: "", severity: "warning" });
+    });
+    if (action === "remove-alert-escalation") this._mutateForm((form) => {
+      const alertIndex = Number(button.dataset.alertIndex || 0);
+      const alert = alertIndex === 0 ? form.alert : (form.alerts || [])[alertIndex - 1];
+      alert?.escalations.splice(Number(button.dataset.index), 1);
+    });
   }
 
   _mutateForm(mutator) {
@@ -1219,7 +1298,9 @@ function parseRuleForm(block, apiRule) {
   form.intents = parseIntentSection(sectionLines(block, "intent"), apiRule);
   if (!form.intents.length) form.intents = [{ target: apiRule?.target || "", fields: objectToFields(apiRule?.set || {}), transitionAssert: "", transitionChange: "", transitionWithdraw: "", ttl: "", linger: "", easing: "linear" }];
   form.effects = parseEffects(block, apiRule);
-  form.alert = parseAlertSection(sectionLines(block, "alert"));
+  const alerts = parseAlertSections(sectionLines(block, "alert"));
+  form.alert = alerts[0] || null;
+  form.alerts = alerts.slice(1);
   return form;
 }
 
@@ -1252,14 +1333,14 @@ function stringifyRule(form) {
   writeConditions(lines, "while", form.conditionMode, form.conditions, 2);
   if (form.after.trim()) lines.push(`  after: ${yamlScalar(form.after.trim())}`);
   writeHold(lines, form);
-  writeAlert(lines, form.alert);
+  writeAlerts(lines, [form.alert, ...(form.alerts || [])].filter(Boolean));
   writeIntents(lines, form.intents);
   writeEffects(lines, form.effects);
   return `${lines.join("\n")}\n`;
 }
 
 function emptyAlertForm() {
-  return { name: "", severity: "warning", summary: "", mode: "state", for: "", resolveAfter: "", staleAfter: "2m", labels: "", escalations: [] };
+  return { name: "", severity: "warning", summary: "", description: "", mode: "state", for: "", resolveAfter: "", staleAfter: "2m", labels: "", escalations: [] };
 }
 
 function parseAlertSection(lines) {
@@ -1274,6 +1355,7 @@ function parseAlertSection(lines) {
   alert.staleAfter = scalar("stale_after") || "2m";
   alert.mode = alert.resolveAfter ? "pulse" : "state";
   alert.summary = stripQuotes(text.match(/^\s{6}summary:\s*(.+?)\s*$/m)?.[1] || "");
+  alert.description = stripQuotes(text.match(/^\s{6}description:\s*(.+?)\s*$/m)?.[1] || "");
   const labels = text.match(/^\s{4}labels:\s*\{([^\n]*)\}\s*$/m)?.[1] || "";
   alert.labels = splitFlowItems(labels).map((item) => {
     const separator = item.indexOf(":");
@@ -1283,9 +1365,44 @@ function parseAlertSection(lines) {
   return alert;
 }
 
+function parseAlertSections(lines) {
+  if (!lines.length) return [];
+  if (!lines.some((line) => /^\s{4}-\s+/.test(line))) return [parseAlertSection(lines)].filter(Boolean);
+  const sections = [];
+  let current = [];
+  for (const line of lines) {
+    if (/^\s{4}-\s+/.test(line)) {
+      if (current.length) sections.push(current);
+      current = [line.replace(/^\s{4}-\s+/, "    ")];
+    } else if (current.length) {
+      current.push(line.replace(/^  /, ""));
+    }
+  }
+  if (current.length) sections.push(current);
+  return sections.map(parseAlertSection).filter(Boolean);
+}
+
+function writeAlerts(lines, alerts) {
+  if (!alerts.length) return;
+  if (alerts.length === 1) {
+    writeAlert(lines, alerts[0]);
+    return;
+  }
+  lines.push("  alert:");
+  for (const alert of alerts) {
+    const single = [];
+    writeAlert(single, alert);
+    const body = single.slice(1);
+    body.forEach((line, index) => {
+      lines.push(index === 0 ? line.replace(/^    /, "    - ") : `  ${line}`);
+    });
+  }
+}
+
 function writeAlert(lines, alert) {
   if (!alert) return;
   lines.push("  alert:", `    name: ${yamlScalar(alert.name)}`, `    severity: ${yamlScalar(alert.severity)}`, "    annotations:", `      summary: ${yamlScalar(alert.summary)}`);
+  if (alert.description.trim()) lines.push(`      description: ${yamlScalar(alert.description.trim())}`);
   if (alert.mode === "pulse" && alert.resolveAfter.trim()) lines.push(`    resolve_after: ${yamlScalar(alert.resolveAfter.trim())}`);
   if (alert.mode !== "pulse" && alert.for.trim()) lines.push(`    for: ${yamlScalar(alert.for.trim())}`);
   if (alert.staleAfter.trim() && alert.staleAfter.trim() !== "2m") lines.push(`    stale_after: ${yamlScalar(alert.staleAfter.trim())}`);
@@ -1499,7 +1616,22 @@ function visualModeError(block) {
 
 function unsupportedAlertConstruct(lines) {
   if (!lines.length) return "";
-  if (lines.some((line) => /^\s{4}-\s/.test(line))) return "multiple Alerts are not represented by the visual editor.";
+  if (lines.some((line) => /^\s{4}-\s/.test(line))) {
+    const sections = [];
+    let current = [];
+    for (const line of lines) {
+      if (/^\s{4}-\s+/.test(line)) {
+        if (current.length) sections.push(current);
+        current = [line.replace(/^\s{4}-\s+/, "    ")];
+      } else if (current.length) current.push(line.replace(/^  /, ""));
+    }
+    if (current.length) sections.push(current);
+    for (const section of sections) {
+      const error = unsupportedAlertConstruct(section);
+      if (error) return error;
+    }
+    return "";
+  }
   const known = new Set(["name", "severity", "for", "resolve_after", "stale_after", "labels", "annotations", "escalations"]);
   for (const line of lines) {
     if (/^\s{8,}\S/.test(line) && !/^\s*#/.test(line)) return "nested or block-scalar Alert content is not represented by the visual editor.";
@@ -1508,7 +1640,7 @@ function unsupportedAlertConstruct(lines) {
     if (/^\s{4}labels:/.test(line) && !/^\s{4}labels:[ \t]*\{[^\n]*\}[ \t]*$/.test(line)) return "block or complex Alert labels are not represented by the visual editor.";
     if (/^\s{4}labels:/.test(line) && /"[^"]*,[^"]*"|'[^']*,[^']*'/.test(line)) return "Alert label values containing commas are not represented by the visual editor.";
     const annotation = line.match(/^\s{6}([\w.-]+):/);
-    if (annotation && !/^\s{4}escalations:/.test(lines[lines.indexOf(line) - 1] || "") && annotation[1] !== "summary") return `Alert annotation '${annotation[1]}' is not represented by the visual editor.`;
+    if (annotation && !/^\s{4}escalations:/.test(lines[lines.indexOf(line) - 1] || "") && !["summary", "description"].includes(annotation[1])) return `Alert annotation '${annotation[1]}' is not represented by the visual editor.`;
     if (/^\s{6}summary:[ \t]*[>|]/.test(line)) return "block-scalar Alert summaries are not represented by the visual editor.";
   }
   const text = lines.join("\n");
@@ -1898,7 +2030,12 @@ function renderSimulationSummary(result) {
   const effects = steps.flatMap((step) => step.effects || []);
   const alerts = steps.flatMap((step, index) => (step.alerts || []).map((alert) => ({ ...alert, step: index + 1 })));
   const transitions = steps.flatMap((step, index) => (step.alert_transitions || []).map((transition) => ({ ...transition, step: index + 1 })));
-  return `<div class="simulation-results"><div class="consequences"><strong>${steps.length} timeline step${steps.length === 1 ? "" : "s"}</strong><p>${active} active Rule observations across the timeline.</p></div><section><h3>Targets</h3><p>${targets.length ? `${targets.length} Target projection${targets.length === 1 ? "" : "s"}.` : "No Target consequences."}</p></section><section><h3>Effects</h3><p>${effects.length ? `${effects.length} Effect${effects.length === 1 ? "" : "s"} would fire.` : "No Effects."}</p></section><section><h3>Alert consequences</h3>${alerts.length ? `<ul>${alerts.map((alert) => `<li>Step ${alert.step}: <strong>${escapeHtml(alert.name || "Alert")}</strong> is ${escapeHtml(alert.state || "unknown")}${alert.evaluation_status ? ` (${escapeHtml(alert.evaluation_status)} evidence)` : ""}</li>`).join("")}</ul>` : `<p>No Alert consequences.</p>`}</section><section><h3>Alert transitions</h3>${transitions.length ? `<ul>${transitions.map((transition) => `<li>Step ${transition.step}: ${escapeHtml(transition.name || "Alert")} &rarr; ${escapeHtml(transition.to || "unknown")}${transition.reason ? ` (${escapeHtml(transition.reason)})` : ""}</li>`).join("")}</ul>` : `<p>No Alert transitions.</p>`}</section></div>`;
+  const receiverCalls = steps.flatMap((step, index) => (step.receiver_calls || []).map((call) => ({ ...call, step: index + 1 })));
+  const obligations = steps.flatMap((step) => step.notification_obligations || []);
+  const routed = steps.reduce((count, step) => count + (step.alert_routes?.length || 0), 0);
+  const restarts = steps.filter((step) => step.checkpoint === "restart").length;
+  const suppressed = steps.reduce((count, step) => count + (step.acknowledged_instance_ids?.length || 0) + (step.silenced_instance_ids?.length || 0), 0);
+  return `<div class="simulation-results"><div class="consequences"><strong>${steps.length} timeline step${steps.length === 1 ? "" : "s"}</strong><p>${active} active Rule observations across the timeline.</p></div><section><h3>Targets</h3><p>${targets.length ? `${targets.length} Target projection${targets.length === 1 ? "" : "s"}.` : "No Target consequences."}</p></section><section><h3>Effects</h3><p>${effects.length ? `${effects.length} Effect${effects.length === 1 ? "" : "s"} would fire.` : "No Effects."}</p></section><section><h3>Alert consequences</h3>${alerts.length ? `<ul>${alerts.map((alert) => `<li>Step ${alert.step}: <strong>${escapeHtml(alert.name || "Alert")}</strong> is ${escapeHtml(alert.state || "unknown")}${alert.evaluation_status ? ` (${escapeHtml(alert.evaluation_status)} evidence)` : ""}</li>`).join("")}</ul>` : `<p>No Alert consequences.</p>`}</section><section><h3>Alert transitions</h3>${transitions.length ? `<ul>${transitions.map((transition) => `<li>Step ${transition.step}: ${escapeHtml(transition.name || "Alert")} &rarr; ${escapeHtml(transition.to || "unknown")}${transition.reason ? ` (${escapeHtml(transition.reason)})` : ""}</li>`).join("")}</ul>` : `<p>No Alert transitions.</p>`}</section><section><h3>Routing and suppression</h3><p>${routed} routed Alert projection${routed === 1 ? "" : "s"}; ${suppressed} acknowledged or Silenced projection${suppressed === 1 ? "" : "s"}.</p></section><section><h3>Notification delivery</h3><p>${obligations.length} durable obligation projection${obligations.length === 1 ? "" : "s"}; ${receiverCalls.length} Receiver call${receiverCalls.length === 1 ? "" : "s"}; ${restarts} restart checkpoint${restarts === 1 ? "" : "s"}.</p>${receiverCalls.length ? `<ul>${receiverCalls.map((call) => `<li>Step ${call.step}: ${escapeHtml(call.message_kind || "notification")} ${escapeHtml(call.result || "unknown")}</li>`).join("")}</ul>` : ""}</section></div>`;
 }
 
 function renderDetailValues(values, formatter = String) {
@@ -1912,11 +2049,22 @@ function formatMsTimestamp(value) {
 }
 
 function sortAlerts(alerts) {
-  const stateRank = { firing: 0, pending: 1, inactive: 2 };
   const severityRank = { critical: 0, warning: 1, info: 2 };
+  const attentionRank = (alert) => {
+    const suppressed = Array.isArray(alert?.suppression) && alert.suppression.length > 0;
+    if (alert?.state === "firing" && !alert?.acknowledged && alert?.evaluation_status !== "stale" && !suppressed) return 0;
+    if (alert?.state === "pending") return 1;
+    if (alert?.state === "firing" && alert?.evaluation_status === "stale") return 2;
+    if (suppressed) return 3;
+    if (alert?.state === "firing" && alert?.acknowledged) return 4;
+    if (alert?.state === "resolved") return 5;
+    if (alert?.state === "inactive") return 6;
+    return 7;
+  };
   return [...(alerts || [])].sort((left, right) => {
-    const ranked = (stateRank[left?.state] ?? 3) - (stateRank[right?.state] ?? 3)
-      || (severityRank[left?.severity] ?? 3) - (severityRank[right?.severity] ?? 3);
+    const ranked = attentionRank(left) - attentionRank(right)
+      || (severityRank[left?.severity] ?? 3) - (severityRank[right?.severity] ?? 3)
+      || Number(left?.active_at_ms ?? Number.MAX_SAFE_INTEGER) - Number(right?.active_at_ms ?? Number.MAX_SAFE_INTEGER);
     if (ranked) return ranked;
     for (const key of ["rule_id", "name", "instance_id", "summary", "evaluation_status"]) {
       const a = String(left?.[key] ?? "");
@@ -1934,13 +2082,13 @@ function renderPolicyPreview(preview) {
   const alerts = preview.alerts || [];
   const generation = preview.candidate_generation ? `<p>Candidate generation ${escapeHtml(preview.candidate_generation)}</p>` : "";
   const generalWarnings = (preview.warnings || []).map((warning) => `<li>${escapeHtml(formatValue(warning))}</li>`).join("");
-  if (!alerts.length) return `<div class="ok">Synthetic preview is valid. No synthetic Alerts were supplied.</div>${generation}${generalWarnings ? `<h3>Warnings</h3><ul class="attention">${generalWarnings}</ul>` : ""}`;
+  if (!alerts.length) return `<div class="ok">Preview is valid. No current or synthetic Alerts were supplied.</div>${generation}${generalWarnings ? `<h3>Warnings</h3><ul class="attention">${generalWarnings}</ul>` : ""}`;
   return `${generation}${generalWarnings ? `<h3>Warnings</h3><ul class="attention">${generalWarnings}</ul>` : ""}<div class="policy-results">${alerts.map((item, index) => {
     const labels = Object.entries(item.labels || {}).map(([key, value]) => `<span><strong>${escapeHtml(key)}</strong>=${escapeHtml(value)}</span>`).join("");
     const routes = (item.routes || []).map((route) => `<div class="policy-route"><strong>${escapeHtml(route.route_id || "route")} &rarr; ${escapeHtml(route.receiver || "no receiver")}</strong><span>Group keys: ${escapeHtml((route.group_by || []).join(", ") || "none")}</span><span>Group key: ${escapeHtml(formatValue(route.group_key ?? "none"))}</span>${route.suppression ? `<span class="attention">Suppression: ${escapeHtml(formatValue(route.suppression))}</span>` : `<span>Suppression: none</span>`}</div>`).join("") || `<div class="muted">No routes matched.</div>`;
     const fanout = (item.fanout || []).map((entry) => `<li><strong>${escapeHtml(entry.receiver || "receiver")}</strong> via ${escapeHtml(formatValue(entry.destination || "unknown destination"))}</li>`).join("") || `<li>No Receiver destinations.</li>`;
     const warnings = (item.warnings || []).map((warning) => `<li>${escapeHtml(formatValue(warning))}</li>`).join("");
-    return `<article class="policy-result"><h3>Synthetic Alert ${index + 1}</h3><div class="policy-labels">${labels || `<span>No labels</span>`}</div><h3>Routes</h3>${routes}<h3>Fanout</h3><ul>${fanout}</ul><h3>Warnings</h3>${warnings ? `<ul class="attention">${warnings}</ul>` : `<p>None</p>`}</article>`;
+    return `<article class="policy-result"><h3>${item.source === "current" ? "Current" : "Synthetic"} Alert ${index + 1}</h3><div class="policy-labels">${labels || `<span>No labels</span>`}</div><h3>Routes</h3>${routes}<h3>Fanout</h3><ul>${fanout}</ul><h3>Warnings</h3>${warnings ? `<ul class="attention">${warnings}</ul>` : `<p>None</p>`}</article>`;
   }).join("")}</div>`;
 }
 

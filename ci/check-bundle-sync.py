@@ -47,9 +47,16 @@ def check_files_match(source: Path, bundle: Path, name: str) -> list[str]:
         return errors
     src_text = source.read_text()
     bundle_text = bundle.read_text()
-    # Normalize: convert absolute imports to relative for comparison
-    src_normalized = src_text.replace("from intentional.", "from .")
-    bundle_normalized = bundle_text.replace("from intentional.", "from .")
+    package = name.split("/", 1)[0] if "/" in name else None
+    if package in PACKAGES:
+        src_normalized = (
+            src_text.replace(f"from intentional.{package}.", "from .")
+            .replace(f"from intentional.{package} import", "from . import")
+            .replace("from intentional.", "from ..")
+        )
+    else:
+        src_normalized = src_text.replace("from intentional.", "from .")
+    bundle_normalized = bundle_text
     if src_normalized != bundle_normalized:
         # Show a helpful diff hint
         errors.append(

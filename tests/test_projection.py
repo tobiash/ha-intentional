@@ -633,6 +633,78 @@ async def test_global_disable_resolves_firing_alert() -> None:
 
 
 @pytest.mark.asyncio
+async def test_simulation_projects_durable_notification_retry_across_restart() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string("""
+- id: freezer
+  while: {binary_sensor.freezer_hot: {is: "on"}}
+  alert:
+    name: FreezerHigh
+    severity: warning
+    annotations: {summary: Freezer is too warm}
+"""))
+    policy = """
+route: {id: root, receiver: household, group_wait: 0s, repeat_interval: never}
+receivers:
+  - {name: household, destinations: [{type: notify_entity, entity_id: notify.family}]}
+"""
+
+    steps = await simulate_timeline(
+        engine,
+        [
+            {
+                "states": {"binary_sensor.freezer_hot.state": "on"},
+                "reject_notifications": True,
+            },
+            {"advance_ms": 1_000, "restart": True},
+        ],
+        alerting_policy=policy,
+    )
+
+    assert steps[0]["receiver_calls"][0]["result"] == "rejected"
+    assert steps[1]["receiver_calls"][0]["obligation_id"] == "simulated-obligation-1"
+    assert steps[1]["receiver_calls"][0]["result"] == "accepted"
+    assert steps[1]["notification_obligations"][0]["attempt"] == 2
+    assert steps[1]["checkpoint"] == "restart"
+
+
+@pytest.mark.asyncio
+async def test_simulation_models_acknowledgment_release_debounce() -> None:
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string("""
+- id: freezer
+  while: {binary_sensor.freezer_hot: {is: "on"}}
+  alert:
+    name: FreezerHigh
+    severity: warning
+    annotations: {summary: Freezer is too warm}
+"""))
+    policy = """
+route: {id: root, receiver: household, group_wait: 0s, repeat_interval: never}
+receivers:
+  - {name: household, destinations: [{type: persistent_notification}]}
+"""
+
+    steps = await simulate_timeline(
+        engine,
+        [
+            {
+                "states": {"binary_sensor.freezer_hot.state": "on"},
+                "acknowledge": ["simulated-alert-1"],
+            },
+            {"revoke_acknowledgment": ["simulated-alert-1"]},
+            {"advance_ms": 4_999},
+            {"advance_ms": 1},
+        ],
+        alerting_policy=policy,
+    )
+
+    assert steps[0]["receiver_calls"] == []
+    assert steps[2]["receiver_calls"] == []
+    assert steps[3]["receiver_calls"][0]["result"] == "accepted"
+
+
+@pytest.mark.asyncio
 async def test_rule_pause_resolves_firing_alert_with_operational_reason() -> None:
     engine = Engine(clock_fn=lambda: 0)
     engine.load_rules(load_rules_from_string("""

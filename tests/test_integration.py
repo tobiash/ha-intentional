@@ -59,6 +59,11 @@ from pytest_homeassistant_custom_component.common import (  # noqa: E402
     MockConfigEntry,
 )
 
+from custom_components.intentional._engine.alerting import (  # noqa: E402
+    AlertCoordinator,
+    AlertObservation,
+)
+from custom_components.intentional.alerting import AlertNotificationDispatcher  # noqa: E402
 from custom_components.intentional.const import (  # noqa: E402
     CONF_RULE_DIR,
     DOMAIN,
@@ -1333,3 +1338,51 @@ async def test_missing_rule_dir_is_created(hass: HomeAssistant, tmp_path: Path) 
     assert await hass.config_entries.async_setup(entry.entry_id)
     # The directory should now exist
     assert nonexistent_dir.exists()
+
+
+async def test_alert_dispatch_cancellation_durably_returns_obligation_to_retry(
+    hass: HomeAssistant,
+) -> None:
+    class Store:
+        data = None
+
+        async def async_load(self):
+            return self.data
+
+        async def async_save(self, data):
+            self.data = data
+
+    coordinator = AlertCoordinator(Store(), id_factory=lambda: "instance-1")
+    await coordinator.async_load()
+    await coordinator.async_set_policy(
+        """
+route: {id: root, receiver: household, group_wait: 0s}
+receivers:
+  - {name: household, destinations: [{type: persistent_notification}]}
+""",
+        now_ms=0,
+    )
+    await coordinator.async_observe(
+        [
+            AlertObservation(
+                "freezer",
+                "FreezerHigh",
+                "critical",
+                "Freezer is too warm",
+                True,
+            )
+        ],
+        now_ms=0,
+    )
+    dispatcher = AlertNotificationDispatcher(hass, coordinator)
+
+    async def cancel(_obligation):
+        raise asyncio.CancelledError
+
+    dispatcher._async_call = cancel
+    with pytest.raises(asyncio.CancelledError):
+        await dispatcher.async_dispatch_due(now_ms=0)
+
+    obligation = coordinator.list_notifications()[0]
+    assert obligation["status"] == "planned"
+    assert obligation["error_class"] == "CancelledError"

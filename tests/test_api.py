@@ -157,6 +157,7 @@ def test_alerting_simulate_view_accepts_admin_post() -> None:
         IntentionalAlertingPolicyRollbackView,
         IntentionalAlertingPolicyView,
         IntentionalAlertingSimulateView,
+        IntentionalAlertingTestReceiverView,
     )
 
     assert IntentionalAlertingSimulateView.url == "/api/intentional/alerting/simulate"
@@ -169,6 +170,8 @@ def test_alerting_simulate_view_accepts_admin_post() -> None:
     assert "{generation" in IntentionalAlertingPolicyHistoryGenerationView.url
     assert IntentionalAlertingPolicyRollbackView.url.endswith("/policy/rollback")
     assert hasattr(IntentionalAlertingPolicyRollbackView, "post")
+    assert IntentionalAlertingTestReceiverView.url.endswith("/alerting/test-receiver")
+    assert hasattr(IntentionalAlertingTestReceiverView, "post")
 
 
 async def test_alert_api_and_sensor_share_durable_instance() -> None:
@@ -352,6 +355,45 @@ def test_state_view_exposes_state() -> None:
 
     assert IntentionalStateView.url == "/api/intentional/state"
     assert hasattr(IntentionalStateView, "get")
+
+
+async def test_receiver_test_is_admin_only_and_rate_limited(monkeypatch) -> None:
+    from custom_components.intentional import api
+
+    policy = SimpleNamespace(
+        contents="""
+route: {id: root, receiver: household}
+receivers:
+  - {name: household, destinations: [{type: persistent_notification}]}
+"""
+    )
+
+    class Dispatcher:
+        calls = []
+
+        async def async_test_destination(self, destination, *, receiver):
+            self.calls.append((destination, receiver))
+
+    dispatcher = Dispatcher()
+    hass = SimpleNamespace(config=SimpleNamespace(time_zone="UTC"))
+
+    class Request(dict):
+        app = {"hass": hass}
+
+        async def json(self):
+            return {"receiver": "household"}
+
+    monkeypatch.setattr(api, "_alerting_policy_for", lambda _hass: policy)
+    monkeypatch.setattr(api, "_alerting_dispatcher_for", lambda _hass: dispatcher)
+    api._RECEIVER_TEST_LAST_MS.clear()
+    request = Request(hass_user=SimpleNamespace(is_admin=True, id="admin-1"))
+
+    response = await api.IntentionalAlertingTestReceiverView().post(request)
+    limited = await api.IntentionalAlertingTestReceiverView().post(request)
+
+    assert response.status == 200
+    assert dispatcher.calls == [({"type": "persistent_notification"}, "household")]
+    assert limited.status == 429
 
 
 def test_explain_view_supports_target_param() -> None:

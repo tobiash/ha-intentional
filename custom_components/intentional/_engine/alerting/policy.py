@@ -13,7 +13,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
-from .durations import parse_duration
+from ..durations import parse_duration
+
+POLICY_STATE_VERSION = 2
 
 
 class PolicyStore(Protocol):
@@ -65,6 +67,15 @@ class AlertingPolicyRepository:
                 and isinstance(record.get("generation"), str)
                 and isinstance(record.get("contents"), str)
             ][-25:]
+            if stored.get("version") != POLICY_STATE_VERSION:
+                await self._store.async_save(
+                    {
+                        "version": POLICY_STATE_VERSION,
+                        "contents": contents,
+                        "generation": self.generation,
+                        "history": self._history,
+                    }
+                )
             self._current_error = None
         except Exception:  # Store or validation failure leaves routing disabled.
             self._contents = None
@@ -165,6 +176,7 @@ class AlertingPolicyRepository:
             try:
                 await self._store.async_save(
                     {
+                        "version": POLICY_STATE_VERSION,
                         "contents": contents,
                         "generation": generation,
                         "history": history,
@@ -197,7 +209,12 @@ class AlertingPolicyRepository:
             ][-25:]
             try:
                 await self._store.async_save(
-                    {"contents": contents, "generation": generation, "history": history}
+                    {
+                        "version": POLICY_STATE_VERSION,
+                        "contents": contents,
+                        "generation": generation,
+                        "history": history,
+                    }
                 )
             except Exception:
                 self._current_error = "policy_store_save_failed"
@@ -217,7 +234,7 @@ class Route:
     group_by: tuple[str, ...]
     group_wait_ms: int
     group_interval_ms: int
-    repeat_interval_ms: int
+    repeat_interval_ms: int | None
     send_resolved: bool
     matchers: tuple[str, ...] = ()
     active_intervals: tuple[str, ...] = ()
@@ -319,6 +336,19 @@ def match_alert_labels(matchers: list[str] | tuple[str, ...], labels: dict[str, 
     return _matches(tuple(matchers), labels)
 
 
+def receiver_destinations(
+    contents: str, receiver_name: str, *, default_timezone: str = "UTC"
+) -> list[dict[str, Any]]:
+    """Return validated destination configuration for one named Receiver."""
+    _root, receivers, _intervals, _inhibit_rules = _load_policy(
+        contents, default_timezone=default_timezone
+    )
+    receiver = receivers.get(receiver_name)
+    if receiver is None:
+        raise ValueError("Receiver not found")
+    return [dict(destination.data) for destination in receiver.destinations]
+
+
 def _load_policy(
     contents: str,
     *,
@@ -370,14 +400,23 @@ def _load_policy(
             }
             destination_type = data["type"]
             if destination_type == "notify_entity":
+                if set(data) != {"type", "entity_id"}:
+                    raise ValueError("notify_entity destination has unsupported fields")
                 entity_id = data.get("entity_id")
                 if not isinstance(entity_id, str) or not entity_id.startswith("notify."):
                     raise ValueError("notify_entity destinations require a notify entity_id")
             elif destination_type == "legacy_action":
+                if set(data) != {"type", "action"}:
+                    raise ValueError("legacy_action destination has unsupported fields")
                 action = data.get("action")
                 if not isinstance(action, str) or not action.startswith("notify."):
                     raise ValueError("legacy_action destinations require a notify action")
-            elif destination_type != "persistent_notification":
+            elif destination_type == "persistent_notification":
+                if set(data) != {"type"}:
+                    raise ValueError(
+                        "persistent_notification destination has unsupported fields"
+                    )
+            else:
                 raise ValueError("unsupported Receiver destination type")
             identity = json.dumps(data, sort_keys=True, separators=(",", ":"))
             parsed_destinations.append(
@@ -448,7 +487,7 @@ def _parse_route(raw: Any, *, parent: Route | None) -> Route:
             group_by=_string_tuple(raw.get("group_by", ["alertname", "area"])),
             group_wait_ms=_duration(raw.get("group_wait", "30s")),
             group_interval_ms=_duration(raw.get("group_interval", "5m")),
-            repeat_interval_ms=_duration(raw.get("repeat_interval", "4h")),
+            repeat_interval_ms=_repeat_interval(raw.get("repeat_interval", "4h")),
             send_resolved=_boolean(raw.get("send_resolved", True), "send_resolved"),
         )
     else:
@@ -461,7 +500,7 @@ def _parse_route(raw: Any, *, parent: Route | None) -> Route:
             group_interval_ms=_duration(
                 raw.get("group_interval", parent.group_interval_ms)
             ),
-            repeat_interval_ms=_duration(
+            repeat_interval_ms=_repeat_interval(
                 raw.get("repeat_interval", parent.repeat_interval_ms)
             ),
             send_resolved=_boolean(
@@ -742,13 +781,20 @@ def _parse_inhibit_rules(value: Any) -> tuple[InhibitRule, ...]:
             raise ValueError("inhibition sides may contain at most 16 matchers")
         for matcher in (*source_matchers, *target_matchers):
             _parse_matcher(matcher)
-        result.append(
-            InhibitRule(
+        equal = _string_tuple(raw["equal"])
+        if len(equal) > 16 or len(set(equal)) != len(equal):
+            raise ValueError("inhibition equal may contain at most 16 unique labels")
+        rule = InhibitRule(
                 source_matchers=source_matchers,
                 target_matchers=target_matchers,
-                equal=_string_tuple(raw["equal"]),
+                equal=equal,
             )
-        )
+        if source_matchers == target_matchers:
+            raise ValueError("inhibition rule cannot inhibit itself")
+        result.append(rule)
+    edges = {(rule.source_matchers, rule.target_matchers) for rule in result}
+    if any((target, source) in edges for source, target in edges):
+        raise ValueError("inhibition rules contain a cycle")
     return tuple(result)
 
 
@@ -902,6 +948,10 @@ def _duration(value: Any) -> int:
     raise ValueError("route timing must be a duration")
 
 
+def _repeat_interval(value: Any) -> int | None:
+    return None if value == "never" or value is None else _duration(value)
+
+
 def _boolean(value: Any, field: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"{field} must be a boolean")
@@ -913,7 +963,7 @@ def _validate_route_timing(route: Route) -> None:
         raise ValueError("group_wait must be zero or at least 1s")
     if route.group_interval_ms < 60_000:
         raise ValueError("group_interval must be at least 1m")
-    if route.repeat_interval_ms < 60_000:
+    if route.repeat_interval_ms is not None and route.repeat_interval_ms < 60_000:
         raise ValueError("repeat_interval must be at least 1m")
 
 

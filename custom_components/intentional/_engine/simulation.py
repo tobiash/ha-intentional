@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
 from .alerting import AlertLifecycle
+from .alerting.delivery import NotificationRuntime
+from .alerting.policy import simulate_alerting_policy
 from .engine import Engine
 from .projection import simulation_step, target_projection
 from .reconciliation import Reconciliation
@@ -136,6 +139,11 @@ def validate_simulation_input(
         "enabled",
         "restart",
         "time_of_day",
+        "alerting_policy",
+        "acknowledge",
+        "revoke_acknowledgment",
+        "silence",
+        "reject_notifications",
     }
     for index, step in enumerate(timeline):
         if not isinstance(step, dict):
@@ -211,6 +219,7 @@ async def simulate_timeline(
     reconciliation_options: dict[str, Any] | None = None,
     selector_memberships: list[dict[str, Any]] | None = None,
     semantic_metadata: list[dict[str, Any]] | None = None,
+    alerting_policy: str | None = None,
 ) -> list[dict[str, Any]]:
     """Evaluate Rules and Reconciliation over a deterministic timeline."""
     options = reconciliation_options or {}
@@ -220,7 +229,25 @@ async def simulate_timeline(
     adapter = FakeAdapter()
     tracker = _NoOwnership()
     reconciler = _new_reconciler(options)
-    alert_lifecycle = AlertLifecycle()
+    alert_sequence = 0
+
+    def next_alert_id() -> str:
+        nonlocal alert_sequence
+        alert_sequence += 1
+        return f"simulated-alert-{alert_sequence}"
+
+    alert_lifecycle = AlertLifecycle(id_factory=next_alert_id)
+    obligation_sequence = 0
+
+    def next_obligation_id() -> str:
+        nonlocal obligation_sequence
+        obligation_sequence += 1
+        return f"simulated-obligation-{obligation_sequence}"
+
+    notifications = NotificationRuntime(id_factory=next_obligation_id, jitter=lambda: 0.5)
+    acknowledgments: set[str] = set()
+    silences: dict[str, int] = {}
+    current_alerting_policy = alerting_policy
     steps = []
     for index, step in enumerate(timeline):
         pulse_fields: set[tuple[str, str]] = set()
@@ -235,6 +262,7 @@ async def simulate_timeline(
         if step.get("restart"):
             lifecycle = engine.export_lifecycle_records()
             alert_state = alert_lifecycle.export_state()
+            notification_state = notifications.export_state()
             reconciliation_state = reconciler.export_runtime_state(engine)
             previous = engine
             engine = Engine(
@@ -248,8 +276,12 @@ async def simulate_timeline(
                     entity_id, _separator, field = key.rpartition(".")
                     engine.update_state(entity_id, value, field=field)
             engine.import_lifecycle_records(lifecycle)
-            alert_lifecycle = AlertLifecycle()
+            alert_lifecycle = AlertLifecycle(id_factory=next_alert_id)
             alert_lifecycle.import_state(alert_state)
+            notifications = NotificationRuntime(
+                id_factory=next_obligation_id, jitter=lambda: 0.5
+            )
+            notifications.import_state(notification_state)
             reconciler = _new_reconciler(options)
             reconciler.restore_pending_withdraws(
                 {"reconciliation": reconciliation_state}, now_ms=engine.now_ms()
@@ -276,6 +308,21 @@ async def simulate_timeline(
         )
         alerts, alert_transitions = alert_lifecycle.advance(
             alert_observations, now_ms=engine.now_ms()
+        )
+        if "alerting_policy" in step:
+            policy_update = step["alerting_policy"]
+            if not isinstance(policy_update, str):
+                raise ValueError(f"timeline[{index}].alerting_policy must be a string")
+            current_alerting_policy = policy_update
+        alerting_projection = _simulate_alerting_step(
+            alerts,
+            policy=current_alerting_policy,
+            notifications=notifications,
+            acknowledgments=acknowledgments,
+            silences=silences,
+            step=step,
+            index=index,
+            now_ms=engine.now_ms(),
         )
         events = []
         for state in changed_actual:
@@ -328,6 +375,7 @@ async def simulate_timeline(
                     for target in targets
                 ],
                 "checkpoint": "restart" if step.get("restart") else None,
+                **alerting_projection,
             }
         )
         adapter.calls.clear()
@@ -337,6 +385,105 @@ async def simulate_timeline(
         if index % 10 == 9:
             await asyncio.sleep(0)
     return steps
+
+
+def _simulate_alerting_step(
+    alerts: list[dict[str, object]],
+    *,
+    policy: str | None,
+    notifications: NotificationRuntime,
+    acknowledgments: set[str],
+    silences: dict[str, int],
+    step: dict[str, Any],
+    index: int,
+    now_ms: int,
+) -> dict[str, Any]:
+    active_instance_ids = {
+        str(alert["instance_id"])
+        for alert in alerts
+        if alert.get("instance_id") is not None and alert.get("state") == "firing"
+    }
+    acknowledgments.intersection_update(active_instance_ids)
+    for instance_id in step.get("acknowledge", []):
+        if not isinstance(instance_id, str) or instance_id not in active_instance_ids:
+            raise ValueError(f"timeline[{index}].acknowledge references no firing Alert")
+        acknowledgments.add(instance_id)
+    for instance_id in step.get("revoke_acknowledgment", []):
+        if not isinstance(instance_id, str):
+            raise ValueError(
+                f"timeline[{index}].revoke_acknowledgment must contain strings"
+            )
+        acknowledgments.discard(instance_id)
+    for instance_id in list(silences):
+        if silences[instance_id] <= now_ms or instance_id not in active_instance_ids:
+            del silences[instance_id]
+    for silence in step.get("silence", []):
+        if not isinstance(silence, dict) or set(silence) != {"instance_id", "duration_ms"}:
+            raise ValueError(
+                f"timeline[{index}].silence requires instance_id and duration_ms"
+            )
+        instance_id = silence["instance_id"]
+        duration_ms = silence["duration_ms"]
+        if (
+            not isinstance(instance_id, str)
+            or instance_id not in active_instance_ids
+            or not isinstance(duration_ms, int)
+            or isinstance(duration_ms, bool)
+            or duration_ms <= 0
+        ):
+            raise ValueError(f"timeline[{index}].silence is invalid")
+        silences[instance_id] = now_ms + duration_ms
+    if policy is None:
+        return {}
+
+    delivery_alerts = [
+        {
+            **alert,
+            "notification_suppressed": str(alert.get("instance_id"))
+            in acknowledgments
+            or str(alert.get("instance_id")) in silences,
+        }
+        for alert in alerts
+    ]
+    firing = [alert for alert in delivery_alerts if alert.get("state") == "firing"]
+    instant = datetime.fromtimestamp(now_ms / 1_000, tz=UTC)
+    routing = simulate_alerting_policy(
+        policy,
+        [dict(alert.get("labels", {})) for alert in firing],
+        at=instant,
+    )
+    notifications.reconcile(delivery_alerts, policy, now_ms=now_ms, at=instant)
+    reject_notifications = step.get("reject_notifications", False)
+    if not isinstance(reject_notifications, bool):
+        raise ValueError(f"timeline[{index}].reject_notifications must be a boolean")
+    receiver_calls = []
+    for obligation in notifications.advance(now_ms=now_ms):
+        obligation_id = str(obligation["obligation_id"])
+        notifications.mark_in_flight(obligation_id, now_ms=now_ms)
+        if reject_notifications:
+            notifications.reject(
+                obligation_id, now_ms=now_ms, error_class="simulated_rejection"
+            )
+            result = "rejected"
+        else:
+            notifications.accept(obligation_id, now_ms=now_ms)
+            result = "accepted"
+        receiver_calls.append(
+            {
+                "obligation_id": obligation_id,
+                "destination": obligation["destination"],
+                "message_kind": obligation["message_kind"],
+                "result": result,
+            }
+        )
+    return {
+        "alert_routes": routing,
+        "notification_obligations": notifications.list_obligations(),
+        "receiver_calls": receiver_calls,
+        "notification_deadline_ms": notifications.next_deadline_ms(),
+        "acknowledged_instance_ids": sorted(acknowledgments),
+        "silenced_instance_ids": sorted(silences),
+    }
 
 
 def _new_reconciler(options: dict[str, Any]) -> Reconciliation:

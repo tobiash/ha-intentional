@@ -10,11 +10,12 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from .alerting.policy import simulate_alerting_policy
+from .policy import simulate_alerting_policy
 
 MAX_GROUPS = 1_024
 MAX_NONTERMINAL_OBLIGATIONS = 2_048
 MAX_ATTEMPTS = 8
+RETENTION_MS = 30 * 24 * 60 * 60 * 1_000
 TERMINAL_STATUSES = {"accepted", "cancelled", "superseded", "dead_lettered"}
 
 
@@ -32,6 +33,7 @@ class NotificationRuntime:
         self._groups: dict[str, dict[str, Any]] = {}
         self._obligations: list[dict[str, Any]] = []
         self._attempts: list[dict[str, Any]] = []
+        self._dead_letter_totals: dict[str, int] = {}
         self.degraded = False
 
     def reconcile(
@@ -43,6 +45,7 @@ class NotificationRuntime:
         at: datetime | None = None,
         default_timezone: str = "UTC",
     ) -> None:
+        self._prune_terminal_obligations(now_ms)
         firing = [
             alert
             for alert in alerts
@@ -92,6 +95,7 @@ class NotificationRuntime:
                         "send_resolved": route["send_resolved"],
                         "members": {},
                         "destinations": {},
+                        "newly_stale": False,
                     },
                 )
                 instance_id = str(alert["instance_id"])
@@ -105,10 +109,9 @@ class NotificationRuntime:
                         "summary": alert.get("summary", "Alert firing"),
                         "annotations": deepcopy(alert.get("annotations", {})),
                         "evaluation_status": alert.get("evaluation_status", "current"),
-                        "stale_episode_started": alert.get(
-                            "stale_episode_started", False
-                        ),
                     }
+                    if alert.get("stale_episode_started") is True:
+                        group["newly_stale"] = True
                 for raw_destination in destinations:
                     destination = deepcopy(raw_destination)
                     destination_id = json.dumps(
@@ -120,15 +123,28 @@ class NotificationRuntime:
             if identity in desired:
                 continue
             group = self._groups[identity]
+            if group.get("pending_removal") is not None:
+                continue
+            replaced = any(
+                _same_group_except_receiver_revision(group, candidate)
+                for candidate in desired.values()
+            ) or _group_members_still_desired(group, desired)
+            terminal_kind = (
+                "cleanup" if group.get("suppressed") or replaced else "resolved"
+            )
+            if self._has_in_flight(identity):
+                self._cancel_group_obligations(identity, "cancelled")
+                group["pending_removal"] = terminal_kind
+                group.pop("pending_candidate", None)
+                group["due_at_ms"] = None
+                continue
             if not group.get("accepted_destinations"):
                 self._cancel_group_obligations(identity, "cancelled")
                 del self._groups[identity]
                 continue
             group["members"] = {}
             group["version"] += 1
-            group["message_kind"] = (
-                "cleanup" if group.get("suppressed") else "resolved"
-            )
+            group["message_kind"] = terminal_kind
             group["due_at_ms"] = now_ms + group["group_interval_ms"]
 
         for identity, candidate in desired.items():
@@ -148,11 +164,19 @@ class NotificationRuntime:
                     "repeat_cycle_started": False,
                 }
                 continue
+            if existing.get("pending_candidate") is not None:
+                continue
             changed = (
                 existing["members"] != candidate["members"]
                 or existing["destinations"] != candidate["destinations"]
                 or existing["receiver_revision"] != candidate["receiver_revision"]
             )
+            if changed and self._has_in_flight(identity):
+                self._cancel_group_obligations(identity, "superseded")
+                existing["pending_candidate"] = deepcopy(candidate)
+                existing.pop("pending_removal", None)
+                existing["due_at_ms"] = None
+                continue
             previous_members = deepcopy(existing["members"])
             existing.update({key: value for key, value in candidate.items() if key != "identity"})
             existing["suppressed"] = not bool(candidate["members"])
@@ -166,24 +190,22 @@ class NotificationRuntime:
                 escalated = _maximum_severity(existing["members"]) > _maximum_severity(
                     previous_members
                 )
-                newly_stale = any(
-                    member.get("stale_episode_started") is True
-                    for member in existing["members"].values()
-                )
-                released = (
-                    accepted is not None
-                    and not previous_members
-                    and bool(existing["members"])
-                )
+                newly_stale = candidate["newly_stale"] is True
+                released = not previous_members and bool(existing["members"])
                 existing["due_at_ms"] = (
                     now_ms
-                    if accepted is None or escalated or newly_stale
+                    if newly_stale
                     else now_ms + 5_000
                     if released
+                    else now_ms
+                    if escalated
+                    else now_ms + existing["group_wait_ms"]
+                    if accepted is None
                     else max(now_ms, accepted + existing["group_interval_ms"])
                 )
 
     def advance(self, *, now_ms: int) -> list[dict[str, Any]]:
+        retire: list[str] = []
         for group in self._groups.values():
             due_at = group.get("due_at_ms")
             if due_at is None or now_ms < due_at:
@@ -197,6 +219,15 @@ class NotificationRuntime:
             group["due_at_ms"] = None if planned else now_ms + 1_000
             if planned:
                 group["repeat_cycle_started"] = False
+                if group["message_kind"] in {"resolved", "cleanup"} and not any(
+                    obligation["group_identity"] == group["identity"]
+                    and obligation["group_version"] == group["version"]
+                    and obligation["status"] not in TERMINAL_STATUSES
+                    for obligation in self._obligations
+                ):
+                    retire.append(group["identity"])
+        for identity in retire:
+            self._groups.pop(identity, None)
         return [
             deepcopy(obligation)
             for obligation in self._obligations
@@ -240,11 +271,20 @@ class NotificationRuntime:
         destination_id = obligation["destination_id"]
         if destination_id not in group["accepted_destinations"]:
             group["accepted_destinations"].append(destination_id)
+        if self._apply_pending_transition(group, now_ms):
+            return
         if self._group_version_complete(group):
             group["last_accepted_at_ms"] = now_ms
+            if obligation["message_kind"] in {"resolved", "cleanup"}:
+                self._groups.pop(group["identity"], None)
+                return
             group["message_kind"] = "repeat"
             group["repeat_cycle_started"] = False
-            group["due_at_ms"] = now_ms + group["repeat_interval_ms"]
+            group["due_at_ms"] = (
+                None
+                if group["repeat_interval_ms"] is None
+                else now_ms + group["repeat_interval_ms"]
+            )
 
     def reject(
         self, obligation_id: str, *, now_ms: int, error_class: str
@@ -264,11 +304,23 @@ class NotificationRuntime:
         if obligation["attempt"] >= MAX_ATTEMPTS:
             obligation["status"] = "dead_lettered"
             obligation["error_class"] = error_class
+            destination_type = str(obligation.get("destination", {}).get("type", "unknown"))
+            counter = f"{destination_type}:{error_class}"
+            self._dead_letter_totals[counter] = self._dead_letter_totals.get(counter, 0) + 1
             group = self._groups.get(obligation["group_identity"])
+            if group is not None and self._apply_pending_transition(group, now_ms):
+                return
             if group is not None and self._group_version_complete(group):
+                if obligation["message_kind"] in {"resolved", "cleanup"}:
+                    self._groups.pop(group["identity"], None)
+                    return
                 group["message_kind"] = "repeat"
                 group["repeat_cycle_started"] = False
-                group["due_at_ms"] = now_ms + group["repeat_interval_ms"]
+                group["due_at_ms"] = (
+                    None
+                    if group["repeat_interval_ms"] is None
+                    else now_ms + group["repeat_interval_ms"]
+                )
             return
         backoff = min(300_000, 1_000 * 2 ** (obligation["attempt"] - 1))
         obligation["status"] = "planned"
@@ -296,6 +348,9 @@ class NotificationRuntime:
     def list_attempts(self) -> list[dict[str, Any]]:
         return [dict(attempt) for attempt in self._attempts]
 
+    def dead_letter_totals(self) -> dict[str, int]:
+        return dict(self._dead_letter_totals)
+
     def attach_capabilities(
         self, obligation_id: str, record_ids: list[str]
     ) -> None:
@@ -304,12 +359,12 @@ class NotificationRuntime:
             obligation["capability_record_ids"] = list(record_ids)
 
     def export_state(self) -> dict[str, Any]:
-        self._prune_terminal_obligations()
         return {
             "groups": deepcopy(self._groups),
             "obligations": deepcopy(self._obligations),
             "attempts": deepcopy(self._attempts[-10_000:]),
             "degraded": self.degraded,
+            "dead_letter_totals": dict(self._dead_letter_totals),
         }
 
     def import_state(self, state: dict[str, Any]) -> None:
@@ -321,8 +376,36 @@ class NotificationRuntime:
             or len(groups) > MAX_GROUPS
             or not isinstance(obligations, list)
             or not isinstance(attempts, list)
+            or len(obligations) > 20_000
+            or len(attempts) > 10_000
         ):
             raise ValueError("invalid Notification runtime state")
+        if any(
+            not isinstance(identity, str)
+            or not isinstance(group, dict)
+            or group.get("identity") != identity
+            or not isinstance(group.get("version"), int)
+            or not isinstance(group.get("members"), dict)
+            or not isinstance(group.get("destinations"), dict)
+            for identity, group in groups.items()
+        ):
+            raise ValueError("invalid Notification group state")
+        if any(
+            not isinstance(item, dict)
+            or item.get("status")
+            not in {"planned", "in_flight", *TERMINAL_STATUSES}
+            or not isinstance(item.get("obligation_id"), str)
+            or (
+                item.get("status") not in TERMINAL_STATUSES
+                and (
+                    not isinstance(item.get("group_identity"), str)
+                    or not isinstance(item.get("destination"), dict)
+                    or not isinstance(item.get("next_attempt_at_ms"), int)
+                )
+            )
+            for item in obligations
+        ):
+            raise ValueError("invalid Notification obligation state")
         nonterminal = sum(
             isinstance(item, dict) and item.get("status") not in TERMINAL_STATUSES
             for item in obligations
@@ -336,6 +419,14 @@ class NotificationRuntime:
                 obligation["status"] = "planned"
                 obligation["next_attempt_at_ms"] = 0
         self._attempts = deepcopy(attempts[-10_000:])
+        totals = state.get("dead_letter_totals", {})
+        if not isinstance(totals, dict) or len(totals) > 256:
+            raise ValueError("invalid dead-letter totals")
+        self._dead_letter_totals = {
+            str(key): int(value)
+            for key, value in totals.items()
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        }
         self.degraded = state.get("degraded") is True
 
     def _plan_group(self, group: dict[str, Any], now_ms: int) -> bool:
@@ -401,13 +492,35 @@ class NotificationRuntime:
         if len(members) == 1:
             message = str(members[0]["summary"])
         else:
-            shown = members[:20]
-            message = "\n".join(str(member["summary"]) for member in shown)
-            if len(members) > len(shown):
-                message += f"\n+{len(members) - len(shown)} more"
-        encoded = message.encode()[:16_000]
-        message = encoded.decode(errors="ignore")
-        return {"title": "Intentional Alerts", "message": message}
+            shown: list[str] = []
+            for member in members[:20]:
+                candidate = [*shown, str(member["summary"])]
+                omitted = len(members) - len(candidate)
+                suffix = f"\n+{omitted} more ({len(members)} total)" if omitted else ""
+                payload = {
+                    "title": "Intentional Alerts",
+                    "message": "\n".join(candidate) + suffix,
+                }
+                if len(json.dumps(payload, ensure_ascii=False).encode()) > 16_384:
+                    break
+                shown = candidate
+            omitted = len(members) - len(shown)
+            message = "\n".join(shown)
+            if omitted:
+                message += f"\n+{omitted} more ({len(members)} total)"
+        payload = {"title": "Intentional Alerts", "message": message}
+        while (
+            len(members) > 1
+            and shown
+            and len(json.dumps(payload, ensure_ascii=False).encode()) > 16_384
+        ):
+            shown.pop()
+            omitted = len(members) - len(shown)
+            message = "\n".join(shown) + f"\n+{omitted} more ({len(members)} total)"
+            payload["message"] = message
+        if len(json.dumps(payload, ensure_ascii=False).encode()) > 16_384:
+            raise ValueError("rendered Notification payload exceeds 16 KiB")
+        return payload
 
     def _group_version_complete(self, group: dict[str, Any]) -> bool:
         matching = [
@@ -420,6 +533,42 @@ class NotificationRuntime:
             obligation["status"] in TERMINAL_STATUSES for obligation in matching
         )
 
+    def _has_in_flight(self, identity: str) -> bool:
+        return any(
+            obligation["group_identity"] == identity
+            and obligation["status"] == "in_flight"
+            for obligation in self._obligations
+        )
+
+    def _apply_pending_transition(self, group: dict[str, Any], now_ms: int) -> bool:
+        if self._has_in_flight(group["identity"]):
+            return False
+        pending_removal = group.pop("pending_removal", None)
+        if pending_removal is not None:
+            if not group.get("accepted_destinations"):
+                self._groups.pop(group["identity"], None)
+                return True
+            group["members"] = {}
+            group["version"] += 1
+            group["message_kind"] = pending_removal
+            group["due_at_ms"] = now_ms + group["group_interval_ms"]
+            return True
+        candidate = group.pop("pending_candidate", None)
+        if candidate is None:
+            return False
+        group.update({key: value for key, value in candidate.items() if key != "identity"})
+        group["suppressed"] = not bool(candidate["members"])
+        group["version"] += 1
+        group["message_kind"] = (
+            "initial" if group["last_accepted_at_ms"] is None else "update"
+        )
+        group["due_at_ms"] = (
+            now_ms + group["group_wait_ms"]
+            if group["last_accepted_at_ms"] is None
+            else now_ms + group["group_interval_ms"]
+        )
+        return True
+
     def _obligation(self, obligation_id: str) -> dict[str, Any]:
         for obligation in self._obligations:
             if obligation["obligation_id"] == obligation_id:
@@ -430,20 +579,28 @@ class NotificationRuntime:
         for obligation in self._obligations:
             if (
                 obligation["group_identity"] == identity
-                and obligation["status"] not in TERMINAL_STATUSES
+                and obligation["status"] == "planned"
             ):
                 obligation["status"] = status
 
     def _supersede_group_obligations(self, identity: str) -> None:
         self._cancel_group_obligations(identity, "superseded")
 
-    def _prune_terminal_obligations(self) -> None:
+    def _prune_terminal_obligations(self, now_ms: int) -> None:
         retained_reversed = []
         terminal_count = 0
         dead_letter_count = 0
+        cutoff = now_ms - RETENTION_MS
         for obligation in reversed(self._obligations):
             terminal = obligation.get("status") in TERMINAL_STATUSES
             dead_letter = obligation.get("status") == "dead_lettered"
+            terminal_at = int(
+                obligation.get("accepted_at_ms")
+                or obligation.get("next_attempt_at_ms")
+                or obligation.get("planned_at_ms", now_ms)
+            )
+            if terminal and terminal_at < cutoff:
+                continue
             if terminal and terminal_count >= 10_000:
                 continue
             if dead_letter and dead_letter_count >= 1_000:
@@ -457,3 +614,26 @@ class NotificationRuntime:
 def _maximum_severity(members: dict[str, dict[str, Any]]) -> int:
     rank = {"info": 0, "warning": 1, "critical": 2}
     return max((rank.get(member.get("severity"), 0) for member in members.values()), default=-1)
+
+
+def _same_group_except_receiver_revision(
+    existing: dict[str, Any], candidate: dict[str, Any]
+) -> bool:
+    try:
+        old_key = json.loads(existing["identity"])
+        new_key = json.loads(candidate["identity"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    old_key.pop("receiver_revision", None)
+    new_key.pop("receiver_revision", None)
+    return old_key == new_key
+
+
+def _group_members_still_desired(
+    existing: dict[str, Any], desired: dict[str, dict[str, Any]]
+) -> bool:
+    instance_ids = set(existing.get("members", {}))
+    return bool(instance_ids) and any(
+        instance_ids & set(candidate.get("members", {}))
+        for candidate in desired.values()
+    )

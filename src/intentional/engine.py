@@ -178,6 +178,7 @@ class Engine:
         self._active_effect_rule_ids: set[str] = set()
         self._effect_outbox: list[EffectOutboxRecord] = []
         self._template_renderer = TemplateRenderer()
+        self._alert_annotation_cache: dict[str, dict[str, str]] = {}
         self._generated_fields: dict[tuple[str, str], GeneratedFieldState] = {}
         self._enabled = True
         self._paused_labels: set[str] = set()
@@ -594,6 +595,8 @@ class Engine:
             for effect in rule.effects:
                 renderer.validate_value(effect.target)
                 renderer.validate_value(effect.data)
+            for alert in rule.alerts:
+                renderer.validate_value(alert.annotations)
 
     def rule_fingerprints(self) -> dict[str, tuple[Any, ...]]:
         """Return current semantic fingerprints keyed by expanded rule id."""
@@ -1580,12 +1583,36 @@ class Engine:
                         separators=(",", ":"),
                     ).encode()
                 ).hexdigest()
+                annotation_key = f"{rule_id}\0{alert.name}"
+                presentation_degraded = False
+                try:
+                    rendered = self._template_renderer.render_value(
+                        alert.annotations, self.state
+                    )
+                    if not isinstance(rendered, dict):
+                        raise ValueError("Alert annotations must render to a mapping")
+                    rendered_annotations = {
+                        str(key): str(value) for key, value in rendered.items()
+                    }
+                    if any(
+                        len(value.encode()) > 4_096
+                        for value in rendered_annotations.values()
+                    ) or len(
+                        json.dumps(rendered_annotations, ensure_ascii=False).encode()
+                    ) > 16_384:
+                        raise ValueError("rendered Alert annotations exceed bounds")
+                    self._alert_annotation_cache[annotation_key] = rendered_annotations
+                except Exception:  # noqa: BLE001 - presentation degrades without lifecycle loss
+                    presentation_degraded = True
+                    rendered_annotations = self._alert_annotation_cache.get(
+                        annotation_key, {"summary": str(alert.summary)}
+                    )
                 observations.append(
                     AlertObservation(
                         rule_id=rule_id,
                         name=alert.name,
                         severity=alert.severity,
-                        summary=str(alert.summary),
+                        summary=rendered_annotations.get("summary", str(alert.summary)),
                         active=bool(
                             self.is_enabled()
                             and status.get("condition_firing")
@@ -1595,7 +1622,7 @@ class Engine:
                         ),
                         observed_at_ms=self.now_ms(),
                         labels=labels,
-                        annotations=dict(alert.annotations),
+                        annotations=rendered_annotations,
                         definition_revision=definition_revision,
                         escalations=tuple(
                             (step.after_ms, step.severity)
@@ -1617,6 +1644,7 @@ class Engine:
                         ),
                         inactive_reason=inactive_reason,
                         pulse_id=pulse_id,
+                        presentation_degraded=presentation_degraded,
                         source_timestamp_ms=source_timestamp_ms,
                         duration_revision=(
                             f"alert:{alert.for_ms}"

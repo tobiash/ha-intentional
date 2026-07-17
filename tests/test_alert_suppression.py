@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from intentional.alerting import AlertCoordinator, AlertObservation
 
 
@@ -95,3 +97,33 @@ async def test_timed_severity_escalation_preserves_instance_and_supersedes_ack()
     assert projected["severity"] == "warning"
     assert projected["acknowledgment"] is None
     assert transitions[-1]["reason"] == "severity_escalation"
+
+
+async def test_stale_episode_notification_survives_subsequent_acknowledged_tick() -> None:
+    store = Store()
+    coordinator = AlertCoordinator(store, id_factory=lambda: "instance-1")
+    await coordinator.async_load()
+    await coordinator.async_set_policy(
+        """
+route: {id: root, receiver: household, group_wait: 0s}
+receivers:
+  - {name: household, destinations: [{type: persistent_notification}]}
+""",
+        now_ms=0,
+    )
+    known = observation()
+    await coordinator.async_observe([known], now_ms=0)
+    initial = (await coordinator.async_notification_advance(now_ms=0))[0]
+    await coordinator.async_begin_notification_dispatch(initial["obligation_id"], now_ms=0)
+    await coordinator.async_accept_notification(initial["obligation_id"], now_ms=0)
+    await coordinator.async_acknowledge(
+        "instance-1", actor="user", comment=None, now_ms=1
+    )
+    stale = replace(known, quality="unknown", stale_after_ms=0)
+
+    await coordinator.async_observe([stale], now_ms=2)
+    await coordinator.async_observe([stale], now_ms=3)
+    due = await coordinator.async_notification_advance(now_ms=3)
+
+    assert len(due) == 1
+    assert due[0]["message_kind"] == "update"

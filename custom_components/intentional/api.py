@@ -64,9 +64,11 @@ missing resources, 500 for internal errors).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import partial
@@ -81,7 +83,10 @@ from ._engine.alerting import (  # noqa: TID252
     AlertCoordinator,
     AlertStateUnavailableError,
 )
-from ._engine.alerting.policy import AlertingPolicyRepository  # noqa: TID252
+from ._engine.alerting.policy import (  # noqa: TID252
+    AlertingPolicyRepository,
+    receiver_destinations,
+)
 from ._engine.engine import Engine  # noqa: TID252
 from ._engine.projection import (  # noqa: TID252
     dashboard_cards,
@@ -105,7 +110,9 @@ from ._engine.simulation import (  # noqa: TID252
 )
 from ._engine.yaml_loader import MAX_DOCUMENT_BYTES, RuleLoadError  # noqa: TID252
 from .alerting import (  # noqa: TID252
+    AlertNotificationDispatcher,
     alerting_coordinator_key,
+    alerting_dispatcher_key,
     alerting_policy_repository_key,
 )
 from .automatic_rollback import AutomaticRollback, automatic_rollback_key  # noqa: TID252
@@ -138,6 +145,7 @@ from .validation import validation_warnings as _validation_warnings  # noqa: TID
 
 _LOGGER = logging.getLogger(__name__)
 _API_REGISTERED = f"{DOMAIN}_api_registered"
+_RECEIVER_TEST_LAST_MS: dict[str, int] = {}
 
 
 def _entry_for_view(hass: HomeAssistant) -> Any:
@@ -180,6 +188,14 @@ def _alerting_policy_for(hass: HomeAssistant) -> AlertingPolicyRepository | None
     return repository if isinstance(repository, AlertingPolicyRepository) else None
 
 
+def _alerting_dispatcher_for(hass: HomeAssistant) -> AlertNotificationDispatcher | None:
+    entry = _entry_for_view(hass)
+    if entry is None:
+        return None
+    dispatcher = hass.data.get(DOMAIN, {}).get(alerting_dispatcher_key(entry.entry_id))
+    return dispatcher if isinstance(dispatcher, AlertNotificationDispatcher) else None
+
+
 def _request_actor(request: web.Request) -> str | None:
     user = request.get("hass_user")
     user_id = getattr(user, "id", None)
@@ -206,6 +222,7 @@ def _public_alert_projection(alert: dict[str, object]) -> dict[str, object]:
             "labels",
             "suppression",
             "reason",
+            "presentation_degraded",
         )
         if key in alert
     }
@@ -222,6 +239,22 @@ def _redact_failed_alert_payload(value: Any) -> Any:
         if isinstance(notifications, dict)
         else []
     )
+    safe_fields = {
+        "rule_id",
+        "name",
+        "severity",
+        "state",
+        "instance_id",
+        "evaluation_status",
+        "observed_at_ms",
+        "active_at_ms",
+        "firing_at_ms",
+        "resolved_at_ms",
+        "next_deadline_ms",
+        "definition_revision",
+        "reason",
+    }
+    lifecycle = value.get("lifecycle", {})
     return {
         "version": value.get("version")
         if isinstance(value.get("version"), int)
@@ -236,7 +269,79 @@ def _redact_failed_alert_payload(value: Any) -> Any:
         "notification_count": len(obligations)
         if isinstance(obligations, list)
         else None,
+        "lifecycle": {
+            "active": lifecycle.get("active", {})
+            if isinstance(lifecycle, dict)
+            and isinstance(lifecycle.get("active", {}), dict)
+            else {},
+            "unknown_since": lifecycle.get("unknown_since", {})
+            if isinstance(lifecycle, dict)
+            and isinstance(lifecycle.get("unknown_since", {}), dict)
+            else {},
+        },
+        "alerts": [
+            {key: item.get(key) for key in safe_fields if key in item}
+            for item in value.get("alerts", [])
+            if isinstance(item, dict)
+        ][:256],
+        "instances": [
+            {key: item.get(key) for key in safe_fields if key in item}
+            for item in value.get("instances", [])
+            if isinstance(item, dict)
+        ][-1_000:],
+        "audit": [
+            {
+                key: item.get(key)
+                for key in ("instance_id", "event", "from", "to", "at_ms", "reason")
+                if key in item
+            }
+            for item in value.get("audit", [])
+            if isinstance(item, dict)
+        ][-10_000:],
+        "notifications": [
+            {
+                key: item.get(key)
+                for key in (
+                    "obligation_id",
+                    "group_identity",
+                    "group_version",
+                    "message_kind",
+                    "member_instance_ids",
+                    "status",
+                    "attempt",
+                    "planned_at_ms",
+                    "next_attempt_at_ms",
+                    "accepted_at_ms",
+                    "error_class",
+                )
+                if key in item
+            }
+            for item in obligations
+            if isinstance(item, dict)
+        ][-10_000:],
+        "silences": [
+            {
+                key: item.get(key)
+                for key in (
+                    "silence_id",
+                    "instance_id",
+                    "created_at_ms",
+                    "expires_at_ms",
+                    "match_all",
+                )
+                if key in item
+            }
+            for item in value.get("silences", [])
+            if isinstance(item, dict)
+        ][:1_024],
     }
+
+
+def _failed_payload_digest(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode()).hexdigest()
 
 
 def _reconciliation_for(hass: HomeAssistant) -> Any | None:
@@ -1188,11 +1293,22 @@ class IntentionalAlertsView(HomeAssistantView):
         coordinator = _alerting_for(request.app["hass"])
         if coordinator is None:
             return _error("Integration not configured", "not_configured", 503)
+        current = coordinator.list_alerts()
+        definitions = {
+            (item.get("rule_id"), item.get("name")): item for item in current
+        }
+        retained = [
+            {
+                **definitions.get((item.get("rule_id"), item.get("name")), {}),
+                **item,
+            }
+            for item in coordinator.list_instances()
+        ]
         return web.json_response(
             {
                 "alerts": [
                     _public_alert_projection(alert)
-                    for alert in coordinator.list_alerts()
+                    for alert in [*current, *retained]
                 ],
                 "health": coordinator.health(),
             }
@@ -1229,10 +1345,65 @@ class IntentionalAlertInstanceView(HomeAssistantView):
             {key: value for key, value in event.items() if key not in {"actor", "comment"}}
             for event in audit
         ]
+        is_admin = getattr(request.get("hass_user"), "is_admin", False) is True
+        delivery_fields = (
+            "obligation_id",
+            "message_kind",
+            "status",
+            "attempt",
+            "planned_at_ms",
+            "next_attempt_at_ms",
+            "accepted_at_ms",
+        ) + (("destination", "error_class") if is_admin else ())
+        delivery = [
+            {
+                key: obligation.get(key)
+                for key in delivery_fields
+                if key in obligation
+            }
+            for obligation in coordinator.list_notifications()
+            if instance_id in obligation.get("member_instance_ids", [])
+        ]
+        routing: list[dict[str, Any]] = []
+        repository = _alerting_policy_for(request.app["hass"])
+        if repository is not None and repository.contents is not None:
+            try:
+                routing = repository.preview(
+                    repository.contents,
+                    [dict(instance.get("labels", {}))],
+                    at=datetime.now(UTC),
+                )["results"]
+            except (TypeError, ValueError):
+                routing = []
+        if not is_admin:
+            routing = [
+                {
+                    "routes": [
+                        {
+                            "route_id": route.get("route_id"),
+                            "group_key": {
+                                key: value
+                                for key, value in route.get("group_key", {}).items()
+                                if key != "receiver_revision"
+                            },
+                            **(
+                                {"suppression": route.get("suppression")}
+                                if "suppression" in route
+                                else {}
+                            ),
+                        }
+                        for route in result.get("routes", [])
+                    ],
+                    "fanout": [],
+                }
+                for result in routing
+            ]
         return web.json_response(
             {
                 "instance": _public_alert_projection(instance),
                 "audit": public_audit,
+                "routing": routing,
+                "delivery": delivery,
                 "health": coordinator.health(),
             }
         )
@@ -1443,7 +1614,10 @@ class IntentionalAlertingStatusView(HomeAssistantView):
                     for item in obligations
                 ),
                 "dead_letters": sum(
-                    item.get("status") == "dead_lettered" for item in obligations
+                    coordinator.notification_dead_letter_totals().values()
+                ),
+                "dead_letters_by_destination_and_reason": (
+                    coordinator.notification_dead_letter_totals()
                 ),
             }
         )
@@ -1492,18 +1666,120 @@ class IntentionalAlertingResetView(HomeAssistantView):
         confirmed = data.get("confirmed", False)
         if not isinstance(confirmed, bool):
             return _error("`confirmed` must be a boolean", "bad_request", 400)
+        failed_payload = coordinator.failed_payload()
+        failed_payload_digest = _failed_payload_digest(failed_payload)
         if not confirmed:
+            engine = _engine_for(request.app["hass"])
+            repository = _alerting_policy_for(request.app["hass"])
+            replacement_alerts = []
+            if engine is not None:
+                replacement_alerts = [
+                    dict(observation.labels)
+                    for observation in engine.alert_observations()
+                    if observation.active and observation.quality == "known"
+                ]
+            replacement_preview = None
+            if repository is not None and repository.contents is not None:
+                try:
+                    replacement_preview = repository.preview(
+                        repository.contents,
+                        replacement_alerts,
+                        at=datetime.now(UTC),
+                    )
+                except (TypeError, ValueError):
+                    replacement_preview = None
             return web.json_response(
                 {
                     "requires_confirmation": True,
                     "health": coordinator.health(),
                     "failed_payload": _redact_failed_alert_payload(
-                        coordinator.failed_payload()
+                        failed_payload
                     ),
+                    "failed_payload_digest": failed_payload_digest,
+                    "replacement": {
+                        "active_alerts": len(replacement_alerts),
+                        "fanout_preview": replacement_preview,
+                    },
                 }
+            )
+        if (
+            failed_payload_digest is not None
+            and data.get("failed_payload_digest") != failed_payload_digest
+        ):
+            return _error(
+                "Failed Alert state changed; preview reset again",
+                "generation_mismatch",
+                409,
             )
         await coordinator.async_reset(confirmed=True)
         return web.json_response({"reset": True, "health": coordinator.health()})
+
+
+class IntentionalAlertingTestReceiverView(HomeAssistantView):
+    """Send a rate-limited test through one configured Receiver."""
+
+    url = "/api/intentional/alerting/test-receiver"
+    name = "api:intentional:alerting:test-receiver"
+    requires_auth = True
+
+    @require_admin
+    async def post(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        actor = _request_actor(request)
+        repository = _alerting_policy_for(hass)
+        dispatcher = _alerting_dispatcher_for(hass)
+        if actor is None:
+            return _error("Authenticated actor required", "actor_required", 403)
+        if repository is None or dispatcher is None or repository.contents is None:
+            return _error("Alerting policy not configured", "not_configured", 503)
+        now_ms = int(time.monotonic() * 1_000)
+        if now_ms - _RECEIVER_TEST_LAST_MS.get(actor, -30_000) < 30_000:
+            return _error("Receiver tests are rate limited", "rate_limited", 429)
+        data, error = await _json_object(request)
+        if error is not None:
+            return error
+        assert data is not None
+        receiver = data.get("receiver")
+        if not isinstance(receiver, str) or not receiver:
+            return _error("`receiver` is required", "bad_request", 400)
+        try:
+            destinations = receiver_destinations(
+                repository.contents,
+                receiver,
+                default_timezone=hass.config.time_zone,
+            )
+        except ValueError as err:
+            return _error(str(err), "bad_request", 400)
+        _RECEIVER_TEST_LAST_MS[actor] = now_ms
+        results = []
+        for destination in destinations:
+            try:
+                await dispatcher.async_test_destination(
+                    destination, receiver=receiver
+                )
+            except Exception as err:  # noqa: BLE001 - administrator sees class only
+                results.append(
+                    {
+                        "type": destination.get("type", "unknown"),
+                        "status": "failed",
+                        "error_class": type(err).__name__,
+                    }
+                )
+            else:
+                results.append(
+                    {
+                        "type": destination.get("type", "unknown"),
+                        "status": "accepted",
+                    }
+                )
+        return web.json_response(
+            {
+                "receiver": receiver,
+                "destinations_tested": len(destinations),
+                "success": all(result["status"] == "accepted" for result in results),
+                "results": results,
+            }
+        )
 
 
 class IntentionalAlertingPolicyView(HomeAssistantView):
@@ -1714,13 +1990,35 @@ class IntentionalAlertingSimulateView(HomeAssistantView):
             return _error("`at` must be an ISO 8601 timestamp", "bad_request", 400)
         if at.tzinfo is None:
             return _error("`at` must include a timezone", "bad_request", 400)
+        coordinator = _alerting_for(request.app["hass"])
+        current_alerts = (
+            [
+                dict(alert.get("labels", {}))
+                for alert in coordinator.list_alerts()
+                if alert.get("state") in {"pending", "firing"}
+            ]
+            if coordinator is not None
+            else []
+        )
         try:
-            preview = repository.preview(contents, alerts, at=at)
+            preview = repository.preview(contents, [*current_alerts, *alerts], at=at)
+            for index, result in enumerate(preview.get("alerts", [])):
+                result["source"] = (
+                    "current" if index < len(current_alerts) else "synthetic"
+                )
         except (TypeError, ValueError) as err:
             return web.json_response(
                 {"valid": False, "errors": [str(err)]}, status=400
             )
-        return web.json_response({"valid": True, **preview, "errors": []})
+        return web.json_response(
+            {
+                "valid": True,
+                **preview,
+                "current_alert_count": len(current_alerts),
+                "synthetic_alert_count": len(alerts),
+                "errors": [],
+            }
+        )
 
 
 class IntentionalSimulateView(HomeAssistantView):
@@ -1754,6 +2052,16 @@ class IntentionalSimulateView(HomeAssistantView):
         options = data.get("reconciliation", {})
         selectors = data.get("selectors")
         semantic_metadata = data.get("semantic_metadata")
+        alerting_policy_contents = data.get("alerting_policy")
+        if alerting_policy_contents is None:
+            repository = _alerting_policy_for(request.app["hass"])
+            alerting_policy_contents = (
+                repository.contents if repository is not None else None
+            )
+        if alerting_policy_contents is not None and not isinstance(
+            alerting_policy_contents, str
+        ):
+            return _error("`alerting_policy` must be a string", "bad_request", 400)
         try:
             validate_simulation_input(
                 timeline,
@@ -1768,6 +2076,7 @@ class IntentionalSimulateView(HomeAssistantView):
                 reconciliation_options=options,
                 selector_memberships=selectors,
                 semantic_metadata=semantic_metadata,
+                alerting_policy=alerting_policy_contents,
             )
         except (TypeError, ValueError) as err:
             return _error(str(err), "bad_request", 400)
@@ -2246,6 +2555,7 @@ def register_api(hass: HomeAssistant) -> None:
         IntentionalAlertingStatusView,
         IntentionalAlertingNotificationsView,
         IntentionalAlertingResetView,
+        IntentionalAlertingTestReceiverView,
         IntentionalAlertingPolicyView,
         IntentionalAlertingPolicyHistoryView,
         IntentionalAlertingPolicyHistoryGenerationView,

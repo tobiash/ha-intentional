@@ -4,7 +4,11 @@ from datetime import UTC, datetime
 
 import pytest
 
-from intentional.alerting.policy import AlertingPolicyRepository, simulate_alerting_policy
+from intentional.alerting.policy import (
+    AlertingPolicyRepository,
+    receiver_destinations,
+    simulate_alerting_policy,
+)
 
 
 class _PolicyStore:
@@ -23,6 +27,26 @@ class _PolicyStore:
 class _FailingPolicyStore(_PolicyStore):
     async def async_load(self):
         raise OSError("storage unavailable")
+
+
+@pytest.mark.asyncio
+async def test_policy_store_v1_shape_is_rewritten_with_current_schema() -> None:
+    store = _PolicyStore()
+    store.data = {
+        "contents": """
+route: {id: root, receiver: household}
+receivers:
+  - {name: household, destinations: [{type: persistent_notification}]}
+""",
+        "generation": "legacy",
+        "history": [],
+    }
+    repository = AlertingPolicyRepository(store)
+
+    await repository.async_load()
+
+    assert repository.health()["status"] == "ok"
+    assert store.data["version"] == 2
 
 
 def test_policy_routes_fallback_and_continued_critical_alerts() -> None:
@@ -628,3 +652,72 @@ receivers:
         "route_id": "second",
         "receiver": "household",
     }]
+
+
+def test_policy_exposes_only_validated_named_receiver_destinations() -> None:
+    policy = """
+route: {id: root, receiver: household}
+receivers:
+  - {name: household, destinations: [{type: notify_entity, entity_id: notify.family}]}
+"""
+
+    assert receiver_destinations(policy, "household") == [
+        {"type": "notify_entity", "entity_id": "notify.family"}
+    ]
+    with pytest.raises(ValueError, match="Receiver not found"):
+        receiver_destinations(policy, "missing")
+
+
+def test_policy_supports_no_repeats_and_rejects_unsafe_destinations() -> None:
+    policy = """
+route: {id: root, receiver: household, repeat_interval: never}
+receivers:
+  - {name: household, destinations: [{type: notify_entity, entity_id: notify.family}]}
+"""
+    result = simulate_alerting_policy(
+        policy,
+        [{"alertname": "FreezerHigh"}],
+        at=datetime(2026, 7, 13, 12, tzinfo=UTC),
+    )
+    assert result[0]["routes"][0]["repeat_interval_ms"] is None
+
+    with pytest.raises(ValueError, match="unsupported fields"):
+        simulate_alerting_policy(
+            policy.replace(
+                "entity_id: notify.family",
+                "entity_id: notify.family, data: {secret: unsafe}",
+            ),
+            [{"alertname": "FreezerHigh"}],
+        )
+
+
+def test_policy_rejects_static_inhibition_self_reference_and_cycle() -> None:
+    base = """
+route: {id: root, receiver: household}
+receivers:
+  - {name: household, destinations: [{type: persistent_notification}]}
+inhibit_rules:
+{rules}
+"""
+    self_reference = """
+  - source_matchers: ['severity="critical"']
+    target_matchers: ['severity="critical"']
+    equal: []
+"""
+    with pytest.raises(ValueError, match="cannot inhibit itself"):
+        simulate_alerting_policy(
+            base.replace("{rules}", self_reference), [{"severity": "critical"}]
+        )
+
+    cycle = """
+  - source_matchers: ['service="power"']
+    target_matchers: ['service="network"']
+    equal: []
+  - source_matchers: ['service="network"']
+    target_matchers: ['service="power"']
+    equal: []
+"""
+    with pytest.raises(ValueError, match="cycle"):
+        simulate_alerting_policy(
+            base.replace("{rules}", cycle), [{"service": "power"}]
+        )

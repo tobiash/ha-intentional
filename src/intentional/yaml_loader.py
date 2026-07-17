@@ -42,6 +42,7 @@ Duration shorthand (used for transition, ttl, animation timing):
 
 from __future__ import annotations
 
+import json
 import re
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -71,6 +72,7 @@ from intentional.records import (
 from intentional.rule_model import Rule, RuleDirFingerprint, RuleLoadError
 from intentional.target_policy import TargetPolicy
 from intentional.when_parser import (
+    WhenSyntaxError,
     parse_when,
     references_state_change_pulse,
     requires_state_change_pulse,
@@ -271,15 +273,21 @@ def _validate_rule(
     # emit
     emit = raw.get("emit")
     effects = _parse_effects(raw.get("effect"), rule_id, file, line)
-    when_ast = parse_when(when)
+    try:
+        when_ast = parse_when(when)
+    except WhenSyntaxError:
+        # Engine preflight owns condition diagnostics; Alert pulse validation
+        # must not change the established structured error classification.
+        when_ast = None
     alerts = _parse_alerts(
         raw.get("alert"),
         rule_id,
         file,
         line,
-        pulse=references_state_change_pulse(when_ast),
+        pulse=when_ast is not None and references_state_change_pulse(when_ast),
         mixed_pulse=(
-            references_state_change_pulse(when_ast)
+            when_ast is not None
+            and references_state_change_pulse(when_ast)
             and not requires_state_change_pulse(when_ast)
         ),
     )
@@ -1542,6 +1550,12 @@ def _parse_alerts(
                 file=file,
                 line=line,
             )
+        if any("{{" in value or "{%" in value for value in labels.values()):
+            raise RuleLoadError(
+                f"Rule {rule_id!r}: Alert labels cannot contain templates",
+                file=file,
+                line=line,
+            )
         parsed_annotations = _alert_string_mapping(
             annotations,
             field_name="annotations",
@@ -1554,6 +1568,19 @@ def _parse_alerts(
         if len(summary.encode()) > 256:
             raise RuleLoadError(
                 f"Rule {rule_id!r}: alert summary may be at most 256 bytes",
+                file=file,
+                line=line,
+            )
+        rendered_size = len(
+            json.dumps(
+                {"name": name, "labels": labels, "annotations": parsed_annotations},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode()
+        )
+        if rendered_size > 16_384:
+            raise RuleLoadError(
+                f"Rule {rule_id!r}: rendered Alert may be at most 16 KiB",
                 file=file,
                 line=line,
             )

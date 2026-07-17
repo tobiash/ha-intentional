@@ -1617,6 +1617,16 @@ def test_alert_rejects_reserved_labels_and_content_overflow() -> None:
         load_rules_from_string(
             f'- id: many\n  while: {{binary_sensor.test: "on"}}\n  alert:\n{alerts}\n'
         )
+    with pytest.raises(RuleLoadError, match="labels cannot contain templates"):
+        load_rules_from_string("""
+- id: templated-label
+  while: {binary_sensor.problem: {is: "on"}}
+  alert:
+    name: Problem
+    severity: warning
+    labels: {area: "{{ states('sensor.area') }}"}
+    annotations: {summary: Problem}
+""")
 
 
 def test_document_rejects_more_than_256_alert_definitions() -> None:

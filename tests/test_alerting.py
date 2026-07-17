@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 from dataclasses import replace
 
@@ -85,6 +86,21 @@ async def test_firing_alert_instance_is_durable_across_coordinator_restart() -> 
         "evaluation_status": "current",
     }
     assert restored.list_alerts() == [firing]
+
+
+@pytest.mark.asyncio
+async def test_v1_alert_store_is_rewritten_as_current_schema_on_load() -> None:
+    store = MemoryAlertStore()
+    coordinator = AlertCoordinator(store)
+    await coordinator.async_load()
+    await coordinator.async_observe([engine_observation(active=True)], now_ms=0)
+    store.data["version"] = 1
+
+    restored = AlertCoordinator(store)
+    await restored.async_load()
+
+    assert restored.available is True
+    assert store.data["version"] == 2
 
 
 @pytest.mark.asyncio
@@ -236,6 +252,64 @@ async def test_semantically_invalid_alert_store_fails_closed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_malformed_stored_silence_fails_closed_before_runtime_ingest() -> None:
+    store = MemoryAlertStore()
+    coordinator = AlertCoordinator(store)
+    await coordinator.async_load()
+    await coordinator.async_observe([engine_observation(active=True)], now_ms=0)
+    store.data["silences"] = [{}]
+
+    restored = AlertCoordinator(store)
+    await restored.async_load()
+
+    assert restored.available is False
+    assert restored.health()["current_error"] == "corrupt_alert_store"
+
+
+@pytest.mark.asyncio
+async def test_invalid_stored_silence_matcher_fails_closed_before_matching() -> None:
+    store = MemoryAlertStore()
+    coordinator = AlertCoordinator(store)
+    await coordinator.async_load()
+    await coordinator.async_observe([engine_observation(active=True)], now_ms=0)
+    store.data["silences"] = [
+        {
+            "silence_id": "silence-1",
+            "matchers": ["not valid matcher syntax"],
+            "match_all": False,
+            "actor": "admin",
+            "reason": "maintenance",
+            "created_at_ms": 0,
+            "expires_at_ms": 1_000,
+        }
+    ]
+
+    restored = AlertCoordinator(store)
+    await restored.async_load()
+
+    assert restored.available is False
+    assert restored.health()["current_error"] == "corrupt_alert_store"
+
+
+@pytest.mark.asyncio
+async def test_malformed_optional_capability_state_does_not_disable_alert_lifecycle() -> None:
+    store = MemoryAlertStore()
+    coordinator = AlertCoordinator(store)
+    coordinator.configure_capabilities(b"x" * 32, entry_id="entry")
+    await coordinator.async_load()
+    await coordinator.async_observe([engine_observation(active=True)], now_ms=0)
+    store.data["capabilities"] = {"records": "malformed"}
+
+    restored = AlertCoordinator(store)
+    restored.configure_capabilities(b"x" * 32, entry_id="entry")
+    await restored.async_load()
+
+    assert restored.available is True
+    assert restored.list_alerts()[0]["state"] == "firing"
+    assert restored.health()["current_error"] == "capability_state_invalid"
+
+
+@pytest.mark.asyncio
 async def test_contradictory_persisted_alert_states_fail_closed() -> None:
     from intentional.alerting import alert_definition_key
 
@@ -303,6 +377,64 @@ async def test_repeated_pulse_observation_does_not_extend_alert_deadline() -> No
 
     assert replay == []
     assert coordinator.list_alerts()[0]["state"] == "inactive"
+
+
+@pytest.mark.asyncio
+async def test_pulse_watermark_rejects_replay_after_more_than_64_later_pulses() -> None:
+    store = MemoryAlertStore()
+    coordinator = AlertCoordinator(store, id_factory=lambda: "instance-1")
+    await coordinator.async_load()
+    for sequence in range(1, 70):
+        await coordinator.async_observe(
+            [
+                engine_observation(
+                    active=True,
+                    resolve_after_ms=5_000,
+                    pulse_id=f"event.doorbell:epoch:{sequence}",
+                )
+            ],
+            now_ms=sequence,
+        )
+    await coordinator.async_advance(now_ms=6_000)
+
+    restored = AlertCoordinator(store, id_factory=lambda: "replayed")
+    await restored.async_load()
+    transitions = await restored.async_observe(
+        [
+            engine_observation(
+                active=True,
+                resolve_after_ms=5_000,
+                pulse_id="event.doorbell:epoch:1",
+            )
+        ],
+        now_ms=7_000,
+    )
+
+    assert transitions == []
+    assert restored.list_alerts()[0]["state"] == "inactive"
+
+
+@pytest.mark.asyncio
+async def test_pulse_watermarks_remain_loadable_after_more_than_64_runtime_epochs() -> None:
+    store = MemoryAlertStore()
+    coordinator = AlertCoordinator(store, id_factory=lambda: "instance")
+    await coordinator.async_load()
+    for epoch in range(65):
+        await coordinator.async_observe(
+            [
+                engine_observation(
+                    active=True,
+                    resolve_after_ms=5_000,
+                    pulse_id=f"event.doorbell:epoch-{epoch}:1",
+                )
+            ],
+            now_ms=epoch,
+        )
+
+    restored = AlertCoordinator(store)
+    await restored.async_load()
+
+    assert restored.available is True
 
 
 @pytest.mark.asyncio
@@ -419,6 +551,30 @@ def test_engine_alert_observation_contains_routing_and_definition_context() -> N
     assert len(observation.definition_revision) == 64
 
 
+def test_alert_annotation_rendering_degrades_then_recovers_without_lifecycle_loss() -> None:
+    engine = Engine(clock_fn=lambda: 1_000)
+    engine.load_rules(load_rules_from_string("""
+- id: calculation
+  while: {binary_sensor.problem: {is: "on"}}
+  alert:
+    name: CalculationProblem
+    severity: warning
+    annotations:
+      summary: "Value {{ 10 / (states('sensor.divisor') | int) }}"
+"""))
+    engine.update_state("binary_sensor.problem", "on")
+    engine.evaluate_all()
+
+    degraded = engine.alert_observations()[0]
+    engine.update_state("sensor.divisor", "2")
+    recovered = engine.alert_observations()[0]
+
+    assert degraded.presentation_degraded is True
+    assert degraded.summary.startswith("Value {{")
+    assert recovered.presentation_degraded is False
+    assert recovered.summary == "Value 5.0"
+
+
 @pytest.mark.asyncio
 async def test_coordinator_retains_resolved_instance_and_transition_audit() -> None:
     store = MemoryAlertStore()
@@ -495,6 +651,71 @@ async def test_coordinator_advances_durable_deadlines_without_new_observation() 
     assert restored.list_alerts()[0]["state"] == "firing"
 
 
+@pytest.mark.asyncio
+async def test_startup_barrier_blocks_delivery_until_known_post_sync_evidence() -> None:
+    store = MemoryAlertStore()
+    original = AlertCoordinator(store, id_factory=lambda: "instance-1")
+    await original.async_load()
+    await original.async_observe([engine_observation(active=True)], now_ms=0)
+
+    restored = AlertCoordinator(store)
+    await restored.async_load()
+    restored.begin_startup_barrier()
+    await restored.async_set_policy(
+        """
+route: {id: root, receiver: household, group_wait: 0s}
+receivers:
+  - {name: household, destinations: [{type: persistent_notification}]}
+""",
+        now_ms=0,
+    )
+
+    assert await restored.async_notification_advance(now_ms=0) == []
+    await restored.async_observe(
+        [engine_observation(active=True, quality="unknown")], now_ms=1
+    )
+    assert await restored.async_notification_advance(now_ms=5_000) == []
+    await restored.async_observe([engine_observation(active=True)], now_ms=5_001)
+    assert await restored.async_notification_advance(now_ms=10_000) == []
+    assert len(await restored.async_notification_advance(now_ms=10_001)) == 1
+
+
+@pytest.mark.asyncio
+async def test_operational_mutations_serialize_store_commits() -> None:
+    class SerialStore(MemoryAlertStore):
+        concurrent = 0
+        maximum = 0
+
+        async def async_save(self, data: dict) -> None:
+            self.concurrent += 1
+            self.maximum = max(self.maximum, self.concurrent)
+            await asyncio.sleep(0)
+            await super().async_save(data)
+            self.concurrent -= 1
+
+    store = SerialStore()
+    coordinator = AlertCoordinator(store, id_factory=lambda: "instance-1")
+    await coordinator.async_load()
+    await coordinator.async_observe([engine_observation(active=True)], now_ms=0)
+
+    await asyncio.gather(
+        coordinator.async_acknowledge(
+            "instance-1", actor="user-1", comment=None, now_ms=1
+        ),
+        coordinator.async_create_instance_silence(
+            "instance-1",
+            actor="user-2",
+            reason="maintenance",
+            now_ms=1,
+            duration_ms=60_000,
+        ),
+    )
+
+    assert store.maximum == 1
+    assert coordinator.list_alerts()[0]["acknowledgment"] is not None
+    assert len(coordinator.list_silences()) == 1
+
+
 def engine_observation(
     *,
     active: bool,
@@ -502,6 +723,7 @@ def engine_observation(
     pulse_id: str | None = None,
     for_ms: int = 0,
     inactive_reason: str = "condition_inactive",
+    quality: str = "known",
 ):
     from intentional.alerting import AlertObservation
 
@@ -516,4 +738,5 @@ def engine_observation(
         for_ms=for_ms,
         duration_revision=f"for:{for_ms}",
         inactive_reason=inactive_reason,
+        quality=quality,
     )

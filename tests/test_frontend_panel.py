@@ -113,14 +113,17 @@ def test_alert_detail_fetches_instance_and_renders_safe_operational_state() -> N
           evaluation_status: "stale", active_at_ms: 1000, firing_at_ms: 2000,
           labels: {area: "kitchen"}, acknowledged: true,
           suppression: ["silence"], notification_suppressed: true,
-        }, audit: [{from: "pending", to: "firing", at_ms: 2000, reason: "for_elapsed"}]};
+        }, audit: [{from: "pending", to: "firing", at_ms: 2000, reason: "for_elapsed"}],
+        routing: [{routes: [{route_id: "critical", receiver: "household", group_key: {area: "kitchen"}}]}],
+        delivery: [{status: "accepted", destination: {type: "notify_entity"}, message_kind: "initial", attempt: 1, accepted_at_ms: 2100}],
+        health: {status: "healthy"}};
       };
       await panel._loadAlertDetail("instance/1");
       return {calls, html: panel._renderAlertDetail()};
     })()''')
 
     assert result["calls"] == [["GET", "alerts/instance%2F1"]]
-    for text in ["Lifecycle", "Evidence", "stale", "Labels", "Acknowledgment and suppression", "Acknowledged.", "Available delivery information", "proof of delivery", "Audit", "for_elapsed"]:
+    for text in ["Lifecycle", "Evidence", "stale", "Labels", "Acknowledgment and suppression", "Acknowledged.", "Routing and grouping", "critical", "household", "Notification delivery", "accepted", "notify_entity", "Audit", "for_elapsed"]:
         assert text in result["html"]
     assert "notify.admin" not in result["html"]
 
@@ -207,7 +210,8 @@ def test_policy_has_independent_checked_reviewed_and_published_workflow() -> Non
     assert result["checked"] == "Checked"
     assert result["reviewed"] == "Reviewed"
     assert result["published"] == "Published"
-    assert result["calls"][-1] == {
+    publish_call = next(call for call in result["calls"] if call["method"] == "PUT")
+    assert publish_call == {
         "method": "PUT",
         "path": "alerting/policy",
         "data": {
@@ -352,8 +356,7 @@ def test_guided_pulse_alert_serializes_resolve_after_not_for() -> None:
 def test_unsupported_alert_yaml_refuses_visual_mode_without_data_loss() -> None:
     result = _run_panel_js(r'''(() => {
       const examples = [
-        `- id: described\n  while:\n    sensor.x: on\n  alert:\n    name: X\n    severity: warning\n    annotations:\n      summary: X happened\n      description: Preserve me\n`,
-        `- id: multiple\n  while:\n    sensor.x: on\n  alert:\n    - name: X\n      severity: warning\n      annotations: {summary: X}\n    - name: Y\n      severity: critical\n      annotations: {summary: Y}\n`,
+        `- id: described\n  while:\n    sensor.x: on\n  alert:\n    name: X\n    severity: warning\n    annotations:\n      summary: X happened\n      runbook: Preserve me\n`,
       ];
       return examples.map((yaml) => {
         const panel = new IntentionalPanel(); panel._render = () => {}; panel._contents = yaml;
@@ -366,6 +369,22 @@ def test_unsupported_alert_yaml_refuses_visual_mode_without_data_loss() -> None:
     assert all(item["mode"] == "yaml" for item in result)
     assert all("prevent data loss" in item["error"] for item in result)
     assert all(item["unchanged"] for item in result)
+
+
+def test_guided_authoring_round_trips_multiple_alerts() -> None:
+    result = _run_panel_js(r'''(() => {
+      const yaml = `- id: multiple\n  while:\n    sensor.x: on\n  alert:\n    - name: X\n      severity: warning\n      annotations:\n        summary: X happened\n    - name: Y\n      severity: critical\n      annotations:\n        summary: Y happened\n`;
+      const block = extractRuleBlocks(yaml)[0];
+      const form = parseRuleForm(block.block, {});
+      return {count: [form.alert, ...(form.alerts || [])].filter(Boolean).length, yaml: stringifyRule(form)};
+    })()''')
+
+    assert result["count"] == 2
+    alerts = load_rules_from_string(result["yaml"])[0].alerts
+    assert [(alert.name, alert.severity) for alert in alerts] == [
+        ("X", "warning"),
+        ("Y", "critical"),
+    ]
 
 
 def test_simulation_renders_alert_consequences_and_transitions_separately() -> None:

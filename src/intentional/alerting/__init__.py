@@ -15,6 +15,7 @@ from intentional.alerting.delivery import NotificationRuntime
 from intentional.alerting.policy import match_alert_labels
 
 ALERT_STATE_VERSION = 2
+RETENTION_MS = 30 * 24 * 60 * 60 * 1_000
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,7 @@ class AlertObservation:
     pulse_id: str | None = None
     source_timestamp_ms: int | None = None
     duration_revision: str = ""
+    presentation_degraded: bool = False
 
     @property
     def key(self) -> str:
@@ -71,6 +73,7 @@ class AlertLifecycle:
         self._active: dict[str, _AlertInstance] = {}
         self._unknown_since: dict[str, int] = {}
         self._consumed_pulses: dict[str, list[str]] = {}
+        self._pulse_watermarks: dict[str, dict[str, int]] = {}
         self._stale: set[str] = set()
 
     def advance(
@@ -95,12 +98,11 @@ class AlertLifecycle:
             if evaluation_status == "stale":
                 self._stale.add(observation.key)
             if observation.resolve_after_ms is not None:
-                consumed = self._consumed_pulses.get(observation.key, [])
                 new_pulse = (
                     observation.quality == "known"
                     and observation.active
                     and observation.pulse_id is not None
-                    and observation.pulse_id not in consumed
+                    and self._is_new_pulse(observation.key, observation.pulse_id)
                 )
                 if (
                     observation.quality == "known"
@@ -292,6 +294,7 @@ class AlertLifecycle:
                     "labels": effective_labels,
                     "annotations": dict(observation.annotations),
                     "definition_revision": observation.definition_revision,
+                    "presentation_degraded": observation.presentation_degraded,
                     "stale_episode_started": stale_episode_started,
                 }
             )
@@ -318,6 +321,10 @@ class AlertLifecycle:
             "consumed_pulses": {
                 key: list(pulse_ids)
                 for key, pulse_ids in self._consumed_pulses.items()
+            },
+            "pulse_watermarks": {
+                key: dict(watermarks)
+                for key, watermarks in self._pulse_watermarks.items()
             },
             "stale": sorted(self._stale),
         }
@@ -366,13 +373,38 @@ class AlertLifecycle:
             if isinstance(consumed_pulses, dict)
             else {}
         )
+        pulse_watermarks = state.get("pulse_watermarks", {})
+        self._pulse_watermarks = (
+            {
+                str(key): {str(stream): int(value) for stream, value in watermarks.items()}
+                for key, watermarks in pulse_watermarks.items()
+                if isinstance(watermarks, dict)
+            }
+            if isinstance(pulse_watermarks, dict)
+            else {}
+        )
         stale = state.get("stale", [])
         self._stale = {str(key) for key in stale} if isinstance(stale, list) else set()
 
     def _remember_pulse(self, key: str, pulse_id: str) -> None:
+        parsed = _pulse_streams(pulse_id)
+        if parsed is not None:
+            watermarks = self._pulse_watermarks.setdefault(key, {})
+            for stream, sequence in parsed:
+                watermarks[stream] = max(sequence, watermarks.get(stream, -1))
+            while len(watermarks) > 64:
+                del watermarks[next(iter(watermarks))]
+            return
         consumed = self._consumed_pulses.setdefault(key, [])
         consumed.append(pulse_id)
         del consumed[:-64]
+
+    def _is_new_pulse(self, key: str, pulse_id: str) -> bool:
+        parsed = _pulse_streams(pulse_id)
+        if parsed is None:
+            return pulse_id not in self._consumed_pulses.get(key, [])
+        watermarks = self._pulse_watermarks.get(key, {})
+        return any(sequence > watermarks.get(stream, -1) for stream, sequence in parsed)
 
     @staticmethod
     def _transition(
@@ -397,6 +429,23 @@ class AlertLifecycle:
         }
 
 
+def _pulse_streams(pulse_id: str) -> list[tuple[str, int]] | None:
+    streams: list[tuple[str, int]] = []
+    for token in pulse_id.split("|"):
+        parts = token.rsplit(":", 2)
+        if len(parts) != 3:
+            return None
+        entity_id, epoch, raw_sequence = parts
+        try:
+            sequence = int(raw_sequence)
+        except ValueError:
+            return None
+        if not entity_id or not epoch or sequence < 0:
+            return None
+        streams.append((f"{entity_id}:{epoch}", sequence))
+    return streams or None
+
+
 class AlertStore(Protocol):
     """Persistence port for Alert runtime state."""
 
@@ -417,10 +466,15 @@ def _valid_stored_alert_state(stored: dict[str, Any]) -> bool:
     active = lifecycle.get("active")
     unknown_since = lifecycle.get("unknown_since")
     consumed_pulses = lifecycle.get("consumed_pulses", {})
+    pulse_watermarks = lifecycle.get("pulse_watermarks", {})
     if (
         not isinstance(active, dict)
+        or len(active) > 256
+        or len(alerts) > 256
         or not isinstance(unknown_since, dict)
+        or len(unknown_since) > 256
         or not isinstance(consumed_pulses, dict)
+        or not isinstance(pulse_watermarks, dict)
     ):
         return False
     for key, value in active.items():
@@ -438,6 +492,17 @@ def _valid_stored_alert_state(stored: dict[str, Any]) -> bool:
     if any(
         not isinstance(key, str) or not _nonnegative_int(value)
         for key, value in unknown_since.items()
+    ):
+        return False
+    if len(pulse_watermarks) > 256 or any(
+        not isinstance(key, str)
+        or not isinstance(watermarks, dict)
+        or len(watermarks) > 64
+        or any(
+            not isinstance(stream, str) or not _nonnegative_int(sequence)
+            for stream, sequence in watermarks.items()
+        )
+        for key, watermarks in pulse_watermarks.items()
     ):
         return False
     if any(
@@ -479,6 +544,62 @@ def _valid_stored_alert_state(stored: dict[str, Any]) -> bool:
             ):
                 return False
             projected_active.add(key)
+    observations = stored.get("observations", [])
+    acknowledgments = stored.get("acknowledgments", {})
+    silences = stored.get("silences", [])
+    if (
+        not isinstance(observations, list)
+        or len(observations) > 256
+        or not isinstance(acknowledgments, dict)
+        or len(acknowledgments) > 1_000
+        or not isinstance(silences, list)
+        or len(silences) > 1_024
+    ):
+        return False
+    if any(
+        not isinstance(instance_id, str)
+        or not isinstance(record, dict)
+        or not isinstance(record.get("actor"), str)
+        or not _nonnegative_int(record.get("at_ms"))
+        or (
+            record.get("comment") is not None
+            and not isinstance(record.get("comment"), str)
+        )
+        or record.get("severity") not in {"info", "warning", "critical"}
+        for instance_id, record in acknowledgments.items()
+    ):
+        return False
+    if any(
+        not isinstance(silence, dict)
+        or not isinstance(silence.get("silence_id"), str)
+        or not isinstance(silence.get("actor"), str)
+        or not isinstance(silence.get("reason"), str)
+        or not _nonnegative_int(silence.get("created_at_ms"))
+        or not _nonnegative_int(silence.get("expires_at_ms"))
+        or (
+            not isinstance(silence.get("instance_id"), str)
+            and not isinstance(silence.get("matchers"), list)
+        )
+        or (
+            isinstance(silence.get("matchers"), list)
+            and (
+                len(silence["matchers"]) > 16
+                or any(not isinstance(matcher, str) for matcher in silence["matchers"])
+                or not isinstance(silence.get("match_all"), bool)
+            )
+        )
+        or silence["expires_at_ms"] <= silence["created_at_ms"]
+        for silence in silences
+    ):
+        return False
+    for silence in silences:
+        matchers = silence.get("matchers")
+        if not isinstance(matchers, list):
+            continue
+        try:
+            match_alert_labels(matchers, {})
+        except ValueError:
+            return False
     return projected_active == set(active)
 
 
@@ -599,14 +720,23 @@ class AlertCoordinator:
             if self._capabilities is not None and isinstance(
                 stored.get("capabilities"), dict
             ):
-                self._capabilities.import_state(stored["capabilities"])
+                try:
+                    self._capabilities.import_state(stored["capabilities"])
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    self._capabilities = None
+                    self._entry_id = None
+                    self._current_error = "capability_state_invalid"
         except (KeyError, TypeError, ValueError, OverflowError):
             self.available = False
             self._current_error = "corrupt_alert_store"
             self._failed_payload = deepcopy(stored)
             self._alerts = []
             return
-        self._desired_snapshot = stored
+        if stored.get("version") == 1:
+            self._desired_snapshot = self._current_snapshot()
+            await self._save_current_snapshot()
+        else:
+            self._desired_snapshot = stored
 
     async def async_observe(
         self, observations: Iterable[AlertObservation], *, now_ms: int
@@ -620,6 +750,15 @@ class AlertCoordinator:
                 for silence in self._silences
                 if int(silence["expires_at_ms"]) > now_ms
             ]
+            cutoff = now_ms - RETENTION_MS
+            self._audit = [
+                event for event in self._audit if int(event.get("at_ms", now_ms)) >= cutoff
+            ][-10_000:]
+            self._instances = [
+                instance
+                for instance in self._instances
+                if int(instance.get("resolved_at_ms", now_ms)) >= cutoff
+            ][-1_000:]
             current = list(observations)
             for observation in current:
                 if observation.quality == "known":
@@ -809,9 +948,11 @@ class AlertCoordinator:
     ) -> dict[str, object]:
         if duration_ms <= 0 or duration_ms > 86_400_000:
             raise ValueError("instance Silence duration must be between 1ms and 24h")
-        if not reason or len(reason.encode()) > 256 or len(self._silences) >= 1_024:
+        if not reason or len(reason.encode()) > 256:
             raise ValueError("invalid Silence reason or capacity exhausted")
         async with self._lock:
+            if len(self._silences) >= 1_024:
+                raise ValueError("invalid Silence reason or capacity exhausted")
             snapshot = self._operational_snapshot()
             self._firing_instance(instance_id)
             record: dict[str, object] = {
@@ -844,10 +985,12 @@ class AlertCoordinator:
             raise ValueError("match-all Silence requires match_all confirmation")
         if len(matchers) > 16:
             raise ValueError("Silence may contain at most 16 matchers")
-        if not reason or len(reason.encode()) > 256 or len(self._silences) >= 1_024:
+        if not reason or len(reason.encode()) > 256:
             raise ValueError("invalid Silence reason or capacity exhausted")
         match_alert_labels(matchers, {})
         async with self._lock:
+            if len(self._silences) >= 1_024:
+                raise ValueError("invalid Silence reason or capacity exhausted")
             snapshot = self._operational_snapshot()
             record: dict[str, object] = {
                 "silence_id": str(uuid4()),
@@ -958,8 +1101,10 @@ class AlertCoordinator:
             previous_policy = self._policy_contents
             previous_timezone = self._default_timezone
             previous_notifications = self._notifications.export_state()
+            previous_alerts = deepcopy(self._alerts)
             self._policy_contents = contents
             self._default_timezone = default_timezone
+            self._apply_operational_state(self._alerts, now_ms)
             self._notifications.reconcile(
                 self._alerts,
                 contents,
@@ -972,6 +1117,7 @@ class AlertCoordinator:
                 self._policy_contents = previous_policy
                 self._default_timezone = previous_timezone
                 self._notifications.import_state(previous_notifications)
+                self._alerts = previous_alerts
                 raise AlertStateUnavailableError("Alert policy could not be persisted")
 
     async def async_notification_advance(
@@ -1111,6 +1257,9 @@ class AlertCoordinator:
     def list_notifications(self) -> list[dict[str, Any]]:
         """Return immutable Notification obligations and current statuses."""
         return self._notifications.list_obligations()
+
+    def notification_dead_letter_totals(self) -> dict[str, int]:
+        return self._notifications.dead_letter_totals()
 
     def list_silences(self) -> list[dict[str, object]]:
         return [dict(silence) for silence in self._silences]
@@ -1310,7 +1459,7 @@ class AlertCoordinator:
             alert["notification_suppressed"] = (
                 (
                     alert["acknowledgment"] is not None
-                    and alert.get("stale_episode_started") is not True
+                    and alert.get("evaluation_status") != "stale"
                 )
                 or bool(alert["suppression"])
                 or alert_definition_key(
@@ -1342,3 +1491,9 @@ class AlertCoordinator:
             "dirty": self._dirty,
             "current_error": self._current_error,
         }
+
+    def record_runtime_error(self, error_class: str) -> None:
+        """Expose a contained deadline/delivery failure without disabling lifecycle."""
+        self._current_error = error_class
+        if self._publish is not None:
+            self._publish()

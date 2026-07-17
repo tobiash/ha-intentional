@@ -4,7 +4,7 @@
 
 `ha-intentional` is a HACS-installable custom component that turns Home Assistant automation into reconciliation: rules describe **while** situations in the home, produce durable **intents** for how entities should be, and the engine reconciles actual state toward the resolved desired state.
 
-Rule documents support reusable retention profiles, named local-clock windows, and metadata-aware semantic observations such as power. See [Rule authoring](docs/rules.md).
+Rule documents support reusable retention profiles, named local-clock windows, metadata-aware semantic observations, and durable Alerts. See [Rule authoring](docs/rules.md) and [Alerting](docs/alerting.md).
 
 Core vocabulary:
 
@@ -150,7 +150,7 @@ rules:
       include: scene.movie
 ```
 
-See [`docs/rules.md`](docs/rules.md) for the rule reference and [`examples/`](examples/) for copyable examples.
+See [`docs/rules.md`](docs/rules.md) for the Rule reference, [`docs/alerting.md`](docs/alerting.md) for Alert lifecycle and routing, and [`examples/`](examples/) for copyable examples.
 
 ## Generated Values
 

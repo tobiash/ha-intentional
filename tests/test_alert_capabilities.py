@@ -57,6 +57,61 @@ def json_text(value) -> str:
     return json.dumps(value, sort_keys=True)
 
 
+def test_export_never_prunes_active_capabilities() -> None:
+    sequence = iter(str(index) for index in range(2_048))
+    runtime = CapabilityRuntime(b"x" * 32, id_factory=sequence.__next__)
+    for index in range(2_048):
+        runtime.issue(
+            entry_id="entry",
+            instance_id=f"instance-{index}",
+            operation="acknowledge",
+            destination_id="destination",
+            now_ms=0,
+            expires_at_ms=1_000,
+        )
+    assert len(runtime.export_state()["records"]) == 2_048
+    with pytest.raises(ValueError, match="too many active"):
+        runtime.issue(
+            entry_id="entry",
+            instance_id="overflow",
+            operation="acknowledge",
+            destination_id="destination",
+            now_ms=0,
+            expires_at_ms=1_000,
+        )
+
+
+def test_capability_expiry_actor_operation_and_restart_boundaries() -> None:
+    original = CapabilityRuntime(b"z" * 32, id_factory=lambda: "record-1")
+    issued = original.issue(
+        entry_id="entry-1",
+        instance_id="instance-1",
+        operation="acknowledge",
+        destination_id="destination-1",
+        now_ms=0,
+        expires_at_ms=10_000,
+    )
+    restored = CapabilityRuntime(b"z" * 32)
+    restored.import_state(original.export_state())
+    assert restored.token("record-1") == issued["token"]
+
+    for overrides, message in [
+        ({"actor": None}, "authenticated actor"),
+        ({"operation": "silence_1h"}, "binding mismatch"),
+        ({"entry_id": "other"}, "binding mismatch"),
+        ({"now_ms": 10_000}, "expired"),
+    ]:
+        arguments = {
+            "actor": "user-1",
+            "now_ms": 1,
+            "entry_id": "entry-1",
+            "instance_id": "instance-1",
+            "operation": "acknowledge",
+            **overrides,
+        }
+        with pytest.raises(ValueError, match=message):
+            restored.consume("record-1", issued["token"], **arguments)
+
 async def test_mobile_capability_consumption_is_atomic_with_acknowledgment() -> None:
     class Store:
         def __init__(self):

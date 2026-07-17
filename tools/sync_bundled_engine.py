@@ -46,6 +46,16 @@ def _sync_text(text: str) -> str:
     return text.replace("from intentional.", "from .")
 
 
+def _sync_package_text(text: str, package: str) -> str:
+    prefix = f"from intentional.{package}."
+    package_import = f"from intentional.{package} import"
+    return (
+        text.replace(prefix, "from .")
+        .replace(package_import, "from . import")
+        .replace("from intentional.", "from ..")
+    )
+
+
 def main() -> None:
     BUNDLED.mkdir(parents=True, exist_ok=True)
     for module in MODULES:
@@ -57,7 +67,9 @@ def main() -> None:
         dst_pkg.mkdir(parents=True, exist_ok=True)
         for py_file in sorted(src_pkg.glob("*.py")):
             text = py_file.read_text(encoding="utf-8")
-            (dst_pkg / py_file.name).write_text(_sync_text(text), encoding="utf-8")
+            (dst_pkg / py_file.name).write_text(
+                _sync_package_text(text, pkg), encoding="utf-8"
+            )
 
 
 if __name__ == "__main__":
