@@ -716,6 +716,51 @@ async def test_operational_mutations_serialize_store_commits() -> None:
     assert len(coordinator.list_silences()) == 1
 
 
+@pytest.mark.asyncio
+async def test_stable_observation_timestamp_does_not_churn_store_generation() -> None:
+    class CountingStore(MemoryAlertStore):
+        saves = 0
+
+        async def async_save(self, data: dict) -> None:
+            self.saves += 1
+            await super().async_save(data)
+
+    store = CountingStore()
+    coordinator = AlertCoordinator(store, id_factory=lambda: "instance-1")
+    await coordinator.async_load()
+    await coordinator.async_observe(
+        [replace(engine_observation(active=True), observed_at_ms=1)], now_ms=1
+    )
+    generation = store.data["generation"]
+
+    for now_ms in (100, 200, 300):
+        await coordinator.async_observe(
+            [replace(engine_observation(active=True), observed_at_ms=now_ms)],
+            now_ms=now_ms,
+        )
+
+    assert store.saves == 1
+    assert store.data["generation"] == generation
+
+
+@pytest.mark.asyncio
+async def test_notification_capacity_degradation_is_visible_in_health() -> None:
+    store = MemoryAlertStore()
+    coordinator = AlertCoordinator(store)
+    await coordinator.async_load()
+    await coordinator.async_observe([engine_observation(active=True)], now_ms=0)
+    store.data["notifications"]["degraded"] = True
+
+    restored = AlertCoordinator(store)
+    await restored.async_load()
+
+    assert restored.health() == {
+        "status": "degraded",
+        "dirty": False,
+        "current_error": "notification_capacity_exhausted",
+    }
+
+
 def engine_observation(
     *,
     active: bool,

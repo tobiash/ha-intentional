@@ -6,7 +6,7 @@ import asyncio
 import json
 from collections.abc import Callable, Iterable
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -778,6 +778,14 @@ class AlertCoordinator:
                         inactive_reason="definition_removed",
                     )
                 )
+            current = [
+                replace(observation, observed_at_ms=previous.observed_at_ms)
+                if (previous := self._observations.get(observation.key)) is not None
+                and replace(observation, observed_at_ms=previous.observed_at_ms)
+                == previous
+                else observation
+                for observation in current
+            ]
             self._observations = {
                 observation.key: observation for observation in current
             }
@@ -978,6 +986,7 @@ class AlertCoordinator:
         reason: str,
         now_ms: int,
         duration_ms: int,
+        confirm_critical: bool = False,
     ) -> dict[str, object]:
         if duration_ms <= 0 or duration_ms > 31_536_000_000:
             raise ValueError("matcher Silence duration must be at most one year")
@@ -991,6 +1000,9 @@ class AlertCoordinator:
         async with self._lock:
             if len(self._silences) >= 1_024:
                 raise ValueError("invalid Silence reason or capacity exhausted")
+            preview = self.preview_matcher_silence(matchers, match_all=match_all)
+            if preview["critical"] and not confirm_critical:
+                raise ValueError("critical Alert Silence requires confirmation")
             snapshot = self._operational_snapshot()
             record: dict[str, object] = {
                 "silence_id": str(uuid4()),
@@ -1006,6 +1018,27 @@ class AlertCoordinator:
             self._reconcile_notifications(now_ms)
             await self._persist_or_restore(snapshot)
             return dict(record)
+
+    def preview_matcher_silence(
+        self, matchers: list[str], *, match_all: bool
+    ) -> dict[str, object]:
+        """Return bounded active Alert impact before creating a matcher Silence."""
+        affected = [
+            alert
+            for alert in self._alerts
+            if alert.get("state") == "firing"
+            and (match_all or match_alert_labels(matchers, dict(alert.get("labels", {}))))
+        ]
+        return {
+            "affected": len(affected),
+            "critical": sum(alert.get("severity") == "critical" for alert in affected),
+            "instance_ids": [
+                str(alert["instance_id"])
+                for alert in affected[:100]
+                if alert.get("instance_id") is not None
+            ],
+            "truncated": len(affected) > 100,
+        }
 
     async def async_delete_silence(
         self, silence_id: str, *, actor: str, now_ms: int
@@ -1480,16 +1513,20 @@ class AlertCoordinator:
 
     def health(self) -> dict[str, object]:
         """Return Alert persistence health."""
+        capacity_degraded = self._notifications.degraded
         return {
             "status": (
                 "unhealthy"
                 if not self.available
                 else "degraded"
-                if self._current_error is not None
+                if self._current_error is not None or capacity_degraded
                 else "ok"
             ),
             "dirty": self._dirty,
-            "current_error": self._current_error,
+            "current_error": (
+                self._current_error
+                or ("notification_capacity_exhausted" if capacity_degraded else None)
+            ),
         }
 
     def record_runtime_error(self, error_class: str) -> None:

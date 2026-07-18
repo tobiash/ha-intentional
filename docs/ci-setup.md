@@ -50,12 +50,12 @@ The workflow runs on every push to `main` and every pull request:
 If anything fails, the workflow fails and you get a red ❌ on
 the PR / commit.
 
-## Why one Python version, not a matrix
+## Home Assistant compatibility matrix
 
-The engine is pure Python with no C extensions, but the HA-backed integration
-tests follow Home Assistant's supported interpreter. We test on Python 3.14
-only because HA 2026.5+ requires Python 3.14.2 or newer.
-A matrix would triple CI time for no real-world signal.
+The engine is pure Python with no C extensions. HA-backed integration tests run
+on Python 3.14 against the current and previous supported Home Assistant
+releases. The harness versions in `.github/workflows/test.yml` strictly pin the
+corresponding Home Assistant versions.
 
 If a future change introduces C extensions, add a matrix at
 that point.

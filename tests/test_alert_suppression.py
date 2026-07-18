@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from intentional.alerting import AlertCoordinator, AlertObservation
 
 
@@ -127,3 +129,35 @@ receivers:
 
     assert len(due) == 1
     assert due[0]["message_kind"] == "update"
+
+
+async def test_match_all_silence_previews_and_requires_critical_confirmation() -> None:
+    coordinator = AlertCoordinator(Store(), id_factory=lambda: "instance-1")
+    await coordinator.async_load()
+    await coordinator.async_observe([observation()], now_ms=0)
+
+    assert coordinator.preview_matcher_silence([], match_all=True) == {
+        "affected": 1,
+        "critical": 1,
+        "instance_ids": ["instance-1"],
+        "truncated": False,
+    }
+    with pytest.raises(ValueError, match="critical Alert Silence requires confirmation"):
+        await coordinator.async_create_matcher_silence(
+            [],
+            match_all=True,
+            actor="admin",
+            reason="maintenance",
+            now_ms=1,
+            duration_ms=60_000,
+        )
+    silence = await coordinator.async_create_matcher_silence(
+        [],
+        match_all=True,
+        actor="admin",
+        reason="maintenance",
+        now_ms=1,
+        duration_ms=60_000,
+        confirm_critical=True,
+    )
+    assert silence["match_all"] is True

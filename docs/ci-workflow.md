@@ -1,8 +1,9 @@
 # CI workflow
 
-The authoritative workflow is [`ci/test.yml`](../ci/test.yml). It lives there
-instead of `.github/workflows/test.yml` until the repository token has
-`workflow` scope. To enable it, follow [`docs/ci-setup.md`](ci-setup.md).
+The executable source of truth is
+[`.github/workflows/test.yml`](../.github/workflows/test.yml). The copy at
+[`ci/test.yml`](../ci/test.yml) is kept byte-for-byte identical for local
+inspection and recovery.
 
 ## What CI Runs
 

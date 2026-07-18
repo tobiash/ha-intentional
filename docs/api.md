@@ -47,6 +47,23 @@ Long-lived tokens are created in Home Assistant under Profile -> Long-Lived Acce
 | `GET` | `/api/intentional/migrate-ha` | Discover loaded HA automations using bounded, redacted metadata (admin). |
 | `GET` | `/api/intentional/migrate-ha/{entity_id}` | Inspect migration support and diagnostics without exposing raw config (admin). |
 | `POST` | `/api/intentional/migrate-ha/propose` | Generate and merged-validate a deterministic Rule proposal (admin). |
+| `GET` | `/api/intentional/alerts` | List current definitions and retained resolved Alert instances. |
+| `GET` | `/api/intentional/alerts/{instance_id}` | Read one Alert instance with redacted routing and delivery status. |
+| `POST` | `/api/intentional/alerts/{instance_id}/acknowledge` | Acknowledge one firing Alert instance. |
+| `DELETE` | `/api/intentional/alerts/{instance_id}/acknowledge` | Revoke an acknowledgment. |
+| `POST` | `/api/intentional/alerts/{instance_id}/silence` | Silence one firing Alert instance temporarily. |
+| `GET` | `/api/intentional/silences` | List visible operational Silences. |
+| `POST` | `/api/intentional/silences` | Preview and create a matcher Silence (admin; critical impact requires confirmation). |
+| `DELETE` | `/api/intentional/silences/{silence_id}` | Remove an authorized Silence. |
+| `GET` | `/api/intentional/alerting/status` | Bounded Alert and Notification health counters. |
+| `GET` | `/api/intentional/alerting/notifications` | Redacted durable Notification obligation audit (admin). |
+| `GET`, `PUT` | `/api/intentional/alerting/policy` | Read or generation-guard publication of routing policy (admin). |
+| `GET` | `/api/intentional/alerting/policy/history` | List prior routing policy generations (admin). |
+| `GET` | `/api/intentional/alerting/policy/history/{generation}` | Read one prior policy generation (admin). |
+| `POST` | `/api/intentional/alerting/policy/rollback` | Restore a prior policy generation (admin). |
+| `POST` | `/api/intentional/alerting/simulate` | Preview current-plus-synthetic routing and fan-out (admin). |
+| `POST` | `/api/intentional/alerting/test-receiver` | Send a rate-limited test to every destination in one Receiver (admin). |
+| `POST` | `/api/intentional/alerting/reset` | Export/preview and explicitly replace unavailable Alert state (admin). |
 
 ## HA Automation Migration
 

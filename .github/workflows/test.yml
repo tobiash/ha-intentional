@@ -68,10 +68,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - ha-version: "2026.2.3"
-            harness-version: "0.13.316"
-          - ha-version: "2026.1.0"
-            harness-version: "0.13.305"
+          - ha-version: "2026.6.0"
+            harness-version: "0.13.336"
+          - ha-version: "2026.5.1"
+            harness-version: "0.13.330"
 
     steps:
       - name: Checkout
@@ -83,7 +83,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: "3.14"
           cache: "pip"
 
       - name: Install dependencies

@@ -3,8 +3,8 @@ set -euo pipefail
 
 PYTHON_BIN="${PYTHON_BIN:-python3.14}"
 VENV_DIR="${VENV_DIR:-.venv-ha}"
-HA_VERSION="${HA_VERSION:-2026.5.1}"
-HA_TEST_HARNESS_VERSION="${HA_TEST_HARNESS_VERSION:-0.13.316}"
+HA_VERSION="${HA_VERSION:-2026.6.0}"
+HA_TEST_HARNESS_VERSION="${HA_TEST_HARNESS_VERSION:-0.13.336}"
 
 if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
   cat >&2 <<EOF

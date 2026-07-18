@@ -1372,7 +1372,7 @@ class IntentionalAlertInstanceView(HomeAssistantView):
                     repository.contents,
                     [dict(instance.get("labels", {}))],
                     at=datetime.now(UTC),
-                )["results"]
+                )["alerts"]
             except (TypeError, ValueError):
                 routing = []
         if not is_admin:
@@ -1534,6 +1534,7 @@ class IntentionalSilencesView(HomeAssistantView):
         reason = data.get("reason")
         duration_ms = data.get("duration_ms")
         match_all = data.get("match_all", False)
+        confirm_critical = data.get("confirm_critical", False)
         if (
             not isinstance(matchers, list)
             or not all(isinstance(item, str) for item in matchers)
@@ -1542,9 +1543,22 @@ class IntentionalSilencesView(HomeAssistantView):
             or not isinstance(duration_ms, int)
             or isinstance(duration_ms, bool)
             or not isinstance(match_all, bool)
+            or not isinstance(confirm_critical, bool)
         ):
             return _error("Invalid matcher Silence", "bad_request", 400)
         try:
+            preview = coordinator.preview_matcher_silence(
+                matchers, match_all=match_all
+            )
+            if preview["critical"] and not confirm_critical:
+                return web.json_response(
+                    {
+                        "error": "Critical Alert Silence requires confirmation",
+                        "code": "confirmation_required",
+                        "preview": preview,
+                    },
+                    status=409,
+                )
             silence = await coordinator.async_create_matcher_silence(
                 matchers,
                 match_all=match_all,
@@ -1552,10 +1566,11 @@ class IntentionalSilencesView(HomeAssistantView):
                 reason=reason,
                 now_ms=int(datetime.now(UTC).timestamp() * 1_000),
                 duration_ms=duration_ms,
+                confirm_critical=confirm_critical,
             )
         except ValueError as err:
             return _error(str(err), "bad_request", 400)
-        return web.json_response({"silence": silence})
+        return web.json_response({"silence": silence, "preview": preview})
 
 
 class IntentionalSilenceView(HomeAssistantView):
