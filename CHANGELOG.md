@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-07-18
+
+### Added
+- **First-class durable Alerts** let Authored Rules assert attention state independently of Intents and Effects, including pending, firing, stale, resolved, recurring, pulse-observed, multi-Alert, and timed-severity lifecycles.
+- **Alerting policy** adds safe matchers, inherited routes, grouping, active and mute intervals, inhibition, Receiver revisions, fan-out preview, history, rollback, and spike confirmation.
+- **Durable Notifications** persist immutable per-destination obligations before dispatch, with retries, repeats, dead letters, persistent-notification cleanup, suppression release, and restart recovery.
+- **Operational controls** add acknowledgments, instance and matcher Silences, single-use mobile capabilities, Alert sensors, Alerting health entities, administrator Receiver tests, reset recovery, and redacted HTTP APIs.
+- **Alert workspaces** add the Alert Ledger, lifecycle and delivery explanations, multi-Alert guided authoring, policy administration, and production-core timeline simulation.
+
+### Changed
+- **Home Assistant compatibility CI** now validates current and previous releases, Home Assistant 2026.6.0 and 2026.5.1, on Python 3.14.
+- **Public documentation and security scope** now cover Alert DSL, routing, suppression, Receiver restrictions, mobile capabilities, recovery, and operational APIs.
+
+### Fixed
+- Stable Alert observations no longer write the Alert Store or republish entities on every 100 ms Tick runtime cycle.
+- In-flight delivery removal, Receiver edits, stale acknowledged episodes, startup evidence, corrupt optional state, capacity degradation, and broad critical Silences fail safely and remain observable.
+
 ## [0.11.1] - 2026-07-12
 
 ### Fixed
