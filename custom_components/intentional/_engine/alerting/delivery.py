@@ -490,15 +490,18 @@ class NotificationRuntime:
         if kind in {"resolved", "cleanup"}:
             return {"title": "Resolved", "message": "Alert resolved"}
         if len(members) == 1:
-            message = str(members[0]["summary"])
+            title = str(members[0]["summary"])
+            description = members[0].get("annotations", {}).get("description")
+            message = str(description) if description else title
         else:
+            title = f"{len(members)} alerts"
             shown: list[str] = []
             for member in members[:20]:
                 candidate = [*shown, str(member["summary"])]
                 omitted = len(members) - len(candidate)
                 suffix = f"\n+{omitted} more ({len(members)} total)" if omitted else ""
                 payload = {
-                    "title": "Intentional Alerts",
+                    "title": title,
                     "message": "\n".join(candidate) + suffix,
                 }
                 if len(json.dumps(payload, ensure_ascii=False).encode()) > 16_384:
@@ -508,7 +511,7 @@ class NotificationRuntime:
             message = "\n".join(shown)
             if omitted:
                 message += f"\n+{omitted} more ({len(members)} total)"
-        payload = {"title": "Intentional Alerts", "message": message}
+        payload = {"title": title, "message": message}
         while (
             len(members) > 1
             and shown

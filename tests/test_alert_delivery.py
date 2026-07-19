@@ -46,7 +46,31 @@ def test_group_wait_plans_one_immutable_obligation_per_destination() -> None:
         "obligation-2",
     ]
     assert all(item["status"] == "planned" for item in due)
+    assert all(item["payload"]["title"] == "Freezer is too warm" for item in due)
     assert all(item["payload"]["message"] == "Freezer is too warm" for item in due)
+
+
+def test_singleton_notification_uses_alert_presentation_without_product_prefix() -> None:
+    runtime = NotificationRuntime(id_factory=lambda: "obligation-1")
+    policy = POLICY.replace("group_wait: 30s", "group_wait: 0s").replace(
+        "      - {type: persistent_notification}\n", ""
+    )
+    alert = {
+        **firing(),
+        "annotations": {
+            "summary": "Balcony PM2.5 is 42 µg/m³",
+            "description": "Close doors and windows.",
+        },
+        "summary": "Balcony PM2.5 is 42 µg/m³",
+    }
+
+    runtime.reconcile([alert], policy, now_ms=0)
+    payload = runtime.advance(now_ms=0)[0]["payload"]
+
+    assert payload == {
+        "title": "Balcony PM2.5 is 42 µg/m³",
+        "message": "Close doors and windows.",
+    }
 
     restored = NotificationRuntime()
     restored.import_state(runtime.export_state())
