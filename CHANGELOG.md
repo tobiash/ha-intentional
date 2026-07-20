@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.2] - 2026-07-20
+
+### Fixed
+- Unavailable Target states no longer become Manual overrides.
+- Target reports during the first 30 seconds after availability recovery are excluded from Drift promotion, allowing Reconciliation to restore the active desired state after device or coordinator outages.
+
 ## [0.12.1] - 2026-07-18
 
 ### Fixed
