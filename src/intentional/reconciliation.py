@@ -559,6 +559,7 @@ class Reconciliation:
         drift_confirmation_ms: int,
         service_failure_backoff_ms: int,
         drift_transition_grace_ms: int = 2_000,
+        availability_recovery_grace_ms: int = 30_000,
         service_failure_backoff_max_ms: int | None = None,
         retry_jitter_fn: Callable[[str, int, int], int] | None = None,
     ) -> None:
@@ -574,11 +575,14 @@ class Reconciliation:
             raise ValueError("service_failure_backoff_max_ms must be at least the base backoff")
         self._retry_jitter_fn = retry_jitter_fn or (lambda _target, _attempt, delay: delay)
         self._drift_transition_grace_ms = drift_transition_grace_ms
+        self._availability_recovery_grace_ms = availability_recovery_grace_ms
 
         self._last_applied: dict[str, ServicePlanSignature] = {}
         self._last_resolved: dict[str, ResolvedTargetState] = {}
         self._drift_suppressed_until: dict[str, int] = {}
         self._drift_candidates: dict[str, Any] = {}
+        self._unavailable_targets: set[str] = set()
+        self._availability_recovery_until: dict[str, int] = {}
         self._service_failure_backoff: dict[str, _RetryState] = {}
         self._service_plan_progress: dict[str, tuple[ServicePlanSignature, int]] = {}
         self._policy_denials: dict[str, dict[str, Any]] = {}
@@ -677,6 +681,22 @@ class Reconciliation:
     ) -> list[ReconciliationEvent]:
         """Classify one observed state as intentional, staged, or promoted drift."""
         entity_id = state.entity_id
+        if _state_is_unavailable(state):
+            self._unavailable_targets.add(entity_id)
+            clear_pending_state_drift(self._drift_candidates, entity_id)
+            return []
+        if entity_id in self._unavailable_targets:
+            self._unavailable_targets.remove(entity_id)
+            self._availability_recovery_until[entity_id] = max(
+                self._availability_recovery_until.get(entity_id, 0),
+                now_ms + self._availability_recovery_grace_ms,
+            )
+        recovery_until = self._availability_recovery_until.get(entity_id)
+        if recovery_until is not None:
+            if now_ms < recovery_until:
+                clear_pending_state_drift(self._drift_candidates, entity_id)
+                return []
+            self._availability_recovery_until.pop(entity_id, None)
         policy = getattr(engine, "target_policy", lambda _target: None)(entity_id)
         if policy is not None and policy.ownership != "managed":
             clear_pending_state_drift(self._drift_candidates, entity_id)
@@ -1522,6 +1542,7 @@ class Reconciliation:
             self._last_applied,
             self._drift_suppressed_until,
             self._drift_candidates,
+            self._availability_recovery_until,
             self._service_failure_backoff,
             self._service_plan_progress,
             self._policy_denials,
@@ -1531,6 +1552,7 @@ class Reconciliation:
         ):
             for target in set(mapping) - targets:
                 mapping.pop(target, None)
+        self._unavailable_targets.intersection_update(targets)
 
 
 def _state_is_unavailable(state: Any | None) -> bool:

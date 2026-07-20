@@ -333,6 +333,36 @@ async def test_on_state_delta_promotes_drift_immediately_without_confirmation() 
 
 
 @pytest.mark.asyncio
+async def test_availability_recovery_does_not_become_manual_override() -> None:
+    engine = _make_engine_with_light_rule()
+    adapter = _FakeAdapter()
+    adapter.set_state("light.desk", "on")
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=0,
+        service_failure_backoff_ms=30_000,
+    )
+    await reconciler.apply(engine, adapter, now_ms=1_000)
+
+    adapter.set_state("light.desk", "unavailable")
+    unavailable = reconciler.on_state_delta(
+        engine, adapter.get_state("light.desk"), _NoContextTracker(), now_ms=2_000
+    )
+    adapter.set_state("light.desk", "off")
+    recovered = reconciler.on_state_delta(
+        engine, adapter.get_state("light.desk"), _NoContextTracker(), now_ms=100_000
+    )
+    events = await reconciler.tick(
+        engine, adapter, _NoContextTracker(), now_ms=100_001
+    )
+
+    assert _events_of(unavailable, "drift_promoted") == []
+    assert _events_of(recovered, "drift_promoted") == []
+    assert _events_of(events, "service_applied")
+    assert adapter.calls[-1][1] == "turn_on"
+
+
+@pytest.mark.asyncio
 async def test_on_state_delta_stages_then_promotes_across_confirmation_window() -> None:
     """With confirmation_ms > 0, drift is staged first, promoted after the window."""
     engine = _make_engine_with_light_rule()
