@@ -923,8 +923,12 @@ class Reconciliation:
             )
             self._shadow_plans.pop(target, None)
             if (
-                policy is not None
-                and policy.unavailable == "skip"
+                (
+                    policy is not None
+                    and policy.unavailable == "skip"
+                    or policy is None
+                    and current_state is not None
+                )
                 and _state_is_unavailable(current_state)
             ):
                 denial = {
@@ -1227,6 +1231,29 @@ class Reconciliation:
             if retry is not None and now_ms < retry.retry_at_ms:
                 continue
             current_state = adapter.get_state(stale_target)
+            if (
+                (
+                    policy is not None
+                    and policy.unavailable == "skip"
+                    or policy is None
+                    and current_state is not None
+                )
+                and _state_is_unavailable(current_state)
+            ):
+                denial = {
+                    "code": "target_unavailable",
+                    "message": (
+                        f"{stale_target} is unavailable; dispatch is skipped."
+                    ),
+                }
+                if self._policy_denials.get(stale_target) != denial:
+                    self._policy_denials[stale_target] = denial
+                    events.append(
+                        ReconciliationEvent(
+                            "service_denied_target_policy", stale_target, denial
+                        )
+                    )
+                continue
             if current_state is not None and service_plan_matches_state(signature, current_state):
                 self._last_resolved.pop(stale_target, None)
                 self._last_applied[stale_target] = signature

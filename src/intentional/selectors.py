@@ -75,7 +75,12 @@ def _selector_target_possibilities(
         selector.operator in {"is", "is_not"}
         and selector.value in {"unknown", "unavailable"}
     )
-    if (actual is None or actual in {"unknown", "unavailable"}) and not explicit_unavailable:
+    availability = state.get(f"{target}.availability")
+    if (
+        availability in {"unknown", "unavailable"}
+        or actual is None
+        or actual in {"unknown", "unavailable"}
+    ) and not explicit_unavailable:
         return {False, True}
     return {observe_selector_target_matches(state, target, selector)}
 
@@ -204,9 +209,19 @@ def observe_selector_target_matches(
     """Return whether one selected target satisfies its observation comparison."""
     actual = state.get(f"{target}.{selector.field}")
     expected = selector.value
+    availability = state.get(f"{target}.availability")
+    if (
+        selector.operator in {"is", "is_not"}
+        and expected in {"unknown", "unavailable"}
+        and availability in {"unknown", "unavailable"}
+    ):
+        actual = availability
     if selector.edge and not state.get(f"{target}.changed", False):
         return False
-    if selector.purpose is not None and actual in {"unknown", "unavailable"}:
+    if selector.purpose is not None and (
+        availability in {"unknown", "unavailable"}
+        or actual in {"unknown", "unavailable"}
+    ):
         return False
     if selector.operator == "is":
         return actual == expected

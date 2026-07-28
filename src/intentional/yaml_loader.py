@@ -2182,7 +2182,7 @@ def _target_policies_from_document(raw_targets: Any, *, file: Path | None) -> di
         ownership = raw.get("ownership", "managed")
         if ownership not in {"managed", "opportunistic", "observe_only"}:
             raise RuleLoadError(f"Target {target!r}: `ownership` must be managed, opportunistic, or observe_only", file=file)
-        unavailable = raw.get("unavailable", "allow")
+        unavailable = raw.get("unavailable", "skip")
         if unavailable not in {"allow", "skip"}:
             raise RuleLoadError(f"Target {target!r}: `unavailable` must be allow or skip", file=file)
         dispatch = raw.get("dispatch", "apply")

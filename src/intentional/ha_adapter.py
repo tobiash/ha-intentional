@@ -67,9 +67,15 @@ def sync_time_context_into_engine(engine: Engine, now: datetime | None = None) -
 def sync_state_object_into_engine(engine: Engine, state: Any) -> None:
     """Sync one HA-style State object into the engine, including attributes."""
     entity_id = state.entity_id
-    engine.update_state(entity_id, state.state)
+    availability = str(state.state).lower()
+    if availability in {"unknown", "unavailable"}:
+        engine.update_state(entity_id, availability, field="availability")
+        return
 
-    current_fields = {"state"}
+    engine.update_state(entity_id, state.state)
+    engine.update_state(entity_id, "available", field="availability")
+
+    current_fields = {"state", "availability"}
     for synthetic_field in ("changed", "triggered"):
         if f"{entity_id}.{synthetic_field}" in engine.state:
             current_fields.add(synthetic_field)
@@ -101,6 +107,10 @@ def pulse_state_change(
     """
     entity_id = new_state.entity_id
     if old_state is None:
+        return False
+    if str(old_state.state).lower() in {"unknown", "unavailable"} or str(
+        new_state.state
+    ).lower() in {"unknown", "unavailable"}:
         return False
     old_attributes = getattr(old_state, "attributes", {})
     new_attributes = getattr(new_state, "attributes", {})

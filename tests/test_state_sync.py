@@ -37,7 +37,7 @@ def test_state_sync_exposes_attributes_to_when_expressions() -> None:
     assert resolved.value == {"state": "on", "brightness_pct": 80}
 
 
-def test_state_sync_removes_stale_attributes() -> None:
+def test_state_sync_retains_last_known_values_while_unavailable() -> None:
     from intentional.engine import Engine
     from intentional.ha_adapter import sync_state_object_into_engine
 
@@ -62,7 +62,78 @@ def test_state_sync_removes_stale_attributes() -> None:
         ),
     )
 
-    assert engine.state["sensor.office_light.state"] == "unknown"
+    assert engine.state["sensor.office_light.state"] == "42"
+    assert engine.state["sensor.office_light.illuminance"] == 42
+    assert engine.state["sensor.office_light.availability"] == "unknown"
+
+
+def test_state_sync_exposes_unavailable_without_changing_last_known_rule_value() -> None:
+    from intentional.engine import Engine
+    from intentional.ha_adapter import sync_state_object_into_engine
+    from intentional.yaml_loader import Rule
+
+    engine = Engine(clock_fn=lambda: 1000)
+    engine.load_rules([
+        Rule(
+            id="production-high",
+            when="sensor.solar_power > 50",
+            target="switch.fountain",
+            set={"state": "on"},
+        ),
+        Rule(
+            id="source-unavailable",
+            when='sensor.solar_power == "unavailable"',
+            target="input_boolean.solar_fault",
+            set={"state": "on"},
+        ),
+    ])
+    sync_state_object_into_engine(
+        engine,
+        SimpleNamespace(entity_id="sensor.solar_power", state="60", attributes={}),
+    )
+    engine.evaluate_all()
+    assert engine.resolve("switch.fountain") is not None
+    assert engine.resolve("input_boolean.solar_fault") is None
+
+    sync_state_object_into_engine(
+        engine,
+        SimpleNamespace(
+            entity_id="sensor.solar_power", state="unavailable", attributes={}
+        ),
+    )
+    engine.evaluate_all()
+
+    assert engine.state["sensor.solar_power.state"] == "60"
+    assert engine.resolve("switch.fountain") is not None
+    assert engine.resolve("input_boolean.solar_fault") is not None
+
+
+def test_state_sync_removes_stale_attributes_after_recovery() -> None:
+    from intentional.engine import Engine
+    from intentional.ha_adapter import sync_state_object_into_engine
+
+    engine = Engine(clock_fn=lambda: 1000)
+    sync_state_object_into_engine(
+        engine,
+        SimpleNamespace(
+            entity_id="sensor.office_light",
+            state="42",
+            attributes={"illuminance": 42},
+        ),
+    )
+    sync_state_object_into_engine(
+        engine,
+        SimpleNamespace(
+            entity_id="sensor.office_light", state="unavailable", attributes={}
+        ),
+    )
+    sync_state_object_into_engine(
+        engine,
+        SimpleNamespace(entity_id="sensor.office_light", state="41", attributes={}),
+    )
+
+    assert engine.state["sensor.office_light.state"] == "41"
+    assert engine.state["sensor.office_light.availability"] == "available"
     assert "sensor.office_light.illuminance" not in engine.state
 
 
@@ -248,6 +319,23 @@ def test_regular_state_change_does_not_pulse_initial_state() -> None:
 
     assert not pulse_state_change(engine, None, new_state)
     assert "binary_sensor.front_door.changed" not in engine.state
+
+
+def test_availability_changes_do_not_emit_changed_pulses() -> None:
+    from intentional.engine import Engine
+    from intentional.ha_adapter import pulse_state_change
+
+    engine = Engine(clock_fn=lambda: 1000)
+    available = SimpleNamespace(
+        entity_id="sensor.solar_power", state="42", attributes={}
+    )
+    unavailable = SimpleNamespace(
+        entity_id="sensor.solar_power", state="unavailable", attributes={}
+    )
+
+    assert not pulse_state_change(engine, available, unavailable)
+    assert not pulse_state_change(engine, unavailable, available)
+    assert "sensor.solar_power.changed" not in engine.state
 
 
 def test_time_sync_sets_bucket_and_exact_clock_context() -> None:

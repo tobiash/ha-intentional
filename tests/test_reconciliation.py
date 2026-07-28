@@ -195,6 +195,72 @@ async def test_unavailable_policy_and_retry_ceiling_suppress_dispatch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unavailable_target_skips_dispatch_by_default() -> None:
+    engine = _make_engine_with_light_rule()
+    adapter = _FakeAdapter()
+    adapter.set_state("light.desk", "unavailable")
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=1, drift_confirmation_ms=0, service_failure_backoff_ms=10
+    )
+
+    events = await reconciler.apply(engine, adapter, 0)
+
+    assert adapter.calls == []
+    assert (
+        _events_of(events, "service_denied_target_policy")[0].details["code"]
+        == "target_unavailable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_unavailable_target_can_explicitly_allow_dispatch() -> None:
+    engine = _make_engine_with_light_rule()
+    engine.load_rules(
+        engine.loaded_rules(),
+        target_policies={"light.desk": TargetPolicy(unavailable="allow")},
+    )
+    engine.evaluate_all()
+    adapter = _FakeAdapter()
+    adapter.set_state("light.desk", "unavailable")
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=1, drift_confirmation_ms=0, service_failure_backoff_ms=10
+    )
+
+    await reconciler.apply(engine, adapter, 0)
+
+    assert adapter.calls[-1][1] == "turn_on"
+
+
+@pytest.mark.asyncio
+async def test_unavailable_target_defers_withdrawal_until_recovery() -> None:
+    engine = _make_engine_with_light_rule()
+    adapter = _FakeAdapter()
+    adapter.set_state("light.desk", "on", {"brightness": 153})
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=1, drift_confirmation_ms=0, service_failure_backoff_ms=10
+    )
+    await reconciler.apply(engine, adapter, 0)
+    engine.load_rules([])
+    engine.evaluate_all()
+    adapter.calls.clear()
+    adapter.set_state("light.desk", "unavailable")
+
+    unavailable = await reconciler.apply(engine, adapter, 1)
+
+    assert adapter.calls == []
+    assert (
+        _events_of(unavailable, "service_denied_target_policy")[0].details["code"]
+        == "target_unavailable"
+    )
+
+    adapter.set_state("light.desk", "on", {"brightness": 153})
+    recovered = await reconciler.apply(engine, adapter, 2)
+
+    assert adapter.calls[-1][1] == "turn_off"
+    assert _events_of(recovered, "service_applied")
+
+
+@pytest.mark.asyncio
 async def test_opportunistic_ownership_survives_restart_without_withdrawal() -> None:
     engine = Engine(clock_fn=lambda: 0)
     engine.load_rules(

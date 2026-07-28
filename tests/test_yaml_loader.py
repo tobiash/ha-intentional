@@ -108,6 +108,7 @@ rules: []
 
         assert rules == []
         assert rules.target_policies["light.dynamic"].ownership == "observe_only"
+        assert rules.target_policies["light.dynamic"].unavailable == "skip"
 
     @pytest.mark.parametrize("field,value", [
         ("ownership", "exclusive"),

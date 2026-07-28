@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.3] - 2026-07-28
+
+### Changed
+- Observed entities retain their last known state and attributes through transient `unknown` and `unavailable` states while explicit availability observations continue to see the raw status.
+- Target Reconciliation now defaults to suppressing apply and withdrawal calls while Home Assistant reports a Target as `unknown` or `unavailable`; `unavailable: allow` remains an explicit legacy opt-in.
+
+### Fixed
+- Availability transitions no longer emit false state-change pulses or reset stable observation and release conditions.
+- Unavailable Targets no longer produce repeated service-call storms during device, integration, or coordinator outages.
+
 ## [0.12.2] - 2026-07-20
 
 ### Fixed

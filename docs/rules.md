@@ -807,7 +807,7 @@ targets:
 
 `ownership` is `managed`, `opportunistic`, or `observe_only`. Managed Targets participate in dispatch, Drift promotion, and withdrawal. Opportunistic Targets may receive Service plans but are neither withdrawn nor promoted from Drift. Observe-only Targets never receive Service plans.
 
-`allowed_fields` is an allowlist for resolved fields. `forbidden_automatic_states` blocks the listed `state` values unless their winning provider has `user` Authority. `user_authority.fields` and `user_authority.states` impose the same Authority requirement selectively. `unavailable: skip` prevents calls while the Target is missing, `unknown`, or `unavailable`; `allow` preserves legacy dispatch. `max_retries` limits retries after the initial failed Service plan (`0` disables retries).
+`allowed_fields` is an allowlist for resolved fields. `forbidden_automatic_states` blocks the listed `state` values unless their winning provider has `user` Authority. `user_authority.fields` and `user_authority.states` impose the same Authority requirement selectively. Target dispatch defaults to `unavailable: skip`, which prevents calls while a Target reports `unknown` or `unavailable`; `allow` explicitly preserves legacy dispatch. Observed entities retain their last known state and attributes through those availability states, while explicit `unknown` and `unavailable` observations still match the raw availability. `max_retries` limits retries after the initial failed Service plan (`0` disables retries).
 
 Policy denials are reported as `service_denied_target_policy` Reconciliation events and are included in Target explanations, previews, and simulation steps.
 ## Semantic Observations

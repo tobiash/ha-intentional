@@ -387,7 +387,7 @@ def _evidence_possibilities(
     if isinstance(ast, Comparison):
         refs = [value for value in (ast.left, ast.right) if isinstance(value, EntityRef)]
         unavailable = any(
-            _is_unavailable(_resolve(ref, state, time_of_day)) for ref in refs
+            _ref_is_unavailable(ref, state, time_of_day) for ref in refs
         )
         explicit_unavailable = any(
             isinstance(value, Literal) and value.value in {"unknown", "unavailable"}
@@ -403,6 +403,17 @@ def _evidence_possibilities(
 
 def _is_unavailable(value: Any) -> bool:
     return value is None or isinstance(value, str) and value in {"unknown", "unavailable"}
+
+
+def _ref_is_unavailable(
+    ref: EntityRef,
+    state: dict[str, Any],
+    time_of_day: str | TimeOfDay | None,
+) -> bool:
+    availability = state.get(f"{ref.entity_id}.availability")
+    return availability in {"unknown", "unavailable"} or _is_unavailable(
+        _resolve(ref, state, time_of_day)
+    )
 
 
 def _eval_logical(
@@ -430,10 +441,10 @@ def _eval_comparison(
     state: dict[str, Any],
     time_of_day: str | TimeOfDay | None,
 ) -> bool:
-    left = _resolve(comp.left, state, time_of_day) if isinstance(comp.left, EntityRef) else comp.left.value
+    left = _comparison_value(comp.left, comp.right, state, time_of_day)
     if comp.right is None:
         return bool(left)
-    right = _resolve(comp.right, state, time_of_day) if isinstance(comp.right, EntityRef) else comp.right.value
+    right = _comparison_value(comp.right, comp.left, state, time_of_day)
 
     time_comparison = _compare_time_of_day(left, right, comp.op)
     if time_comparison is not None:
@@ -460,6 +471,24 @@ def _eval_comparison(
         # Comparing incompatible types (e.g. string < int) is False
         return False
     raise WhenSyntaxError(f"unknown comparison op: {comp.op}")
+
+
+def _comparison_value(
+    value: WhenAST,
+    other: WhenAST | None,
+    state: dict[str, Any],
+    time_of_day: str | TimeOfDay | None,
+) -> Any:
+    if not isinstance(value, EntityRef):
+        return value.value
+    if (
+        isinstance(other, Literal)
+        and other.value in {"unknown", "unavailable"}
+    ):
+        availability = state.get(f"{value.entity_id}.availability")
+        if availability in {"unknown", "unavailable"}:
+            return availability
+    return _resolve(value, state, time_of_day)
 
 
 def _resolve(
