@@ -34,7 +34,7 @@ class _Store:
 
 def test_remaining_countdown_does_not_publish_each_tick(monkeypatch) -> None:
     sent = []
-    monkeypatch.setattr(publication, "room_controls_for_engine", lambda *_args: {})
+    monkeypatch.setattr(publication, "room_controls_for_engine", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(publication, "async_dispatcher_send", lambda *_args: sent.append(_args))
     engine = _Engine()
     publisher = publication.EntityPublication(object(), "entry", engine, _Store())
@@ -55,7 +55,7 @@ def test_rule_switch_attributes_omit_nested_remaining_countdown() -> None:
 
 def test_shadow_transition_and_churn_publish_once_per_projection(monkeypatch) -> None:
     sent = []
-    monkeypatch.setattr(publication, "room_controls_for_engine", lambda *_args: {})
+    monkeypatch.setattr(publication, "room_controls_for_engine", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(publication, "async_dispatcher_send", lambda *_args: sent.append(_args))
     engine = _ChangingEngine()
     publisher = publication.EntityPublication(object(), "entry", engine, _Store())
@@ -71,7 +71,7 @@ def test_shadow_transition_and_churn_publish_once_per_projection(monkeypatch) ->
 
 def test_reload_and_restored_projection_do_not_republish(monkeypatch) -> None:
     sent = []
-    monkeypatch.setattr(publication, "room_controls_for_engine", lambda *_args: {})
+    monkeypatch.setattr(publication, "room_controls_for_engine", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(publication, "async_dispatcher_send", lambda *_args: sent.append(_args))
     engine = _ChangingEngine()
     engine.targets = ("light.restored",)
