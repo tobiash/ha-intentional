@@ -76,6 +76,7 @@ class EntityPublication:
         rooms = room_controls_for_engine(
             self._engine,
             lambda target: area_for_target(self._hass, target),
+            statuses=statuses,
         )
         projection: dict[str, object] = {
             "summary": (

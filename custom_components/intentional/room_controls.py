@@ -42,10 +42,12 @@ class RoomControl:
 def room_controls_for_engine(
     engine: Any,
     area_for_target: Callable[[str], AreaInfo | None],
+    *,
+    statuses: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, RoomControl]:
     """Build room controls from authored rule targets and active overrides."""
     controls: dict[str, RoomControl] = {}
-    statuses = engine.list_authored_rule_statuses()
+    statuses = statuses if statuses is not None else engine.list_authored_rule_statuses()
     for status in statuses.values():
         rule_id = str(status.get("rule_id") or "")
         if not rule_id:

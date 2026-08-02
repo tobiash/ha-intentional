@@ -82,3 +82,22 @@ def test_reload_and_restored_projection_do_not_republish(monkeypatch) -> None:
     assert not publisher.publish_if_changed()
     assert not publisher.publish_if_changed()
     assert len(sent) == 1
+
+
+def test_projection_reuses_authored_rule_statuses_for_rooms(monkeypatch) -> None:
+    engine = _Engine()
+    calls = 0
+    original = engine.list_authored_rule_statuses
+
+    def counted_statuses():
+        nonlocal calls
+        calls += 1
+        return original()
+
+    engine.list_authored_rule_statuses = counted_statuses
+    monkeypatch.setattr(publication, "room_controls_for_engine", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(publication, "async_dispatcher_send", lambda *_args: None)
+
+    publication.EntityPublication(object(), "entry", engine, _Store()).publish_if_changed()
+
+    assert calls == 1
