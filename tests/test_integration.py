@@ -914,6 +914,56 @@ async def test_owned_service_result_does_not_cross_revision_barrier(
     assert not runtime.is_revision(revision)
 
 
+async def test_irrelevant_stable_state_change_bypasses_runtime_mutation(
+    hass: HomeAssistant,
+) -> None:
+    """Unrelated ordinary updates must not queue behind engine mutations."""
+    from types import SimpleNamespace
+
+    from homeassistant.core import State
+
+    from custom_components.intentional import _on_ha_state_change_factory
+    from custom_components.intentional._engine import Engine
+    from custom_components.intentional._engine.reconciliation import Reconciliation
+    from custom_components.intentional._engine.runtime import TickRuntime
+    from custom_components.intentional.selector_ingest import SelectorMembershipPlanner
+
+    engine = Engine()
+    runtime = TickRuntime(tick_interval_ms=100)
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=1_500,
+        service_failure_backoff_ms=30_000,
+    )
+    planner = SelectorMembershipPlanner(
+        lambda: (), state_entity_ids=lambda: ("sensor.unrelated",)
+    )
+    planner.configure((), ("input_boolean.relevant",))
+    listener = _on_ha_state_change_factory(
+        hass,
+        engine,
+        reconciler,
+        runtime=runtime,
+        selector_planner=planner,
+    )
+    event = SimpleNamespace(data={
+        "old_state": State("sensor.unrelated", "1", {"device_class": "power"}),
+        "new_state": State("sensor.unrelated", "2", {"device_class": "power"}),
+    })
+
+    await runtime.mutation_lock.acquire()
+    task = asyncio.create_task(listener(event))
+    try:
+        await asyncio.sleep(0)
+        assert task.done()
+    finally:
+        runtime.mutation_lock.release()
+        if not task.done():
+            await task
+
+    assert engine.get_state("sensor.unrelated") is None
+
+
 async def test_registry_event_burst_is_coalesced(
     hass: HomeAssistant,
     config_entry: MockConfigEntry,

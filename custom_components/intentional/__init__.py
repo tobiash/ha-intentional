@@ -1075,28 +1075,36 @@ def _on_ha_state_change_factory(
     async def _listener(event) -> None:
         if runtime is not None and runtime.unloading:
             return
+        old_state: State | None = event.data.get("old_state")
+        new_state: State | None = event.data.get("new_state")
+        entity_id = (
+            new_state.entity_id
+            if new_state is not None
+            else (old_state.entity_id if old_state is not None else None)
+        )
+        old_device_class = (
+            old_state.attributes.get("device_class")
+            if old_state is not None
+            else None
+        )
+        new_device_class = (
+            new_state.attributes.get("device_class")
+            if new_state is not None
+            else None
+        )
+        if (
+            selector_planner is not None
+            and entity_id not in selector_planner.relevant
+            and old_state is not None
+            and new_state is not None
+            and old_device_class == new_device_class
+        ):
+            return
         lock = runtime.mutation_lock if runtime is not None else asyncio.Lock()
         async with lock:
             if runtime is not None and runtime.unloading:
                 return
-            old_state: State | None = event.data.get("old_state")
-            new_state: State | None = event.data.get("new_state")
-            entity_id = (
-                new_state.entity_id
-                if new_state is not None
-                else (old_state.entity_id if old_state is not None else None)
-            )
             if selector_planner is not None and entity_id is not None:
-                old_device_class = (
-                    old_state.attributes.get("device_class")
-                    if old_state is not None
-                    else None
-                )
-                new_device_class = (
-                    new_state.attributes.get("device_class")
-                    if new_state is not None
-                    else None
-                )
                 _apply_membership_change(
                     hass,
                     engine,
