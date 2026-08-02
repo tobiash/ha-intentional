@@ -733,6 +733,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "reconciliation", _monotonic_ms() - reconciliation_started_ms
                     )
                     dispatch_started_ms = _monotonic_ms()
+                    reconciliation_commit_started_ms = _monotonic_ms()
                     async with _runtime.mutation_lock:
                         if not _runtime.is_revision(tick_revision):
                             _runtime.tick_idle.set()
@@ -746,6 +747,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         )
                         # Activate any newly-firing scene rules
                         previous_scenes = set(_runtime.active_scenes)
+                    _runtime.record_timing(
+                        "reconciliation_commit",
+                        _monotonic_ms() - reconciliation_commit_started_ms,
+                    )
+                    effect_dispatch_started_ms = _monotonic_ms()
                     active_scenes = await _activate_scenes_and_dispatch_effects(
                         hass,
                         engine,
@@ -758,9 +764,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             "effect_or_scene_call_attempted"
                         ),
                     )
+                    _runtime.record_timing(
+                        "effect_dispatch", _monotonic_ms() - effect_dispatch_started_ms
+                    )
                     if active_scenes is None:
                         _runtime.tick_idle.set()
                         continue
+                    finalization_started_ms = _monotonic_ms()
                     async with _runtime.mutation_lock:
                         if not _runtime.is_revision(tick_revision):
                             _runtime.tick_idle.set()
@@ -779,8 +789,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             next_revision=_runtime.revision,
                         )
                         lifecycle_writer.mutated()
+                    _runtime.record_timing(
+                        "finalization", _monotonic_ms() - finalization_started_ms
+                    )
+                    publication_started_ms = _monotonic_ms()
                     if publication.publish_if_changed():
                         _reconciler.record_publication_dispatch(engine.now_ms())
+                    _runtime.record_timing(
+                        "publication", _monotonic_ms() - publication_started_ms
+                    )
                     _runtime.record_timing(
                         "dispatch", _monotonic_ms() - dispatch_started_ms
                     )
