@@ -961,7 +961,7 @@ async def test_irrelevant_stable_state_change_bypasses_runtime_mutation(
         if not task.done():
             await task
 
-    assert engine.get_state("sensor.unrelated") is None
+    assert not any(key.startswith("sensor.unrelated.") for key in engine.state)
 
 
 async def test_registry_event_burst_is_coalesced(
