@@ -112,6 +112,10 @@ class TickRuntime:
     tick_idle: asyncio.Event = field(default_factory=_set_event)
     lifecycle_snapshot: dict[str, Any] | None = None
     _last_failure_report_ms: int | None = None
+    _timing_last_ms: dict[str, int] = field(default_factory=dict)
+    _timing_total_ms: dict[str, int] = field(default_factory=dict)
+    _timing_max_ms: dict[str, int] = field(default_factory=dict)
+    _timing_samples: dict[str, int] = field(default_factory=dict)
 
     def advance_revision(self) -> int:
         """Record one atomic mutation of engine or reconciliation state."""
@@ -150,6 +154,14 @@ class TickRuntime:
         self._last_failure_report_ms = now
         return True
 
+    def record_timing(self, stage: str, duration_ms: int) -> None:
+        """Record one nonnegative Tick runtime stage duration."""
+        duration_ms = max(0, duration_ms)
+        self._timing_last_ms[stage] = duration_ms
+        self._timing_total_ms[stage] = self._timing_total_ms.get(stage, 0) + duration_ms
+        self._timing_max_ms[stage] = max(self._timing_max_ms.get(stage, 0), duration_ms)
+        self._timing_samples[stage] = self._timing_samples.get(stage, 0) + 1
+
     def health(self, *, now_ms: int | None = None) -> dict[str, Any]:
         now = monotonic_ms() if now_ms is None else now_ms
         last_success_age_ms = _age(now, self.last_success_ms)
@@ -173,6 +185,17 @@ class TickRuntime:
             "current_error": self.current_error,
             "last_failure_error": self.last_failure_error,
             "pending_pulse_count": len(self.pulses),
+            "timings_ms": {
+                stage: {
+                    "last": self._timing_last_ms[stage],
+                    "average": round(
+                        self._timing_total_ms[stage] / self._timing_samples[stage], 1
+                    ),
+                    "max": self._timing_max_ms[stage],
+                    "samples": self._timing_samples[stage],
+                }
+                for stage in sorted(self._timing_samples)
+            },
         }
 
 

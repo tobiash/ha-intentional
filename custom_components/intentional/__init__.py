@@ -637,7 +637,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if _runtime.unloading:
                     continue
                 cycle_revision = _runtime.revision
+                cycle_started_ms = _monotonic_ms()
+                lock_wait_started_ms = cycle_started_ms
                 async with _runtime.mutation_lock:
+                    _runtime.record_timing(
+                        "mutation_lock_wait", _monotonic_ms() - lock_wait_started_ms
+                    )
                     if stop_event.is_set():
                         _runtime.tick_idle.set()
                         break
@@ -646,6 +651,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         continue
                     _runtime.tick_idle.clear()
                     pulse_drain = _runtime.pulses.begin_drain()
+                    evaluation_started_ms = _monotonic_ms()
                     try:
                         # Drive the engine's evaluation cycle
                         sync_time_context_into_engine(engine, dt_util.now())
@@ -671,6 +677,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         engine.tick(tick_interval_ms)
                         tick_revision = _runtime.advance_revision()
                         lifecycle_writer.mutated()
+                        _runtime.record_timing(
+                            "evaluation", _monotonic_ms() - evaluation_started_ms
+                        )
                     except Exception as err:  # noqa: BLE001
                         now_ms = _monotonic_ms()
                         _runtime.mark_failure(err, now_ms=now_ms)
@@ -689,16 +698,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             record_diagnostic(hass, "tick_failed", error=str(err))
                         _runtime.tick_idle.set()
                         continue
+                alerting_started_ms = _monotonic_ms()
                 if alerting.available:
                     await alerting.async_observe(alert_observations, now_ms=engine.now_ms())
                     alerting_deadline_driver.wake()
+                _runtime.record_timing(
+                    "alerting", _monotonic_ms() - alerting_started_ms
+                )
                 # Effect activation is not dispatchable until its outbox
                 # snapshot has crossed the lifecycle storage boundary.
+                persistence_started_ms = _monotonic_ms()
                 await lifecycle_writer.async_flush()
+                _runtime.record_timing(
+                    "persistence", _monotonic_ms() - persistence_started_ms
+                )
                 if lifecycle_writer.current_error is not None:
                     _runtime.tick_idle.set()
                     continue
                 try:
+                    reconciliation_started_ms = _monotonic_ms()
                     events = await _reconciler.tick(
                         engine,
                         _ha_adapter,
@@ -711,6 +729,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             "service_call_attempted"
                         ),
                     )
+                    _runtime.record_timing(
+                        "reconciliation", _monotonic_ms() - reconciliation_started_ms
+                    )
+                    dispatch_started_ms = _monotonic_ms()
                     async with _runtime.mutation_lock:
                         if not _runtime.is_revision(tick_revision):
                             _runtime.tick_idle.set()
@@ -759,6 +781,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         lifecycle_writer.mutated()
                     if publication.publish_if_changed():
                         _reconciler.record_publication_dispatch(engine.now_ms())
+                    _runtime.record_timing(
+                        "dispatch", _monotonic_ms() - dispatch_started_ms
+                    )
+                    _runtime.record_timing(
+                        "cycle", _monotonic_ms() - cycle_started_ms
+                    )
                     _runtime.tick_idle.set()
                 except Exception as err:  # noqa: BLE001
                     now_ms = _monotonic_ms()

@@ -73,3 +73,17 @@ def test_tick_runtime_failure_reporting_is_rate_limited() -> None:
     assert health["status"] == "degraded"
     assert health["failure_count"] == 1
     assert health["current_error"] == "boom"
+
+
+def test_tick_runtime_reports_stage_timings() -> None:
+    from intentional.runtime import TickRuntime
+
+    runtime = TickRuntime(tick_interval_ms=100)
+    runtime.record_timing("evaluation", 12)
+    runtime.record_timing("evaluation", 18)
+    runtime.record_timing("reconciliation", 7)
+
+    assert runtime.health(now_ms=1_000)["timings_ms"] == {
+        "evaluation": {"last": 18, "average": 15.0, "max": 18, "samples": 2},
+        "reconciliation": {"last": 7, "average": 7.0, "max": 7, "samples": 1},
+    }
