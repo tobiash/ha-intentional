@@ -116,6 +116,7 @@ class TickRuntime:
     _timing_total_ms: dict[str, int] = field(default_factory=dict)
     _timing_max_ms: dict[str, int] = field(default_factory=dict)
     _timing_samples: dict[str, int] = field(default_factory=dict)
+    _stage_last_run_ms: dict[str, int] = field(default_factory=dict)
 
     def advance_revision(self) -> int:
         """Record one atomic mutation of engine or reconciliation state."""
@@ -161,6 +162,16 @@ class TickRuntime:
         self._timing_total_ms[stage] = self._timing_total_ms.get(stage, 0) + duration_ms
         self._timing_max_ms[stage] = max(self._timing_max_ms.get(stage, 0), duration_ms)
         self._timing_samples[stage] = self._timing_samples.get(stage, 0) + 1
+
+    def stage_due(
+        self, stage: str, *, now_ms: int, interval_ms: int, force: bool = False
+    ) -> bool:
+        """Return whether a periodic stage is due and advance its cadence."""
+        previous = self._stage_last_run_ms.get(stage)
+        if not force and previous is not None and now_ms - previous < interval_ms:
+            return False
+        self._stage_last_run_ms[stage] = now_ms
+        return True
 
     def health(self, *, now_ms: int | None = None) -> dict[str, Any]:
         now = monotonic_ms() if now_ms is None else now_ms

@@ -87,3 +87,17 @@ def test_tick_runtime_reports_stage_timings() -> None:
         "evaluation": {"last": 18, "average": 15.0, "max": 18, "samples": 2},
         "reconciliation": {"last": 7, "average": 7.0, "max": 7, "samples": 1},
     }
+
+
+def test_tick_runtime_stage_cadence_can_be_forced() -> None:
+    from intentional.runtime import TickRuntime
+
+    runtime = TickRuntime(tick_interval_ms=100)
+
+    assert runtime.stage_due("publication", now_ms=1_000, interval_ms=1_000)
+    assert not runtime.stage_due("publication", now_ms=1_999, interval_ms=1_000)
+    assert runtime.stage_due(
+        "publication", now_ms=1_999, interval_ms=1_000, force=True
+    )
+    assert not runtime.stage_due("publication", now_ms=2_998, interval_ms=1_000)
+    assert runtime.stage_due("publication", now_ms=2_999, interval_ms=1_000)

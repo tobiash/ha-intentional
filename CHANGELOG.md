@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.8] - 2026-08-02
+
+### Changed
+- Stable Alert observation and Home Assistant entity publication run at a one-second cadence instead of every Tick runtime cycle; state-change pulses still force immediate Alert processing.
+
 ## [0.12.7] - 2026-08-02
 
 ### Added

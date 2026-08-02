@@ -100,6 +100,7 @@ MANUAL_OVERRIDE_TTL_SECONDS = 7200
 DRIFT_OVERRIDE_TTL_SECONDS = 300
 DRIFT_CONFIRMATION_MS = 1_500
 SERVICE_FAILURE_BACKOFF_MS = 30_000
+STABLE_STAGE_INTERVAL_MS = 1_000
 
 
 class _HAAdapter:
@@ -699,7 +700,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _runtime.tick_idle.set()
                         continue
                 alerting_started_ms = _monotonic_ms()
-                if alerting.available:
+                if alerting.available and _runtime.stage_due(
+                    "alert_observation",
+                    now_ms=alerting_started_ms,
+                    interval_ms=STABLE_STAGE_INTERVAL_MS,
+                    force=bool(pulse_drain),
+                ):
                     await alerting.async_observe(alert_observations, now_ms=engine.now_ms())
                     alerting_deadline_driver.wake()
                 _runtime.record_timing(
@@ -793,7 +799,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "finalization", _monotonic_ms() - finalization_started_ms
                     )
                     publication_started_ms = _monotonic_ms()
-                    if publication.publish_if_changed():
+                    if _runtime.stage_due(
+                        "publication",
+                        now_ms=publication_started_ms,
+                        interval_ms=STABLE_STAGE_INTERVAL_MS,
+                    ) and publication.publish_if_changed():
                         _reconciler.record_publication_dispatch(engine.now_ms())
                     _runtime.record_timing(
                         "publication", _monotonic_ms() - publication_started_ms
