@@ -68,6 +68,7 @@ class Rule:
     transition_withdraw_ms: int | None = None
     easing: str = "linear"
     ttl_ms: int | None = None
+    manual_override_ttl_ms: int | None = None
     linger_ms: int | None = None
     dynamic_hold_after: DynamicHoldAfter | None = None
     hold_when: str | None = None

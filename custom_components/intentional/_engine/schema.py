@@ -146,6 +146,13 @@ def dsl_schema() -> dict[str, Any]:
             "ownership": "a value provider establishes ownership; modifier-only fields do not",
             "persistence": "captured adoption values and pending withdrawals survive restart",
         },
+        "manual_override_ttl": {
+            "path": "rules[].intent.<target>.manual_override_ttl",
+            "value_type": "duration",
+            "default_ms": 300000,
+            "composition": "longest duration among current contributing Rules",
+            "scope": "automatically detected Manual overrides only",
+        },
         "shadow_target_policy": {
             "path": "targets.<target>.dispatch",
             "values": ["apply", "shadow"],

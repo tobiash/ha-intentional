@@ -88,7 +88,7 @@ _RULE_TOP_LEVEL = {
 # Recognized fields in the emit block
 _EMIT_FIELDS = {
     "target", "scene", "set", "withdraw", "cap", "floor", "offset", "multiply", "merge", "generate",
-    "transition", "easing", "ttl", "linger", "animation", "apply",
+    "transition", "easing", "ttl", "manual_override_ttl", "linger", "animation", "apply",
 }
 # Recognized animation fields
 _ANIMATION_FIELDS = {
@@ -383,6 +383,13 @@ def _validate_rule(
         line,
         default=None,
     )
+    manual_override_ttl_ms = _parse_optional_duration(
+        emit.get("manual_override_ttl"),
+        f"Rule {rule_id!r}: manual_override_ttl",
+        file,
+        line,
+        default=None,
+    )
     hold_when = _parse_hold_when(raw.get("hold"), rule_id, file, line)
     hold_until_when, hold_until_for_ms = _parse_hold_until(raw.get("hold"), rule_id, file, line)
     dynamic_hold_after = _parse_dynamic_hold_after(raw.get("hold"), rule_id, file, line)
@@ -435,6 +442,7 @@ def _validate_rule(
         transition_withdraw_ms=transition_withdraw_ms,
         easing=easing,
         ttl_ms=ttl_ms,
+        manual_override_ttl_ms=manual_override_ttl_ms,
         linger_ms=linger_ms,
         dynamic_hold_after=dynamic_hold_after,
         hold_when=hold_when,
@@ -1082,7 +1090,7 @@ def _intent_fields_to_emit(
             emit["apply"] = value
             continue
         _validate_vnext_intent_field(target, intent_field, value, file=file, line=line)
-        if intent_field in {"ttl", "linger", "transition", "easing"}:
+        if intent_field in {"ttl", "manual_override_ttl", "linger", "transition", "easing"}:
             emit[intent_field] = value
             continue
         if isinstance(value, dict) and set(value) & {"value", "withdraw", "min", "max", "offset", "multiply", "animate", "generate"}:
@@ -2018,6 +2026,13 @@ def _parse_intent_selector(
         transition_ms=_parse_optional_duration(emit.get("transition"), f"Rule {rule_id!r}: selector.transition", file, line) or 0,
         easing=str(emit.get("easing", "linear")),
         ttl_ms=_parse_optional_duration(emit.get("ttl"), f"Rule {rule_id!r}: selector.ttl", file, line, default=None),
+        manual_override_ttl_ms=_parse_optional_duration(
+            emit.get("manual_override_ttl"),
+            f"Rule {rule_id!r}: selector.manual_override_ttl",
+            file,
+            line,
+            default=None,
+        ),
         linger_ms=_parse_optional_duration(emit.get("linger"), f"Rule {rule_id!r}: selector.linger", file, line, default=None),
     )
 

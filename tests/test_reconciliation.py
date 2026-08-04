@@ -462,6 +462,97 @@ async def test_on_state_delta_stages_then_promotes_across_confirmation_window() 
 
 
 @pytest.mark.asyncio
+async def test_explicit_user_drift_bypasses_transition_suppression() -> None:
+    """A user change must win even while an Intentional transition is in flight."""
+    engine = Engine(clock_fn=lambda: 1_000)
+    engine.load_rules(
+        [
+            Rule(
+                id="desk-on",
+                when="true",
+                target="light.desk",
+                set={"state": "on", "brightness_pct": 60},
+                transition_ms=60_000,
+            )
+        ]
+    )
+    engine.evaluate_all()
+    adapter = _FakeAdapter()
+    adapter.set_state("light.desk", "off")
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=1_500,
+        service_failure_backoff_ms=30_000,
+    )
+    await reconciler.apply(engine, adapter, now_ms=1_000)
+
+    adapter.set_state(
+        "light.desk",
+        "off",
+        context=SimpleNamespace(id="user-ctx", parent_id=None, user_id="user-1"),
+    )
+    events = reconciler.on_state_delta(
+        engine, adapter.get_state("light.desk"), _NoContextTracker(), now_ms=2_000
+    )
+    assert _events_of(events, "drift_promoted") == []
+
+    events = await reconciler.tick(
+        engine, adapter, _NoContextTracker(), now_ms=4_000
+    )
+
+    promoted = _events_of(events, "drift_promoted")
+    assert len(promoted) == 1
+    assert promoted[0].details["set"] == {"state": "off"}
+    assert len(_events_of(events, "service_skipped_drift_promoted")) == 1
+    assert len(adapter.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_detected_override_uses_longest_contributing_rule_ttl() -> None:
+    engine = Engine(clock_fn=lambda: 1_000)
+    engine.load_rules(
+        [
+            Rule(
+                id="desk-state",
+                when="true",
+                target="light.desk",
+                set={"state": "on"},
+                manual_override_ttl_ms=600_000,
+            ),
+            Rule(
+                id="desk-brightness",
+                when="true",
+                target="light.desk",
+                set={"brightness_pct": 60},
+                manual_override_ttl_ms=1_800_000,
+            ),
+        ]
+    )
+    engine.evaluate_all()
+    adapter = _FakeAdapter()
+    adapter.set_state("light.desk", "on", {"brightness": 153})
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=0,
+        service_failure_backoff_ms=30_000,
+    )
+    await reconciler.apply(engine, adapter, now_ms=1_000)
+
+    adapter.set_state(
+        "light.desk",
+        "off",
+        context=SimpleNamespace(id="user-ctx", parent_id=None, user_id="user-1"),
+    )
+    events = reconciler.on_state_delta(
+        engine, adapter.get_state("light.desk"), _NoContextTracker(), now_ms=2_000
+    )
+
+    promoted = _events_of(events, "drift_promoted")
+    assert len(promoted) == 1
+    assert promoted[0].details["ttl_ms"] == 1_800_000
+
+
+@pytest.mark.asyncio
 async def test_on_state_delta_ignores_small_brightness_pct_quantization_echo() -> None:
     """A light echoing 80% as brightness 198 must not become a manual override."""
     engine = _make_engine_with_light_rule(brightness_pct=80)

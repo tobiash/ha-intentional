@@ -628,9 +628,18 @@ def test_nested_unsupported_intent_constructs_refuse_visual_mode_without_seriali
 
 
 def test_supported_intent_metadata_can_still_enter_visual_mode() -> None:
-    result = _run_panel_js(r'''visualModeError(`- id: safe\n  while:\n    binary_sensor.office: on\n  intent:\n    light.office:\n      state: on\n      brightness_pct:\n        max: 40\n      ttl: 30s\n      easing: ease-in\n      apply:\n        transition:\n          assert: 2s\n          change: 3s\n          withdraw: 4s\n`)''')
+    result = _run_panel_js(r'''visualModeError(`- id: safe\n  while:\n    binary_sensor.office: on\n  intent:\n    light.office:\n      state: on\n      brightness_pct:\n        max: 40\n      ttl: 30s\n      manual_override_ttl: 30m\n      easing: ease-in\n      apply:\n        transition:\n          assert: 2s\n          change: 3s\n          withdraw: 4s\n`)''')
 
     assert result == ""
+
+
+def test_manual_override_ttl_round_trips_through_visual_editor() -> None:
+    result = _run_panel_js(r'''(() => {
+      const yaml = `- id: safe\n  while:\n    binary_sensor.office: on\n  intent:\n    light.office:\n      state: on\n      manual_override_ttl: 30m\n`;
+      return stringifyRule(parseRuleForm(yaml, null));
+    })()''')
+
+    assert "manual_override_ttl: 30m" in result
 
 
 def test_block_nested_intent_values_refuse_visual_mode() -> None:
@@ -815,6 +824,36 @@ def test_rule_detail_uses_composed_desired_and_projection_issues_take_precedence
     })()''')
     assert result["targets"][0]["desired"] == {"state": "off"}
     assert result["section"] == "attention"
+
+
+def test_projection_issues_only_flag_current_contributing_rules() -> None:
+    result = _run_panel_js(r'''(() => {
+      const rules = ["winning", "losing", "inactive"].map((id) => ({
+        id,
+        block: `- id: ${id}\n  while:\n    sensor.ready: on\n  intent:\n    light.shared:\n      state: on\n`,
+      }));
+      const authored_rules = [
+        {rule_id: "winning", active: true, phase: "active"},
+        {rule_id: "losing", active: true, phase: "active"},
+        {rule_id: "inactive", active: false, phase: "idle"},
+      ];
+      const targets = [{
+        target: "light.shared",
+        plan_match: "mismatch",
+        policy_denial: {code: "target_unavailable"},
+        rules: [
+          {rule_id: "winning:light.shared", state: "winning"},
+          {rule_id: "losing:light.shared", state: "losing"},
+          {rule_id: "inactive:light.shared", state: "inactive"},
+        ],
+      }];
+      return Object.fromEntries(buildRuleViewModels(rules, {authored_rules, targets}, {}).map((rule) => [rule.id, rule.section]));
+    })()''')
+    assert result == {
+        "winning": "attention",
+        "losing": "active",
+        "inactive": "waiting",
+    }
 
 
 def test_source_is_preserved_until_guided_form_is_actually_edited() -> None:

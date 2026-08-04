@@ -531,6 +531,7 @@ intent:
   light.office:
     state: on
     brightness_pct: 40
+    manual_override_ttl: 30m
     linger: 190s
     apply:
       transition:
@@ -542,6 +543,7 @@ intent:
 Supported metadata:
 
 - `ttl`: expire the intent after a duration.
+- `manual_override_ttl`: keep automatically detected user Drift in control for this duration. When several Rules contribute to the Target, the longest configured duration wins; omitted values use five minutes.
 - `linger`: keep the intent active for a duration after a level observation turns false.
 - `transition`: HA-native transition duration for simple light changes.
 - `easing`: animation easing value.

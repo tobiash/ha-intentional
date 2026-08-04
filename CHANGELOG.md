@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.11] - 2026-08-04
+
+### Added
+- Rules can configure `manual_override_ttl` for automatically detected Manual overrides; the longest duration among current contributing Rules wins.
+
+### Fixed
+- Explicit Home Assistant user changes bypass owned-transition Drift suppression, preventing Intentional from reasserting lights after users turn them off or dim them.
+- Shared Target projection problems flag only current winning or contributing Rules as needing attention.
+
 ## [0.12.10] - 2026-08-02
 
 ### Fixed

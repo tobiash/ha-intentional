@@ -19,7 +19,7 @@ const EMPTY_RULE = () => ({
   holdOperator: "is",
   holdValue: "off",
   holdFor: "",
-  intents: [{ target: "", fields: [{ name: "state", operator: "value", value: "on" }], transitionAssert: "", transitionChange: "", transitionWithdraw: "", ttl: "", linger: "", easing: "linear" }],
+  intents: [{ target: "", fields: [{ name: "state", operator: "value", value: "on" }], transitionAssert: "", transitionChange: "", transitionWithdraw: "", ttl: "", manualOverrideTtl: "", linger: "", easing: "linear" }],
   effects: [],
   alert: null,
   alerts: [],
@@ -983,6 +983,7 @@ class IntentionalPanel extends HTMLElement {
             ${intentInputField("Change transition", "transitionChange", intent.transitionChange, "5s", "Used for value changes", index)}
             ${intentInputField("Withdraw transition", "transitionWithdraw", intent.transitionWithdraw, "7s", "Used when turning off", index)}
             ${intentInputField("TTL", "ttl", intent.ttl, "30s", "", index)}
+            ${intentInputField("Detected override TTL", "manualOverrideTtl", intent.manualOverrideTtl, "30m", "How long detected user changes override this Rule", index)}
             ${intentInputField("Easing", "easing", intent.easing, "linear", "", index)}
           </div>
         </details>
@@ -1238,7 +1239,7 @@ class IntentionalPanel extends HTMLElement {
     if (action === "edit-rule") { this._screen = "edit"; this._render(); }
     if (action === "add-condition") this._mutateForm((form) => form.conditions.push({ entity: "", operator: "is", value: "on" }));
     if (action === "remove-condition") this._mutateForm((form) => form.conditions.splice(Number(button.dataset.index), 1));
-    if (action === "add-intent") this._mutateForm((form) => form.intents.push({ target: "", fields: [{ name: "state", operator: "value", value: "on" }], transitionAssert: "", transitionChange: "", transitionWithdraw: "", ttl: "", linger: "", easing: "linear" }));
+    if (action === "add-intent") this._mutateForm((form) => form.intents.push({ target: "", fields: [{ name: "state", operator: "value", value: "on" }], transitionAssert: "", transitionChange: "", transitionWithdraw: "", ttl: "", manualOverrideTtl: "", linger: "", easing: "linear" }));
     if (action === "remove-intent") this._mutateForm((form) => form.intents.splice(Number(button.dataset.index), 1));
     if (action === "add-intent-field") this._mutateForm((form) => form.intents[Number(button.dataset.index)].fields.push({ name: "", operator: "value", value: "" }));
     if (action === "remove-intent-field") this._mutateForm((form) => form.intents[Number(button.dataset.intentIndex)].fields.splice(Number(button.dataset.fieldIndex), 1));
@@ -1296,7 +1297,7 @@ function parseRuleForm(block, apiRule) {
   if (holdLines.some((line) => /^\s{4}until:/.test(line))) { form.holdMode = "until_for"; form.holdFor = extractIndentedScalar(holdLines, "for"); const cond = parseConditionSection(nestedSectionLines(holdLines, "until"))[0]; if (cond) Object.assign(form, { holdEntity: cond.entity, holdOperator: cond.operator, holdValue: cond.value }); }
   if (holdLines.some((line) => /^\s{4}while:/.test(line))) { form.holdMode = "while_after"; form.holdAfter = extractIndentedScalar(holdLines, "after"); const cond = parseConditionSection(nestedSectionLines(holdLines, "while"))[0]; if (cond) Object.assign(form, { holdEntity: cond.entity, holdOperator: cond.operator, holdValue: cond.value }); }
   form.intents = parseIntentSection(sectionLines(block, "intent"), apiRule);
-  if (!form.intents.length) form.intents = [{ target: apiRule?.target || "", fields: objectToFields(apiRule?.set || {}), transitionAssert: "", transitionChange: "", transitionWithdraw: "", ttl: "", linger: "", easing: "linear" }];
+  if (!form.intents.length) form.intents = [{ target: apiRule?.target || "", fields: objectToFields(apiRule?.set || {}), transitionAssert: "", transitionChange: "", transitionWithdraw: "", ttl: "", manualOverrideTtl: "", linger: "", easing: "linear" }];
   form.effects = parseEffects(block, apiRule);
   const alerts = parseAlertSections(sectionLines(block, "alert"));
   form.alert = alerts[0] || null;
@@ -1491,6 +1492,7 @@ function writeIntents(lines, intents) {
       else lines.push(`      ${field.name.trim()}:`, `        ${op}: ${yamlScalar(field.value)}`);
     }
     if (intent.ttl.trim()) lines.push(`      ttl: ${yamlScalar(intent.ttl.trim())}`);
+    if (intent.manualOverrideTtl.trim()) lines.push(`      manual_override_ttl: ${yamlScalar(intent.manualOverrideTtl.trim())}`);
     if (intent.easing.trim() && intent.easing.trim() !== "linear") lines.push(`      easing: ${yamlScalar(intent.easing.trim())}`);
     if (intent.transitionAssert.trim() || intent.transitionChange.trim() || intent.transitionWithdraw.trim()) {
       lines.push("      apply:", "        transition:");
@@ -1569,18 +1571,19 @@ function parseIntentSection(lines, apiRule) {
   let current = null;
   for (let index = 0; index < lines.length; index += 1) {
     const target = lines[index].match(/^\s{4}([\w.-]+\.[\w.-]+):\s*$/);
-    if (target) { current = { target: target[1], fields: [], transitionAssert: "", transitionChange: "", transitionWithdraw: "", ttl: "", linger: "", easing: "linear" }; intents.push(current); continue; }
+    if (target) { current = { target: target[1], fields: [], transitionAssert: "", transitionChange: "", transitionWithdraw: "", ttl: "", manualOverrideTtl: "", linger: "", easing: "linear" }; intents.push(current); continue; }
     if (!current) continue;
     const scalar = lines[index].match(/^\s{6}([\w_]+):\s*(.+?)\s*$/);
-    if (scalar && !["ttl", "linger", "easing"].includes(scalar[1])) current.fields.push({ name: scalar[1], operator: "value", value: stripQuotes(scalar[2]) });
+    if (scalar && !["ttl", "manual_override_ttl", "linger", "easing"].includes(scalar[1])) current.fields.push({ name: scalar[1], operator: "value", value: stripQuotes(scalar[2]) });
     if (scalar && ["ttl", "easing"].includes(scalar[1])) current[scalar[1]] = stripQuotes(scalar[2]);
+    if (scalar && scalar[1] === "manual_override_ttl") current.manualOverrideTtl = stripQuotes(scalar[2]);
     const object = lines[index].match(/^\s{6}([\w_]+):\s*$/);
     const op = lines[index + 1]?.match(/^\s{8}(value|min|max|offset|multiply):\s*(.+?)\s*$/);
     if (object && op) { current.fields.push({ name: object[1], operator: op[1], value: stripQuotes(op[2]) }); index += 1; }
     const trans = lines[index].match(/^\s{10}(assert|change|withdraw):\s*(.+?)\s*$/);
     if (trans) current[`transition${capitalize(trans[1])}`] = stripQuotes(trans[2]);
   }
-  if (!intents.length && apiRule?.target) intents.push({ target: apiRule.target, fields: objectToFields(apiRule.set || {}), transitionAssert: "", transitionChange: "", transitionWithdraw: "", ttl: "", linger: "", easing: "linear" });
+  if (!intents.length && apiRule?.target) intents.push({ target: apiRule.target, fields: objectToFields(apiRule.set || {}), transitionAssert: "", transitionChange: "", transitionWithdraw: "", ttl: "", manualOverrideTtl: "", linger: "", easing: "linear" });
   return intents;
 }
 
@@ -1970,7 +1973,7 @@ function buildRuleViewModels(rules, world, states) {
       return { id, title: states[id]?.attributes?.friendly_name || id, desired, actual, aligned: projection.plan_match === "match" };
     });
     const targetProjections = targetIds.map((id) => projectionsByTarget.get(id)).filter(Boolean);
-    const projectionIssue = targetProjections.some(hasProjectionIssue);
+    const projectionIssue = targetProjections.some((projection) => hasProjectionIssueForRule(projection, rule.id, status));
     const phase = classifyRulePhase({ ...rule, ...status, projectionIssue });
     return { ...rule, ...status, form, title: rule.reason || rule.id, reason: rule.reason || status.reason || "", group: rule.group || status.group || form.group, profile: rule.profile || status.profile || form.profile, targets, targetCount: targetIds.length, competing: targetProjections.flatMap((item) => item.active_intents || item.rules || []).filter((item) => item.rule_id && item.rule_id !== rule.id), history: targetProjections.flatMap((item) => item.recent_attempts || item.attempts || []).filter((item) => !item.rule_id || item.rule_id === rule.id).slice(0, 5), section: phase.section, phaseText: phase.text };
   });
@@ -2004,6 +2007,13 @@ function summarizePreview(result) {
 function hasProjectionIssue(projection) {
   const reconciliation = projection?.reconciliation || {};
   return projection?.plan_match === "mismatch" || Boolean(projection?.policy_denial || projection?.retry || projection?.drift || projection?.manual_override || reconciliation.policy_denial || reconciliation.retry || reconciliation.drift || reconciliation.manual_override);
+}
+
+function hasProjectionIssueForRule(projection, ruleId, status) {
+  if (!hasProjectionIssue(projection)) return false;
+  const matching = (projection?.rules || []).filter((item) => item.rule_id === ruleId || item.rule_id?.startsWith(`${ruleId}:`));
+  if (matching.length) return matching.some((item) => !["inactive", "losing"].includes(item.state));
+  return Boolean(status?.active || status?.active_intent_count || ["held", "lingering"].includes(status?.phase));
 }
 
 function renderRollbackReview(snapshot) {

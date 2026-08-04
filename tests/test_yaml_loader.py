@@ -67,6 +67,19 @@ class TestDurationParsing:
             parse_duration("-1s")
 
 
+def test_manual_override_ttl_is_parsed_from_intent_metadata() -> None:
+    rules = load_rules_from_string("""
+- id: living-room
+  while: {binary_sensor.living_room_presence: on}
+  intent:
+    light.living_room:
+      state: on
+      manual_override_ttl: 30m
+""")
+
+    assert rules[0].manual_override_ttl_ms == 1_800_000
+
+
 # ── Rule schema validation ───────────────────────────────────────────
 
 

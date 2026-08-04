@@ -155,6 +155,7 @@ def intent_to_lifecycle_record(
         "authority": intent.authority.value,
         "confidence": intent.confidence,
         "ttl_ms": intent.ttl_ms,
+        "manual_override_ttl_ms": intent.manual_override_ttl_ms,
         "reason": intent.reason,
         "rule_id": intent.rule_id,
         "ignore_when": intent.ignore_when,
@@ -212,6 +213,9 @@ def intent_from_lifecycle_record(raw: Any) -> Intent | None:
             authority=authority,
             confidence=confidence,
             ttl_ms=_optional_nonnegative_int(raw.get("ttl_ms")),
+            manual_override_ttl_ms=_optional_nonnegative_int(
+                raw.get("manual_override_ttl_ms")
+            ),
             reason=_string(raw.get("reason", "")),
             rule_id=_string(raw.get("rule_id", "")),
             ignore_when=_bool(raw.get("ignore_when", False)),

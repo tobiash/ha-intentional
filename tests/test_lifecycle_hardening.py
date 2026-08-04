@@ -29,6 +29,7 @@ from intentional.yaml_loader import load_rules_from_string
         ("authority", 1),
         ("confidence", "1"),
         ("ttl_ms", "1000"),
+        ("manual_override_ttl_ms", "1000"),
         ("reason", None),
         ("rule_id", 1),
         ("ignore_when", 0),

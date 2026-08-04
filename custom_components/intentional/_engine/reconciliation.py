@@ -459,11 +459,15 @@ def classify_state_drift(
         if suppress_until is not None:
             if now_ms is None:
                 raise ValueError("now_ms is required with drift_suppressed_until")
-            if now_ms < suppress_until:
+            context = getattr(state, "context", None)
+            if getattr(context, "user_id", None) is not None:
+                drift_suppressed_until.pop(entity_id, None)
+            elif now_ms < suppress_until:
                 if drift_candidates is not None:
                     drift_candidates.pop(entity_id, None)
                 return None
-            drift_suppressed_until.pop(entity_id, None)
+            else:
+                drift_suppressed_until.pop(entity_id, None)
     plan = last_applied.get(entity_id)
     if plan is None:
         if drift_candidates is not None:
@@ -501,6 +505,32 @@ def classify_state_drift(
         drift_candidates.pop(entity_id, None)
     last_applied.pop(entity_id, None)
     return {"target": entity_id, "set": set_dict, "ttl_ms": ttl_ms, "reason": reason}
+
+
+def _detected_override_ttl_ms(engine: Any, target: str, default_ttl_ms: int) -> int:
+    """Return the longest configured TTL among current resolved contributors."""
+    resolved = engine.resolve(target)
+    if resolved is None:
+        return default_ttl_ms
+    contributors = {
+        id(provider): provider
+        for provider in getattr(resolved, "field_providers", {}).values()
+    }
+    resolved_fields = set(resolved.value)
+    for intent in getattr(resolved, "all_active_intents", ()):
+        if any(
+            resolved_fields.intersection(getattr(intent, operation, {}))
+            for operation in ("cap", "floor", "offset", "multiply")
+        ):
+            contributors[id(intent)] = intent
+    if not contributors:
+        return default_ttl_ms
+    return max(
+        intent.manual_override_ttl_ms
+        if intent.manual_override_ttl_ms is not None
+        else default_ttl_ms
+        for intent in contributors.values()
+    )
 
 
 def invalidate_service_plan_for_state_change(
@@ -708,7 +738,9 @@ class Reconciliation:
             engine,
             self._last_applied,
             state,
-            ttl_ms=self._drift_override_ttl_ms,
+            ttl_ms=_detected_override_ttl_ms(
+                engine, entity_id, self._drift_override_ttl_ms
+            ),
             now_ms=now_ms,
             drift_suppressed_until=self._drift_suppressed_until,
             drift_candidates=self._drift_candidates,

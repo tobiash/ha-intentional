@@ -142,6 +142,7 @@ class Intent:
     authority: Authority = Authority.AUTOMATION
     confidence: float = 1.0
     ttl_ms: int | None = None
+    manual_override_ttl_ms: int | None = None
     reason: str = ""
     rule_id: str = ""
     ignore_when: bool = False

@@ -115,6 +115,7 @@ class IntentSelector:
     transition_ms: int = 0
     easing: str = "linear"
     ttl_ms: int | None = None
+    manual_override_ttl_ms: int | None = None
     linger_ms: int | None = None
 
 
