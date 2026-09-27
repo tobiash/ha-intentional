@@ -49,6 +49,115 @@ def test_frontend_panel_asset_is_bundled() -> None:
     assert '"rules/rollback"' in source
 
 
+def test_overview_does_not_claim_alignment_before_world_arrives() -> None:
+    html = _run_panel_js("new IntentionalPanel()._renderOverview()")
+    assert "Your home is aligned" not in html
+    assert "Loading" in html
+
+
+def test_initial_rules_do_not_wait_for_history_or_validation() -> None:
+    result = _run_panel_js(r'''(async () => {
+      const panel = new IntentionalPanel(); panel._render = () => {};
+      const calls = [];
+      panel._api = async (_method, path) => {
+        calls.push(path);
+        if (path === "rules/history" || path === "validate") return new Promise(() => {});
+        if (path === "rules/document") return {contents: "- id: ready\n  while: {binary_sensor.ready: on}\n  intent: {light.one: {state: on}}\n", generation: "g1"};
+        if (path === "world") return {authored_rules: [{rule_id: "ready", active: true}], targets: []};
+        if (path === "alerts") return {alerts: []};
+        return {status: "ok"};
+      };
+      void panel._load();
+      for (let i = 0; i < 12; i++) await Promise.resolve();
+      return {rules: panel._rules.map(r => r.id), busy: panel._busy, calls};
+    })()''')
+    assert result["rules"] == ["ready"]
+    assert result["busy"] is False
+    assert "validate" not in result["calls"]
+
+
+def test_frequent_ha_updates_do_not_postpone_refresh_forever() -> None:
+    result = _run_panel_js(r'''(() => {
+      const panel = new IntentionalPanel(); panel._loaded = true;
+      panel._hass = {states: {}};
+      let scheduled = 0, cancelled = 0;
+      globalThis.setTimeout = () => ++scheduled;
+      globalThis.clearTimeout = () => ++cancelled;
+      for (let i = 0; i < 100; i++) panel.hass = {states: {}};
+      return {scheduled, cancelled};
+    })()''')
+    assert result == {"scheduled": 1, "cancelled": 0}
+
+
+def test_world_refresh_coalesces_requests_and_recovers_from_errors() -> None:
+    result = _run_panel_js(r'''(async () => {
+      const panel = new IntentionalPanel(); panel._render = () => {};
+      let calls = 0, release;
+      panel._api = () => { calls++; return new Promise(resolve => {release = resolve;}); };
+      const first = panel._refreshWorld(); const second = panel._refreshWorld();
+      release({authored_rules: [], targets: []}); await Promise.all([first, second]);
+      const initialCalls = calls;
+      panel._api = async () => { throw new Error("Offline"); };
+      await panel._refreshWorld();
+      const failed = panel._renderOverview();
+      panel._api = async () => ({authored_rules: [], targets: []});
+      await panel._refreshWorld();
+      return {initialCalls, failed, recovered: panel._renderOverview()};
+    })()''')
+    assert result["initialCalls"] == 1
+    assert "Live status unavailable" in result["failed"]
+    assert "Live status unavailable" not in result["recovered"]
+
+
+def test_resolved_alerts_are_opt_in_and_batched() -> None:
+    result = _run_panel_js(r'''(() => {
+      const panel = new IntentionalPanel(); panel._render = () => {};
+      panel._alerts = Array.from({length: 1000}, (_, index) => ({
+        state: "resolved", name: `Resolved ${index}`, instance_id: `instance-${index}`, resolved_at_ms: index,
+      }));
+      panel._alerts.push({state: "firing", name: "Current problem"});
+      const collapsed = panel._renderAlertWorkspace();
+      panel._handleAction({dataset: {action: "toggle-resolved"}});
+      const first = panel._renderAlertWorkspace();
+      panel._handleAction({dataset: {action: "more-resolved"}});
+      const second = panel._renderAlertWorkspace();
+      return {collapsed, first, second};
+    })()''')
+    assert "Current problem" in result["collapsed"]
+    assert "Resolved history (1000)" in result["collapsed"]
+    assert "Resolved 999" not in result["collapsed"]
+    assert "Resolved 999" in result["first"]
+    assert "Resolved 974" not in result["first"]
+    assert "Showing 25 of 1000" in result["first"]
+    assert "Showing 50 of 1000" in result["second"]
+
+
+def test_target_explanations_distinguish_unknown_retry_and_manual_override() -> None:
+    result = _run_panel_js(r'''({
+      unknown: targetExplanation({plan_match: "unknown"}),
+      retry: targetExplanation({reconciliation: {retry: {failures: 2, remaining_ms: 30000}}}),
+      manual: targetExplanation({manual_override: {remaining_ms: 120000}}),
+      held: explainRuleStatus({statusKnown: true, phase: "held", hold_after: {remaining_ms: 60000}}),
+    })''')
+    assert "Unknown does not mean aligned" in result["unknown"]
+    assert "Retrying in 30s" in result["retry"]
+    assert "expiring in 2m" in result["manual"]
+    assert "Keep settings" in result["held"]
+
+
+def test_resuming_manual_override_is_target_scoped_and_refreshes_live_state() -> None:
+    result = _run_panel_js(r'''(async () => {
+      const panel = new IntentionalPanel(); panel._render = () => {};
+      panel._world = {targets: [{target: "light.desk", manual_override: {remaining_ms: 60000}}]};
+      const calls = []; let refreshed = false;
+      panel._hass = {callService: async (...args) => calls.push(args)};
+      panel._refreshWorld = async () => {refreshed = true;};
+      await panel._clearOverride("light.desk");
+      return {calls, refreshed, busy: panel._busy};
+    })()''')
+    assert result == {"calls": [["intentional", "clear", {"target": "light.desk"}]], "refreshed": True, "busy": False}
+
+
 def test_alert_frontend_workspaces_use_existing_api_contracts() -> None:
     source = PANEL_PATH.read_text()
 

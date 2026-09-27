@@ -745,6 +745,7 @@ class AlertCoordinator:
         async with self._lock:
             if not self.available:
                 raise AlertStateUnavailableError("Alert state is unavailable")
+            retained_counts = (len(self._silences), len(self._audit), len(self._instances))
             self._silences = [
                 silence
                 for silence in self._silences
@@ -823,6 +824,7 @@ class AlertCoordinator:
                 alerts != self._alerts
                 or bool(transitions)
                 or self._notifications.export_state() != notifications_before
+                or retained_counts != (len(self._silences), len(self._audit), len(self._instances))
             )
             if not changed and not self._dirty:
                 return []

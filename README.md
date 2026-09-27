@@ -238,6 +238,17 @@ node --check custom_components/intentional/frontend/intentional-panel.js
 pytest tests/test_frontend_panel.py -q
 ```
 
+Optional real-browser regressions use Playwright and a locally installed
+`chromium` or `google-chrome` executable:
+
+```sh
+pip install playwright
+pytest tests/test_frontend_browser.py -q
+```
+
+These checks cover delayed loading, Visual/YAML draft and scroll preservation
+during background updates, and mobile navigation to the relevant editor section.
+
 This catches syntax, editor contract, rule validation, dry-run, and lifecycle
 simulation issues before installing on a live Home Assistant instance.
 

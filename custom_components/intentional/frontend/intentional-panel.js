@@ -33,6 +33,15 @@ class IntentionalPanel extends HTMLElement {
     this._health = null;
     this._history = [];
     this._world = null;
+    this._worldError = "";
+    this._worldPromise = null;
+    this._worldRefreshNeeded = false;
+    this._worldUpdatedAt = null;
+    this._loadRequest = 0;
+    this._loading = false;
+    this._loadError = "";
+    this._historyError = "";
+    this._historyRequest = 0;
     this._workspace = "intent";
     this._screen = "overview";
     this._rules = [];
@@ -60,6 +69,7 @@ class IntentionalPanel extends HTMLElement {
     this._visualModeError = "";
     this._migration = { automations: [], selected: "", inspection: null, proposal: null, loading: "" };
     this._alerts = [];
+    this._resolvedAlertsVisible = 0;
     this._alertsError = "";
     this._alertsBusy = false;
     this._selectedAlertId = "";
@@ -85,10 +95,13 @@ class IntentionalPanel extends HTMLElement {
     this._beforeUnload = (event) => { if (this._dirty) { event.preventDefault(); event.returnValue = ""; } };
   }
 
-  connectedCallback() { globalThis.addEventListener?.("beforeunload", this._beforeUnload); }
+  connectedCallback() { this._detached = false; globalThis.addEventListener?.("beforeunload", this._beforeUnload); }
   disconnectedCallback() {
     globalThis.removeEventListener?.("beforeunload", this._beforeUnload);
     clearTimeout(this._worldRefreshTimer);
+    clearTimeout(this._validateTimer);
+    this._worldRefreshTimer = null;
+    this._detached = true;
   }
 
   set hass(hass) {
@@ -98,18 +111,51 @@ class IntentionalPanel extends HTMLElement {
       this._loaded = true;
       this._load();
     } else if (hass && previous && hass !== previous) {
-      clearTimeout(this._worldRefreshTimer);
-      this._worldRefreshTimer = setTimeout(() => this._refreshWorld(), 500);
+      this._scheduleWorldRefresh();
     }
   }
 
-  async _refreshWorld() {
+  _scheduleWorldRefresh() {
+    if (this._detached) return;
+    if (this._worldPromise) { this._worldRefreshNeeded = true; return; }
+    // A bounded throttle, not a trailing debounce: HA can update continuously.
+    if (this._worldRefreshTimer !== null) return;
+    this._worldRefreshTimer = setTimeout(() => {
+      this._worldRefreshTimer = null;
+      void this._refreshWorld();
+    }, 1000);
+  }
+
+  async _refreshWorld({ fresh = false } = {}) {
+    if (this._worldPromise) {
+      await this._worldPromise;
+      if (!fresh) return;
+    }
+    clearTimeout(this._worldRefreshTimer);
     this._worldRefreshTimer = null;
-    try {
-      this._world = await this._api("GET", "world");
-      this._rules = parseDocumentRuleSummaries(this._contents, this._world.authored_rules || []);
-      this._render();
-    } catch (err) { this._error = err.message || String(err); this._render(); }
+    const request = this._loadRequest;
+    this._worldPromise = (async () => {
+      try {
+        const world = await this._api("GET", "world");
+        if (request !== this._loadRequest) return;
+        this._world = world;
+        this._worldError = "";
+        this._worldUpdatedAt = Date.now();
+        this._rules = parseDocumentRuleSummaries(this._contents, world.authored_rules || []);
+      } catch (err) {
+        if (request === this._loadRequest) this._worldError = err.message || String(err);
+      } finally {
+        if (request === this._loadRequest) {
+          this._worldPromise = null;
+          if (!this._detached) this._render();
+          if (this._worldRefreshNeeded) {
+            this._worldRefreshNeeded = false;
+            this._scheduleWorldRefresh();
+          }
+        }
+      }
+    })();
+    await this._worldPromise;
   }
 
   set narrow(value) {
@@ -138,23 +184,27 @@ class IntentionalPanel extends HTMLElement {
   }
 
   async _load() {
+    const request = ++this._loadRequest;
+    this._worldPromise = null;
+    this._world = null;
+    this._worldError = "";
+    this._loading = true;
+    this._loadError = "";
     this._busy = true;
     this._error = "";
     this._render();
     void this._loadAlerts();
+    void this._loadHistory();
+    void this._api("GET", "health").then((health) => {
+      if (request === this._loadRequest) { this._health = health; if (!this._detached) this._render(); }
+    }).catch(() => {}); // Live world health remains authoritative.
     try {
-      const [health, document, history, world] = await Promise.all([
-        this._api("GET", "health"),
-        this._api("GET", "rules/document"),
-        this._api("GET", "rules/history"),
-        this._api("GET", "world"),
-      ]);
-      this._health = health;
+      const worldRequest = this._refreshWorld();
+      const document = await this._api("GET", "rules/document");
+      if (request !== this._loadRequest) return;
       this._document = document;
       this._contents = document.contents || "";
-      this._history = history.history || [];
-      this._world = world;
-      this._rules = parseDocumentRuleSummaries(this._contents, world.authored_rules || []);
+      this._rules = parseDocumentRuleSummaries(this._contents, this._world?.authored_rules || []);
       this._screen = "overview";
       this._selectedRuleId = "";
       this._selectedRuleContents = "";
@@ -163,12 +213,16 @@ class IntentionalPanel extends HTMLElement {
       this._dirty = false;
       this._stage = "Draft";
       this._reviewedFingerprint = "";
-      await this._validate({ quiet: true });
-    } catch (err) {
-      this._error = err.message || String(err);
-    } finally {
-      this._busy = false;
       this._render();
+      await worldRequest;
+    } catch (err) {
+      if (request === this._loadRequest) this._loadError = this._error = err.message || String(err);
+    } finally {
+      if (request === this._loadRequest) {
+        this._busy = false;
+        this._loading = false;
+        if (!this._detached) this._render();
+      }
     }
   }
 
@@ -183,7 +237,7 @@ class IntentionalPanel extends HTMLElement {
       this._alertsError = err.message || String(err);
     } finally {
       this._alertsBusy = false;
-      this._render();
+      if (this._workspace === "alert" && !this._detached) this._render();
     }
   }
 
@@ -499,8 +553,8 @@ class IntentionalPanel extends HTMLElement {
       this._stage = editedDuringSave ? "Draft" : "Published";
       if (editedDuringSave) this._reviewedFingerprint = "";
       this._error = "";
-      await this._loadHistory();
-      await this._refreshWorld();
+      void this._loadHistory();
+      await this._refreshWorld({ fresh: true });
       if (!editedDuringSave) {
         if (this._selectedRuleId) this._selectRule(this._selectedRuleForm?.id || this._selectedRuleId, { render: false, keepDirty: false, screen: "detail" });
       }
@@ -513,8 +567,16 @@ class IntentionalPanel extends HTMLElement {
   }
 
   async _loadHistory() {
-    const history = await this._api("GET", "rules/history");
-    this._history = history.history || [];
+    const request = ++this._historyRequest;
+    try {
+      const history = await this._api("GET", "rules/history");
+      if (request !== this._historyRequest) return;
+      this._history = history.history || [];
+      this._historyError = "";
+    } catch (err) {
+      if (request === this._historyRequest) this._historyError = err.message || String(err);
+    }
+    if (request === this._historyRequest && this._screen === "edit" && !this._detached) this._render();
   }
 
   async _discoverMigrations() {
@@ -626,6 +688,9 @@ class IntentionalPanel extends HTMLElement {
 
   _selectRule(ruleId, { render = true, keepDirty = false, screen = "detail" } = {}) {
     if (!keepDirty && this._dirty && !confirm("Discard unsaved editor changes?")) return;
+    clearTimeout(this._validateTimer);
+    this._validationRequest += 1;
+    this._previewRequest += 1;
     const block = extractRuleBlock(this._contents, ruleId);
     const apiRule = this._rules.find((rule) => rule.id === ruleId) || null;
     this._selectedRuleId = ruleId;
@@ -762,6 +827,8 @@ class IntentionalPanel extends HTMLElement {
 
   _renderRules() {
     const rules = this._ledgerRules();
+    if (!rules.length && this._loadError) return `<div class="empty">Rules could not be read. Use Reload to try again.</div>`;
+    if (!rules.length && (this._loading || !this._document)) return `<div class="empty">Reading rules…</div>`;
     if (!rules.length) return `<div class="empty">No rules yet. Create one visually or paste YAML in Advanced.</div>`;
     const sections = [["Needs attention", "attention"], ["Active now", "active"], ["Waiting", "waiting"], ["Disabled / Paused", "disabled"]];
     return sections.map(([title, phase]) => {
@@ -779,8 +846,14 @@ class IntentionalPanel extends HTMLElement {
   _renderOverview() {
     const rules = this._ledgerRules();
     const attention = rules.filter((rule) => rule.section === "attention").length;
+    const targets = (this._world?.targets || []).filter(target => target.desired != null);
+    const unconfirmed = targets.filter(target => target.plan_match !== "match").length;
+    const degraded = this._world?.health?.status === "degraded";
+    const title = this._loadError ? "Could not load your rules" : this._worldError ? "Live status unavailable" : !this._world ? "Loading intentions…" : degraded ? "Intentional needs attention" : attention ? `${attention} rule${attention === 1 ? " needs" : "s need"} attention` : unconfirmed ? "Some targets are not confirmed aligned" : !rules.length ? "No rules configured" : !targets.length ? "No active target intentions" : "Active targets are aligned";
+    const description = this._worldError ? "Showing the last available snapshot. Refresh to check what is happening now." : !this._world ? "Reading your rules and checking Home Assistant. Alignment has not been checked yet." : degraded ? "The runtime reports a problem. Review the affected rules and Home Assistant integration diagnostics." : attention || unconfirmed ? "Open a rule to see what it requests, what is happening, and what to change." : !targets.length ? "Rules may be waiting, disabled, or producing only Alerts or Effects." : `${targets.length} managed target${targets.length === 1 ? "" : "s"} match the current desired state. Open a rule to understand why.`;
     return `<section class="overview">
-      <div class="ledger-head"><span class="eyebrow">Intent Ledger</span><h2>${attention ? `${attention} need${attention === 1 ? "s" : ""} attention` : "Your home is aligned"}</h2><p>${attention ? "Review intentions that are blocked, drifting, or reporting an error." : "Active intentions and Home Assistant agree."}</p></div>
+      <div class="ledger-head ${this._worldError || attention || unconfirmed || degraded ? "needs-attention" : !this._world ? "loading" : ""}" role="status"><span class="eyebrow">Intent Ledger</span><h2>${escapeHtml(title)}</h2><p>${escapeHtml(description)}</p>${this._worldError ? `<p>${escapeHtml(this._worldError)}</p><button class="secondary" data-action="refresh-world">Retry live status</button>` : ""}${this._worldUpdatedAt && this._world ? `<small>Last checked ${escapeHtml(new Date(this._worldUpdatedAt).toLocaleTimeString())}</small>` : ""}</div>
+      ${!this._world && !this._worldError ? `<div class="loading-placeholder" aria-hidden="true">Loading live status…</div>` : ""}
       <div class="ledger">${this._renderRules()}</div>
       <details class="create"><summary>Create or import</summary><div class="actions"><button data-action="new-rule">Create Rule</button><button class="secondary" data-action="show-document">Import or edit document YAML</button><button class="secondary" data-action="migration-discover">Migrate HA automation</button></div>${this._renderMigration()}</details>
     </section>`;
@@ -789,12 +862,14 @@ class IntentionalPanel extends HTMLElement {
   _renderAlertWorkspace() {
     if (this._selectedAlertId) return this._renderAlertDetail();
     if (this._alertsError) return `<section class="workspace"><div class="ledger-head alert-head"><span class="eyebrow">Alert Ledger</span><h2>Alert state unavailable</h2><p>This workspace could not load. Rules and policy remain available.</p></div><div class="error-box" role="alert">${escapeHtml(this._alertsError)}</div><button class="secondary" data-action="reload-alerts">Retry Alerts</button></section>`;
-    const alerts = sortAlerts(this._alerts);
+    const alerts = sortAlerts(this._alerts.filter(alert => alert.state !== "resolved"));
+    const resolved = this._alerts.filter(alert => alert.state === "resolved").sort((a, b) => Number(b.resolved_at_ms || 0) - Number(a.resolved_at_ms || 0));
     const firing = alerts.filter((alert) => alert.state === "firing").length;
     return `<section class="workspace">
-      <div class="ledger-head alert-head"><span class="eyebrow">Alert Ledger</span><h2>${firing ? `${firing} firing` : "No Alerts firing"}</h2><p>Durable Alert state reported by the current integration.</p></div>
+      <div class="ledger-head alert-head"><span class="eyebrow">Alert Ledger</span><h2>${this._alertsBusy && !this._alerts.length ? "Loading Alerts…" : firing ? `${firing} firing` : "No Alerts firing"}</h2><p>Current Alert definitions. Resolved occurrences are kept separately below.</p></div>
       ${this._alertsBusy ? `<div role="status" class="muted">Loading Alerts...</div>` : ""}
       ${alerts.length ? `<div class="alert-ledger">${alerts.map((alert) => this._renderAlertRow(alert)).join("")}</div>` : `<div class="empty card">No Alert definitions are currently reported.</div>`}
+      ${resolved.length ? `<section class="card"><h3>Resolved history (${resolved.length})</h3><p>Up to 1,000 resolved instances are retained for up to 30 days. Older instances are removed automatically.</p><button class="secondary" data-action="toggle-resolved">${this._resolvedAlertsVisible ? "Hide resolved history" : "Show resolved history"}</button>${this._resolvedAlertsVisible ? `<div class="alert-ledger">${resolved.slice(0, this._resolvedAlertsVisible).map(alert => this._renderAlertRow(alert)).join("")}</div><p>Showing ${Math.min(this._resolvedAlertsVisible, resolved.length)} of ${resolved.length}, newest first.</p>${this._resolvedAlertsVisible < resolved.length ? `<button class="secondary" data-action="more-resolved">Show 25 more</button>` : ""}` : ""}</section>` : ""}
     </section>`;
   }
 
@@ -866,15 +941,57 @@ class IntentionalPanel extends HTMLElement {
   _renderRuleDetail() {
     const rule = this._ledgerRules().find((item) => item.id === this._selectedRuleId);
     if (!rule) return this._renderOverview();
-    const targets = rule.targets.map((target) => `<div class="target-line"><div><strong>${escapeHtml(target.title)}</strong><small>${escapeHtml(target.id)}</small></div><div><span>Desired: ${escapeHtml(formatValue(target.desired))}</span><span class="${target.aligned ? "aligned" : "attention"}">${target.aligned ? "Aligned" : `Actual: ${escapeHtml(formatValue(target.actual))}`}</span></div></div>`).join("") || `<div class="empty">No durable Targets. This Rule may only produce Alerts or Effects.</div>`;
-    const competing = rule.competing.length ? `<section><h3>Competing Intentions</h3>${rule.competing.map((item) => `<p>${escapeHtml(item.rule_id || item.id || "Another intention")}</p>`).join("")}</section>` : "";
+    const targets = rule.targets.map(target => this._renderTargetExplanation(target)).join("") || `<div class="empty">No durable Targets. This Rule may only produce Alerts or Effects.</div>`;
+    const competing = rule.competing.length ? `<section><h3>Other rules affecting these targets</h3><p>A rule can be active without controlling every field. Authority wins first, then confidence, then recency. Caps, floors and other modifiers also contribute.</p>${rule.competing.map((item) => `<p>${this._ruleLink(item.rule_id || item.id)} · ${escapeHtml(item.state || "active")}</p>`).join("")}</section>` : "";
+    const conditions = rule.form.conditions.filter(item => item.entity).map(item => `<li><strong>${escapeHtml(this._friendlyName(item.entity))}</strong><span>Condition: ${escapeHtml(item.operator)} ${escapeHtml(item.value)} · Current HA value: ${escapeHtml(this._hass?.states?.[item.entity]?.state ?? "not reported")}</span></li>`).join("");
     return `<article class="detail card"><div class="sticky-top"><button class="secondary back" data-action="back">Back</button><span>${escapeHtml(rule.title)}</span></div>
-      <span class="eyebrow">${escapeHtml(rule.phaseText)}</span><h2>${escapeHtml(rule.title)}</h2><p class="summary">${escapeHtml(describeRule(rule))}</p>
-      <section><h3>Why this state</h3><p>${escapeHtml(rule.reason || describeCondition(rule.form))}</p></section>
-      <section><h3>Desired targets</h3>${targets}</section>${competing}
-      ${rule.history.length ? `<section><h3>Recent plan history</h3>${rule.history.map((item) => `<p>${escapeHtml(item.reason || item.status || "Service plan recorded")}</p>`).join("")}</section>` : ""}
+      ${this._worldError ? `<div class="warning-box" role="status">Live status unavailable. These explanations use the last snapshot. <button class="secondary" data-action="refresh-world">Retry</button></div>` : ""}
+      <span class="eyebrow">${escapeHtml(rule.phaseText)}</span><h2>${escapeHtml(rule.title)}</h2><p class="summary">${escapeHtml(explainRuleStatus(rule))}</p>
+      <section><h3>Why this rule is active or waiting</h3>${rule.reason ? `<p>Purpose: ${escapeHtml(rule.reason)}</p>` : ""}<p>${escapeHtml(describeCondition(rule.form))}</p>${conditions ? `<ul class="evidence-list">${conditions}</ul>` : `<p>For advanced conditions, view the source below.</p>`}${rule.blocked_by?.length ? `<p>Blocked by: ${rule.blocked_by.map(id => this._ruleLink(id)).join(", ")}</p>` : ""}<button class="secondary small" data-action="edit-section" data-section="conditions">Change when this applies</button></section>
+      <section><h3>Targets: requested, resolved and actual</h3>${targets}<button class="secondary small" data-action="edit-section" data-section="targets">Change desired state</button></section>${competing}
+      ${rule.history.length ? `<details><summary>Recent reconciliation decisions</summary>${rule.history.map((item) => `<p>${escapeHtml(item.reason || item.status || (item.kind || "Service plan recorded").replaceAll("_", " "))}</p>`).join("")}</details>` : ""}
+      <section><h3>How to change this behavior</h3><p>Change <strong>When</strong> to choose the situation, <strong>Targets</strong> to change the requested values, or <strong>Keep</strong> if it stays active too long. Edits remain a draft until you check, review and publish them.</p><div class="actions"><button class="secondary small" data-action="edit-section" data-section="hold">Change how long it stays active</button><button class="secondary small" data-action="edit-section" data-section="enabled">Enable or disable this rule</button></div></section>
       <div class="detail-actions"><button data-action="edit-rule">Edit guided</button><button class="secondary" data-action="show-yaml-rule">View source</button></div>
     </article>`;
+  }
+
+  _ruleLink(ruleId) {
+    const authored = this._uniqueRules().filter(rule => rule.id === ruleId || String(ruleId).startsWith(`${rule.id}:`)).sort((a, b) => b.id.length - a.id.length)[0];
+    return authored ? `<button class="link-button" data-rule-id="${escapeHtml(authored.id)}">${escapeHtml(authored.reason || authored.id)}</button>` : escapeHtml(ruleId || "Manual override");
+  }
+
+  _renderTargetExplanation(target) {
+    const projection = target.projection;
+    const runtime = projection.reconciliation || {};
+    const manual = projection.manual_override;
+    const why = targetExplanation(projection);
+    const fields = (projection.fields || []).map(field => `<li><strong>${escapeHtml(field.field)}: ${escapeHtml(formatValue(field.value))}</strong><span>Set by ${this._ruleLink(field.provider?.rule_id)}${field.provider?.authority ? ` · ${escapeHtml(field.provider.authority)} authority` : ""}</span>${(field.modifiers || []).map(item => `<span>${escapeHtml(item.operation)} ${escapeHtml(formatValue(item.value))} from ${this._ruleLink(item.rule_id)}</span>`).join("")}${(field.losing_providers || []).length ? `<span>Overrides ${field.losing_providers.map(item => this._ruleLink(item.rule_id)).join(", ")}</span>` : ""}</li>`).join("");
+    return `<article class="target-explanation"><div class="target-line"><div><strong>${escapeHtml(target.title)}</strong><small>${escapeHtml(target.id)}</small></div><button class="secondary small" data-action="open-entity" data-entity-id="${escapeHtml(target.id)}">Open in Home Assistant</button></div><dl class="detail-values"><div><dt>This rule requests</dt><dd>${escapeHtml(target.requested || "See rule source")}</dd></div><div><dt>Resolved desired state</dt><dd>${escapeHtml(projection.desired == null ? "No active desired state reported" : formatValue(projection.desired))}</dd></div><div><dt>Actual Home Assistant state</dt><dd>${escapeHtml(formatValue(target.actual))}</dd></div></dl><p class="${target.aligned && !manual && !runtime.retry ? "aligned" : "attention"}">${escapeHtml(why)}</p>${fields ? `<ul class="evidence-list">${fields}</ul>` : ""}${manual ? `<p>When the manual override ends: ${escapeHtml(manual.revealed_after_withdrawal ? formatValue(manual.revealed_after_withdrawal.value) : "no underlying desired state is currently reported")}. This can change as rules are evaluated.</p><button class="secondary small" data-action="clear-override" data-target="${escapeHtml(target.id)}" ${this._busy ? "disabled" : ""}>Resume rule control now</button>` : ""}</article>`;
+  }
+
+  _editSection(section) {
+    this._screen = "edit";
+    this._render();
+    const element = this.shadowRoot.querySelector(`[data-edit-section="${selectorEscape(section)}"]`) || this.shadowRoot.querySelector(".yaml-editor");
+    element?.scrollIntoView({ block: "start" });
+    (element?.matches("textarea") ? element : element?.querySelector("input, select, textarea"))?.focus({ preventScroll: true });
+    this._queueValidate();
+  }
+
+  async _clearOverride(target) {
+    const projection = this._world?.targets?.find(item => item.target === target);
+    if (!projection?.manual_override || this._busy) return;
+    const revealed = projection.manual_override.revealed_after_withdrawal;
+    if (!confirm(`Resume rule control for ${this._friendlyName(target)}? ${revealed ? `Current rules would request ${formatValue(revealed.value)}.` : "The manual override will be cleared."}`)) return;
+    this._busy = true;
+    this._render();
+    try {
+      if (!this._hass?.callService) throw new Error("Open this panel inside Home Assistant to resume rule control.");
+      await this._hass.callService("intentional", "clear", { target });
+      this._error = "";
+      await this._refreshWorld({ fresh: true });
+    } catch (err) { this._error = err.message || String(err); }
+    finally { this._busy = false; this._render(); }
   }
 
   _renderEditor() {
@@ -889,7 +1006,7 @@ class IntentionalPanel extends HTMLElement {
     return `
       <section class="editor-stack" data-form-root>
         ${this._renderEditBack()}
-        ${this._formEdited ? `<div class="warning-box">Guided edits normalize this Rule's YAML formatting and comments when published.</div>` : ""}
+        <p class="muted">Publishing guided edits normalizes this Rule's YAML formatting and comments. Use YAML mode to preserve source formatting.</p>
         <section class="card hero-card">
           <div class="hero-row">
             <div>
@@ -903,7 +1020,7 @@ class IntentionalPanel extends HTMLElement {
             </div>
           </div>
         </section>
-        <section class="card form-card">
+        <section class="card form-card" data-edit-section="enabled">
           <h3>Name &amp; description</h3>
           <div class="form-grid">
             ${inputField("ID", "id", form.id, "new-rule", "Rule ID used for status, history, and switches")}
@@ -917,17 +1034,17 @@ class IntentionalPanel extends HTMLElement {
           <div class="section-title"><div><h3>Alerts</h3><p>Assert durable situations independently of Targets and Effects.</p></div><button class="secondary" data-action="add-alert" ${[form.alert, ...(form.alerts || [])].filter(Boolean).length >= 16 ? "disabled" : ""}>Add Alert</button></div>
           ${[form.alert, ...(form.alerts || [])].filter(Boolean).map((alert, index) => this._renderAlertForm(alert, index)).join("") || `<div class="empty inline-empty">No Alerts configured.</div>`}
         </section>
-        <section class="card form-card">
+        <section class="card form-card" data-edit-section="conditions">
            <div class="section-title"><div><h3>When</h3><p>Conditions that make the intent active.</p></div>${selectInline("Condition matching", "conditionMode", form.conditionMode, [["all", "All conditions"], ["any", "Any condition"], ["none", "None match"], ["not", "Not first condition"]])}</div>
           <div class="rows">${form.conditions.map((condition, index) => this._renderCondition(condition, index, "condition")).join("")}</div>
           <button class="secondary" data-action="add-condition">Add Condition</button>
            <details class="advanced"><summary>Timing</summary><div class="form-grid single">${inputField("Activate after", "after", form.after, "5m", "Optional dwell before first activation")}</div></details>
         </section>
-        <section class="card form-card">
+        <section class="card form-card" data-edit-section="hold">
            <div class="section-title"><div><h3>Keep</h3><p>Prevent flicker by retaining an active intent after the original condition stops.</p></div>${selectInline("Keep behavior", "holdMode", form.holdMode, [["none", "No hold"], ["after", "Keep for duration"], ["until_for", "Until condition stays true"], ["while_after", "While condition, then duration"]])}</div>
           ${this._renderHold(form)}
         </section>
-        <section class="card form-card">
+        <section class="card form-card" data-edit-section="targets">
            <div class="section-title"><div><h3>Targets</h3><p>Desired target state. Add multiple targets for one authored Rule.</p></div><button class="secondary" data-action="add-intent">Add Target</button></div>
           ${form.intents.map((intent, index) => this._renderIntent(intent, index)).join("")}
         </section>
@@ -1089,16 +1206,19 @@ class IntentionalPanel extends HTMLElement {
     </section>`;
   }
 
-  _render() {
+  _render({ replaceEditor = false } = {}) {
     if (!this.shadowRoot) return;
-    const viewState = captureViewState(this.shadowRoot);
+    const viewKey = [this._workspace, this._screen, this._editorMode, this._selectedRuleId, this._selectedAlertId].join("|");
+    const sameView = viewKey === this._renderedViewKey;
+    const viewState = sameView ? captureViewState(this.shadowRoot) : null;
+    const preserveEditor = sameView && !replaceEditor && this._workspace === "intent" && this._screen === "edit" && Boolean(this.shadowRoot.querySelector("[data-editor-region]"));
     this._renderRuleViewModels = buildRuleViewModels(this._uniqueRules(), this._world || {}, this._hass?.states || {});
     const version = this._health?.version ? `v${this._health.version}` : "";
     const generation = this._document?.generation ? this._document.generation.slice(0, 12) : "not loaded";
-    this.shadowRoot.innerHTML = `
+    const html = `
       <style>${styles}</style>
          <main class="${this._narrow ? "narrow" : ""}" aria-busy="${this._busy || this._alertsBusy || this._policyBusy}">
-         <header>
+         <div data-live-region="header"><header>
            <div><h1>Intentional</h1><p>${escapeHtml(version)} · generation ${escapeHtml(generation)}</p></div>
            <div class="actions"><button class="secondary" data-action="reload" ${this._busy ? "disabled" : ""}>Reload</button></div>
           </header>
@@ -1108,17 +1228,29 @@ class IntentionalPanel extends HTMLElement {
             <button class="${this._workspace === "policy" ? "selected" : ""}" data-action="switch-workspace" data-workspace="policy" ${this._workspace === "policy" ? 'aria-current="page"' : ""}>Alerting Policy</button>
           </nav>
           <div class="sr-status" aria-live="polite">${escapeHtml(this._workspace === "policy" ? this._policyStage : this._stage)}${this._busy || this._alertsBusy || this._policyBusy ? ", loading" : ""}</div>${this._workspace === "intent" && this._error ? `<div class="banner" role="alert">${escapeHtml(this._error)}</div>` : ""}
-          <datalist id="entity-list">${this._entityOptions()}</datalist>
-          ${this._workspace === "alert" ? this._renderAlertWorkspace() : this._workspace === "policy" ? this._renderPolicyWorkspace() : this._screen === "overview" ? this._renderOverview() : this._screen === "detail" ? `<section class="two-pane"><aside class="card rules">${this._renderRules()}</aside>${this._renderRuleDetail()}</section>` : `<section class="two-pane edit-layout"><aside class="card rules">${this._renderRules()}</aside><div>${this._renderEditor()}<details class="card inspector"><summary>Checks, preview, simulation &amp; history</summary><h2>Validation</h2>${this._renderValidation()}<h2>Preview</h2>${this._renderPreview()}<h2>Simulation</h2>${this._renderSimulation()}<h2>History</h2>${this._renderHistory()}</details></div></section>`}
-          ${this._workspace === "intent" && this._screen === "edit" ? `<nav class="publish-bar" aria-label="Draft workflow"><span>${escapeHtml(this._stage)}</span><button class="secondary" data-action="validate" ${this._busy ? "disabled" : ""}>Check</button><button class="secondary" data-action="review" ${this._busy || this._stage === "Draft" ? "disabled" : ""}>Review Changes</button><button data-action="save" ${this._busy || !this._dirty || this._stage !== "Reviewed" || this._reviewedFingerprint !== candidateFingerprint(this._candidateContents()) ? "disabled" : ""}>Publish</button></nav>` : ""}
+          </div><datalist id="entity-list">${preserveEditor ? "" : this._entityOptions()}</datalist>
+          ${this._workspace === "alert" ? this._renderAlertWorkspace() : this._workspace === "policy" ? this._renderPolicyWorkspace() : this._screen === "overview" ? this._renderOverview() : this._screen === "detail" ? `<section class="two-pane"><aside class="card rules">${this._renderRules()}</aside>${this._renderRuleDetail()}</section>` : `<section class="two-pane edit-layout"><aside class="card rules" data-live-region="sidebar">${this._renderRules()}</aside><div><div data-editor-region>${preserveEditor ? "" : this._renderEditor()}</div><details class="card inspector" data-live-region="inspector"><summary>Checks, preview, simulation &amp; history</summary><h2>Validation</h2>${this._renderValidation()}<h2>Preview</h2>${this._renderPreview()}<h2>Simulation</h2>${this._renderSimulation()}<h2>History</h2>${this._historyError ? `<p role="alert">History unavailable: ${escapeHtml(this._historyError)}</p>` : this._renderHistory()}</details></div></section>`}
+          ${this._workspace === "intent" && this._screen === "edit" ? `<nav class="publish-bar" data-live-region="publish" aria-label="Draft workflow"><span>${escapeHtml(this._stage)}${this._dirty ? " · Unsaved changes" : ""}</span><button class="secondary" data-action="validate" ${this._busy ? "disabled" : ""}>Check</button><button class="secondary" data-action="review" ${this._busy || this._stage === "Draft" ? "disabled" : ""}>Review Changes</button><button data-action="save" ${this._busy || !this._dirty || this._stage !== "Reviewed" || this._reviewedFingerprint !== candidateFingerprint(this._candidateContents()) ? "disabled" : ""}>Publish</button></nav>` : ""}
        </main>
     `;
-    this._bindEvents();
+    if (preserveEditor) {
+      const template = this.ownerDocument.createElement("template");
+      template.innerHTML = html;
+      for (const region of ["header", "sidebar", "inspector", "publish"]) {
+        const selector = `[data-live-region="${region}"]`;
+        this.shadowRoot.querySelector(selector)?.replaceWith(template.content.querySelector(selector));
+      }
+      this.shadowRoot.querySelector("main").setAttribute("aria-busy", String(this._busy));
+    } else {
+      this.shadowRoot.innerHTML = html;
+    }
+    this._renderedViewKey = viewKey;
+    this._bindEvents(preserveEditor);
     restoreViewState(this.shadowRoot, viewState);
   }
 
-  _bindEvents() {
-    this.shadowRoot.querySelector("textarea.yaml-editor")?.addEventListener("input", (event) => {
+  _bindEvents(preserveEditor = false) {
+    if (!preserveEditor) this.shadowRoot.querySelector("textarea.yaml-editor")?.addEventListener("input", (event) => {
       if (this._editorMode === "document") this._contents = event.target.value;
       else this._selectedRuleContents = event.target.value;
       this._markDirty();
@@ -1144,12 +1276,14 @@ class IntentionalPanel extends HTMLElement {
     this.shadowRoot.querySelector("[data-receiver-test-name]")?.addEventListener("input", (event) => {
       this._receiverTestName = event.target.value;
     });
-    this.shadowRoot.querySelector("[data-form-root]")?.addEventListener("input", (event) => this._onFormInput(event));
-    this.shadowRoot.querySelector("[data-form-root]")?.addEventListener("change", (event) => this._onFormInput(event));
+    if (!preserveEditor) this.shadowRoot.querySelector("[data-form-root]")?.addEventListener("input", (event) => this._onFormInput(event));
+    if (!preserveEditor) this.shadowRoot.querySelector("[data-form-root]")?.addEventListener("change", (event) => this._onFormInput(event));
     this.shadowRoot.querySelector("[data-alert-comment]")?.addEventListener("input", (event) => { this._alertComment = event.target.value; });
     this.shadowRoot.querySelector("[data-silence-reason]")?.addEventListener("input", (event) => { this._silenceReason = event.target.value; });
-    this.shadowRoot.querySelectorAll("[data-action]").forEach((button) => button.addEventListener("click", () => this._handleAction(button)));
-    this.shadowRoot.querySelectorAll("[data-rule-id]").forEach((button) => button.addEventListener("click", () => this._selectRule(button.dataset.ruleId)));
+    this.shadowRoot.querySelectorAll("[data-action]").forEach((button) => {
+      if (!preserveEditor || !button.closest("[data-editor-region]")) button.addEventListener("click", () => this._handleAction(button));
+    });
+    this.shadowRoot.querySelectorAll("[data-rule-id]:not([data-action])").forEach((button) => button.addEventListener("click", () => this._selectRule(button.dataset.ruleId)));
     this.shadowRoot.querySelectorAll("[data-rollback]").forEach((button) => button.addEventListener("click", () => this._reviewRollback(button.dataset.rollback)));
     this.shadowRoot.querySelector("[data-migration-select]")?.addEventListener("change", (event) => this._inspectMigration(event.target.value));
   }
@@ -1182,9 +1316,11 @@ class IntentionalPanel extends HTMLElement {
     const escalationIndex = nearestIndex(target, "alertEscalationIndex");
     if (alert && target.dataset.alertEscalationField && escalationIndex >= 0) alert.escalations[escalationIndex][target.dataset.alertEscalationField] = target.value;
     this._markDirty();
+    if (event.type === "change" && ["holdMode", "alertMode"].includes(target.dataset.field)) this._render({ replaceEditor: true });
   }
 
   _markDirty() {
+    this._validationRequest += 1;
     this._previewRequest += 1;
     this._dirty = true;
     this._validation = null;
@@ -1215,6 +1351,12 @@ class IntentionalPanel extends HTMLElement {
     if (["acknowledge-alert", "revoke-acknowledgment", "silence-alert"].includes(action)) this._mutateAlert(action);
     if (action === "reload" && (!this._dirty || confirm("Discard unsaved editor changes and reload?"))) this._load();
     if (action === "reload-alerts") this._loadAlerts();
+    if (action === "toggle-resolved") { this._resolvedAlertsVisible = this._resolvedAlertsVisible ? 0 : 25; this._render(); }
+    if (action === "more-resolved") { this._resolvedAlertsVisible += 25; this._render(); }
+    if (action === "refresh-world") void this._refreshWorld();
+    if (action === "edit-section") this._editSection(button.dataset.section);
+    if (action === "open-entity") this.dispatchEvent(new CustomEvent("hass-more-info", { detail: { entityId: button.dataset.entityId }, bubbles: true, composed: true }));
+    if (action === "clear-override") void this._clearOverride(button.dataset.target);
     if (action === "reload-policy") this._loadPolicy();
     if (action === "policy-check") this._checkPolicy();
     if (action === "policy-review") this._reviewPolicy();
@@ -1236,7 +1378,7 @@ class IntentionalPanel extends HTMLElement {
     if (action === "show-visual-rule") this._showVisualRule();
     if (action === "leave-edit" && (!this._dirty || confirm("Leave the editor? Your unsaved draft will be preserved."))) { this._screen = button.dataset.destination; this._render(); }
     if (action === "back") { this._screen = "overview"; this._render(); }
-    if (action === "edit-rule") { this._screen = "edit"; this._render(); }
+    if (action === "edit-rule") { this._screen = "edit"; this._render(); this._queueValidate(); }
     if (action === "add-condition") this._mutateForm((form) => form.conditions.push({ entity: "", operator: "is", value: "on" }));
     if (action === "remove-condition") this._mutateForm((form) => form.conditions.splice(Number(button.dataset.index), 1));
     if (action === "add-intent") this._mutateForm((form) => form.intents.push({ target: "", fields: [{ name: "state", operator: "value", value: "on" }], transitionAssert: "", transitionChange: "", transitionWithdraw: "", ttl: "", manualOverrideTtl: "", linger: "", easing: "linear" }));
@@ -1270,7 +1412,7 @@ class IntentionalPanel extends HTMLElement {
     mutator(this._selectedRuleForm);
     this._formEdited = true;
     this._markDirty();
-    this._render();
+    this._render({ replaceEditor: true });
   }
 }
 
@@ -1930,6 +2072,7 @@ function escapeHtml(value) { return String(value ?? "").replaceAll("&", "&amp;")
 function classifyRulePhase(rule) {
   if (rule.enabled === false || rule.paused) return { section: "disabled", text: rule.paused ? "Paused" : "Disabled" };
   if (rule.error || rule.blocked_by?.length || rule.drift || rule.projectionIssue) return { section: "attention", text: rule.drift ? "Needs alignment" : rule.blocked_by?.length ? "Blocked" : "Needs attention" };
+  if (rule.statusKnown === false) return { section: "waiting", text: "Live status not reported yet" };
   if (rule.active || rule.active_intent_count || ["active", "held", "lingering"].includes(rule.phase)) return { section: "active", text: rule.phase === "held" || rule.phase === "lingering" ? "Keeping desired state" : "Active now" };
   if (rule.phase === "pending" || rule.for_remaining_ms != null) return { section: "waiting", text: "Waiting for conditions to settle" };
   return { section: "waiting", text: "Waiting for its situation" };
@@ -1954,6 +2097,40 @@ function describeRule(rule) {
   return `${describeCondition(rule)}, keep ${describeIntent(rule)}.`;
 }
 
+function formatRemaining(ms) {
+  if (ms == null) return "without a time limit";
+  if (ms <= 0) return "due now";
+  const seconds = Math.ceil(ms / 1000);
+  if (seconds < 60) return `in ${seconds}s`;
+  if (seconds < 3600) return `in ${Math.ceil(seconds / 60)}m`;
+  return `in ${Math.ceil(seconds / 3600)}h`;
+}
+
+function explainRuleStatus(rule) {
+  if (rule.enabled === false) return "This rule is disabled. Enable it to let its conditions produce intentions.";
+  if (rule.paused) return "This rule is paused. It will not take control while paused.";
+  if (rule.error) return `Evaluation could not complete: ${formatValue(rule.error)}`;
+  if (rule.blocked_by?.length) return "Another rule is blocking this rule. Open the blocking rule to understand its suppression policy.";
+  if (!rule.statusKnown) return "A live evaluation has not been reported for this rule yet.";
+  if (["held", "lingering"].includes(rule.phase)) return `Its original situation no longer needs to be true: Keep settings are retaining the intention${rule.hold_after?.remaining_ms != null ? `, ending ${formatRemaining(rule.hold_after.remaining_ms)}` : ""}.`;
+  if (rule.for_remaining_ms != null) return `The situation must remain true for longer. Activation is expected ${formatRemaining(rule.for_remaining_ms)} if it stays true.`;
+  if (rule.active || rule.active_intent_count) return "This rule is active and is producing intentions. The resolved state below includes any stronger intentions and modifiers.";
+  return "The situation is not currently producing an active intention. Check the condition values below or change When.";
+}
+
+function targetExplanation(projection) {
+  const runtime = projection.reconciliation || {};
+  if (projection.policy_denial || runtime.policy_denial) return `A target policy prevents applying this state: ${formatValue(projection.policy_denial || runtime.policy_denial)}. Review the document Target policy.`;
+  if (runtime.shadow) return "This target is in shadow mode. Intentional explains the plan but does not send it to Home Assistant.";
+  if (runtime.retry) return `The last service attempt failed (${runtime.retry.failures} failure${runtime.retry.failures === 1 ? "" : "s"}). Retrying ${formatRemaining(runtime.retry.remaining_ms)}. Check the device in Home Assistant if this continues.`;
+  if (projection.manual_override) return `A manual override is active, expiring ${formatRemaining(projection.manual_override.remaining_ms)}. Wait for expiry or resume rule control below.`;
+  if (runtime.pending_drift) return "The device differs from the last applied plan. Intentional is waiting to confirm whether this is a manual change.";
+  if (runtime.transition_suppressed) return "A transition is in progress. Intentional is giving the device time to reach the desired state.";
+  if (projection.plan_match === "match") return "Home Assistant confirms the resolved desired state.";
+  if (projection.plan_match === "mismatch") return "Home Assistant currently reports a different state. Intentional will reconcile it while the intention remains active.";
+  return "Alignment is not confirmed: no complete comparable state is available. Unknown does not mean aligned.";
+}
+
 function buildRuleViewModels(rules, world, states) {
   const statuses = new Map((world.authored_rules || []).map((item) => [item.rule_id || item.id, item]));
   const records = world.desired_records || [];
@@ -1970,12 +2147,16 @@ function buildRuleViewModels(rules, world, states) {
       const projection = projectionsByTarget.get(id) || {};
       const actual = record.actual || projection.actual || states[id]?.state;
       const desired = projection.desired || record.desired || Object.fromEntries((form.intents.find((item) => item.target === id)?.fields || []).map((field) => [field.name, field.value]));
-      return { id, title: states[id]?.attributes?.friendly_name || id, desired, actual, aligned: projection.plan_match === "match" };
+      const authored = form.intents.find(item => item.target === id);
+      const requested = authored?.fields?.map(field => `${field.name} ${field.operator === "value" ? "=" : field.operator} ${field.value}`).join(", ");
+      return { id, title: states[id]?.attributes?.friendly_name || id, desired, actual, requested, projection, aligned: projection.plan_match === "match" };
     });
     const targetProjections = targetIds.map((id) => projectionsByTarget.get(id)).filter(Boolean);
     const projectionIssue = targetProjections.some((projection) => hasProjectionIssueForRule(projection, rule.id, status));
-    const phase = classifyRulePhase({ ...rule, ...status, projectionIssue });
-    return { ...rule, ...status, form, title: rule.reason || rule.id, reason: rule.reason || status.reason || "", group: rule.group || status.group || form.group, profile: rule.profile || status.profile || form.profile, targets, targetCount: targetIds.length, competing: targetProjections.flatMap((item) => item.active_intents || item.rules || []).filter((item) => item.rule_id && item.rule_id !== rule.id), history: targetProjections.flatMap((item) => item.recent_attempts || item.attempts || []).filter((item) => !item.rule_id || item.rule_id === rule.id).slice(0, 5), section: phase.section, phaseText: phase.text };
+    const statusKnown = statuses.has(rule.id);
+    const phase = classifyRulePhase({ ...rule, ...status, projectionIssue, statusKnown });
+    const competing = [...new Map(targetProjections.flatMap(item => item.active_intents || item.rules || []).filter(item => item.rule_id && item.rule_id !== rule.id && !item.rule_id.startsWith(`${rule.id}:`) && !["inactive", "waiting"].includes(item.state)).map(item => [item.rule_id, item])).values()];
+    return { ...rule, ...status, statusKnown, form, title: rule.reason || rule.id, reason: rule.reason || status.reason || "", group: rule.group || status.group || form.group, profile: rule.profile || status.profile || form.profile, targets, targetCount: targetIds.length, competing, history: targetProjections.flatMap((item) => item.reconciliation?.recent_history || item.recent_attempts || item.attempts || []).filter((item) => !item.rule_id || item.rule_id === rule.id).slice(0, 5), section: phase.section, phaseText: phase.text };
   });
 }
 
@@ -2106,13 +2287,33 @@ function captureViewState(root) {
   const active = root?.activeElement;
   const key = active?.dataset?.focusKey || active?.getAttribute?.("name") || active?.id;
   const path = key ? `[data-focus-key="${selectorEscape(key)}"], [name="${selectorEscape(key)}"], #${selectorEscape(key)}` : active?.dataset?.action ? `[data-action="${selectorEscape(active.dataset.action)}"]` : active?.classList?.contains("yaml-editor") ? ".yaml-editor" : "";
-  return { path, start: active?.selectionStart, end: active?.selectionEnd, scrollTop: active?.scrollTop, scrollLeft: active?.scrollLeft, pageScroll: root?.querySelector("main")?.scrollTop || 0, open: [...(root?.querySelectorAll("details[open]") || [])].map((item) => item.dataset.focusKey || [...root.querySelectorAll("details")].indexOf(item)) };
+  const ancestors = [];
+  for (let node = root?.host; node; node = node.parentElement || node.getRootNode?.()?.host) {
+    ancestors.push({ node, top: node.scrollTop, left: node.scrollLeft });
+  }
+  const page = root?.host?.ownerDocument?.scrollingElement;
+  if (page && !ancestors.some(item => item.node === page)) ancestors.push({ node: page, top: page.scrollTop, left: page.scrollLeft });
+  return { path, start: active?.selectionStart, end: active?.selectionEnd, direction: active?.selectionDirection, scrollTop: active?.scrollTop, scrollLeft: active?.scrollLeft, height: active?.style?.height, ancestors, pageScroll: root?.querySelector("main")?.scrollTop || 0, open: [...(root?.querySelectorAll("details[open]") || [])].map((item) => item.dataset.focusKey || [...root.querySelectorAll("details")].indexOf(item)) };
 }
-function restoreViewState(root, state) { if (!state) return; (state.open || []).forEach((key) => (typeof key === "number" ? root.querySelectorAll("details")[key] : root.querySelector(`[data-focus-key="${selectorEscape(key)}"]`))?.setAttribute("open", "")); const active = state.path && root.querySelector(state.path); if (active) { active.focus(); if (state.start != null && active.setSelectionRange) active.setSelectionRange(state.start, state.end); active.scrollTop = state.scrollTop || 0; active.scrollLeft = state.scrollLeft || 0; } const main = root.querySelector("main"); if (main) main.scrollTop = state.pageScroll || 0; }
+function restoreViewState(root, state) {
+  if (!state) return;
+  (state.open || []).forEach((key) => (typeof key === "number" ? root.querySelectorAll("details")[key] : root.querySelector(`[data-focus-key="${selectorEscape(key)}"]`))?.setAttribute("open", ""));
+  const active = state.path && root.querySelector(state.path);
+  if (active) {
+    if (active !== root.activeElement) active.focus({ preventScroll: true });
+    if (state.height && active.style) active.style.height = state.height;
+    if (state.start != null && active.setSelectionRange) active.setSelectionRange(state.start, state.end, state.direction);
+    active.scrollTop = state.scrollTop || 0;
+    active.scrollLeft = state.scrollLeft || 0;
+  }
+  const main = root.querySelector("main");
+  if (main) main.scrollTop = state.pageScroll || 0;
+  for (const {node, top, left} of state.ancestors || []) { node.scrollTop = top; node.scrollLeft = left; }
+}
 function selectorEscape(value) { return globalThis.CSS?.escape ? globalThis.CSS.escape(value) : String(value).replace(/[^a-zA-Z0-9_-]/g, "\\$&"); }
 
 const styles = `
-  :host { display: block; color: var(--primary-text-color); background: var(--primary-background-color); }
+  :host { display: block; overflow-anchor: none; color: var(--primary-text-color); background: var(--primary-background-color); }
   main { padding: 24px; box-sizing: border-box; min-height: 100vh; }
   header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 18px; }
   h1, h2, h3 { margin: 0; font-weight: 600; }
@@ -2160,6 +2361,9 @@ const styles = `
   .history-item span { display: block; color: var(--secondary-text-color); font-size: 12px; }
   .empty-state { min-height: 320px; display: grid; place-content: center; text-align: center; }
   .overview { max-width: 920px; margin: auto; } .ledger-head { border-left: 5px solid var(--success-color, #43a047); padding: 8px 18px; margin-bottom: 22px; }
+  .ledger-head.loading { border-left-color: var(--primary-color); }
+  .ledger-head.needs-attention { border-left-color: var(--warning-color, #ffa000); }
+  .loading-placeholder { padding: 24px; border-radius: 12px; margin-bottom: 18px; background: var(--secondary-background-color); color: var(--secondary-text-color); }
   .workspace { max-width: 1000px; margin: auto; display: flex; flex-direction: column; gap: 14px; }
   .alert-head { border-left-color: var(--warning-color, #ffa000); }
   .policy-head { border-left-color: var(--primary-color); }
@@ -2187,6 +2391,9 @@ const styles = `
   .phase { font-size: 12px; color: var(--primary-color); } .create { margin-top: 28px; } summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; }
   .detail { max-width: 860px; } .detail > section { padding: 18px 0; border-top: 1px solid var(--divider-color); } .summary { font-size: 18px; line-height: 1.5; margin-bottom: 22px; }
   .target-line { display: flex; justify-content: space-between; gap: 20px; padding: 12px 0; } .target-line small, .target-line span { display: block; } .aligned { color: var(--success-color, #43a047); } .attention { color: var(--warning-color, #b26a00); }
+  .target-explanation { padding: 14px; margin: 12px 0; border: 1px solid var(--divider-color); border-radius: 12px; }
+  .evidence-list { list-style: none; padding: 0; } .evidence-list li { padding: 10px 0; } .evidence-list span { display: block; color: var(--secondary-text-color); margin-top: 4px; }
+  [data-edit-section] { scroll-margin-top: 16px; } .detail-values dd { overflow-wrap: anywhere; }
   .sticky-top { display: none; } .publish-bar { position: sticky; bottom: 0; z-index: 3; margin-top: 16px; padding: 10px; display: flex; justify-content: flex-end; align-items: center; gap: 8px; background: var(--card-background-color); border-top: 1px solid var(--divider-color); }
   .edit-back { display: none; }
   .inline-select { display: flex; flex-direction: column; gap: 3px; } .inline-select span, .sr-status { font-size: 12px; color: var(--secondary-text-color); } .sr-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }

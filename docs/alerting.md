@@ -60,6 +60,20 @@ Suppression never resolves an Alert. Release is re-evaluated after a five-second
 
 ## Operations
 
+### Retention and disk usage
+
+Resolved Alert instances are retained for at most 30 days, capped at 1,000
+instances. Lifecycle audit records have the same age limit and a 10,000-record
+cap. Completed Notification obligations are age-pruned and capped at 10,000,
+with at most 1,000 dead-lettered obligations. Nonterminal delivery obligations
+are separately capped at 2,048. These are record-count limits, not a disk-byte
+quota; serialized size depends on the stored content.
+
+Pruning is persisted even when no new Alert transition occurs. Unchanged
+observations do not cause repeated saves after cleanup. The Alert workspace
+shows current definitions first; resolved history is opt-in and displayed in
+pages of 25, newest first.
+
 The Alert workspace shows pending, firing, stale, acknowledged, suppressed, and retained resolved instances. Detail includes lifecycle evidence, definition revision, matching routes, group identity, redacted destination status, acceptance/retry timing, and audit events.
 
 The Alerting Policy workspace provides validation, current-plus-synthetic preview, generation-controlled publication, history rollback, and administrator-only rate-limited Receiver tests.

@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.13] - 2026-09-27
+
+### Changed
+- Show explicit loading, unavailable, and unconfirmed states in the Intent Ledger; rules no longer wait for history loading or an initial validation request.
+- Throttle live refreshes without starving updates during busy Home Assistant activity and coalesce overlapping world requests.
+- Preserve Visual/YAML editor elements, focus, selection, and scroll position during background updates and validation.
+- Explain requested, resolved, and actual Target state, field providers, manual overrides, retries, and transition waits, with direct links to the relevant rule editor section and Home Assistant entity.
+- Show resolved Alert history separately from current Alerts, in batches of 25.
+
+### Fixed
+- Persist age-only Alert history cleanup even when no new Alert transition occurs, so expired records do not reappear after restart.
+
 ## [0.12.12] - 2026-09-27
 
 ### Changed

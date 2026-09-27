@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import replace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -573,6 +574,30 @@ def test_alert_annotation_rendering_degrades_then_recovers_without_lifecycle_los
     assert degraded.summary.startswith("Value {{")
     assert recovered.presentation_degraded is False
     assert recovered.summary == "Value 5.0"
+
+
+@pytest.mark.asyncio
+async def test_expired_resolved_history_is_saved_without_new_alert_changes() -> None:
+    from intentional.alerting import RETENTION_MS
+
+    store = MemoryAlertStore()
+    coordinator = AlertCoordinator(store)
+    await coordinator.async_load()
+    firing = engine_observation(active=True)
+    inactive = replace(firing, active=False)
+    await coordinator.async_observe([firing], now_ms=1_000)
+    await coordinator.async_observe([inactive], now_ms=2_000)
+    assert coordinator.list_instances()
+
+    await coordinator.async_observe([inactive], now_ms=2_001 + RETENTION_MS)
+    assert coordinator.list_instances() == []
+    restored = AlertCoordinator(store)
+    await restored.async_load()
+    assert restored.list_instances() == []
+    assert restored.list_audit() == []
+    store.async_save = AsyncMock(wraps=store.async_save)
+    await coordinator.async_observe([inactive], now_ms=2_002 + RETENTION_MS)
+    store.async_save.assert_not_awaited()
 
 
 @pytest.mark.asyncio
