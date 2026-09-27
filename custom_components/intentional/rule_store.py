@@ -7,6 +7,7 @@ while detaching the source of truth from files on disk.
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -47,6 +48,7 @@ class StorageRuleStore:
         self._cached_contents: str | None = None
         self._cached_generation = ""
         self._cached_rules: list[dict[str, Any]] | None = None
+        self._cached_authoring: list[dict[str, Any]] = []
 
     async def async_load_or_import(self, rule_dir: str) -> list[Rule]:
         """Load stored rules, importing YAML files once if storage is empty."""
@@ -234,6 +236,7 @@ class StorageRuleStore:
             raw_rules = _raw_rule_items_from_yaml(self._contents)
         except (RuleLoadError, yaml.YAMLError):
             raw_rules = []
+        self._cached_authoring = authoring_rules_from_raw(raw_rules)
         rules: list[dict[str, Any]] = []
         for rule in raw_rules:
             rule_id = rule.get("id")
@@ -250,6 +253,11 @@ class StorageRuleStore:
             )
         self._cached_rules = rules
         return [rule.copy() for rule in rules]
+
+    def authoring_rules(self) -> list[dict[str, Any]]:
+        """Return backend-parsed authored definitions for truthful UI projections."""
+        self.list_rules()
+        return deepcopy(self._cached_authoring)
 
     async def async_set_rule_enabled(self, rule_id: str, enabled: bool) -> dict[str, Any]:
         """Persist one rule's enabled flag."""
@@ -310,6 +318,14 @@ def rule_store_key(entry_id: str) -> str:
     return f"{entry_id}_rule_store"
 
 
+def authoring_rules_from_raw(raw_rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep authored condition grouping and output kinds, including legacy rules."""
+    return [
+        {"id": rule["id"], "definition": json.loads(json.dumps(rule, default=str))}
+        for rule in raw_rules if isinstance(rule.get("id"), str)
+    ]
+
+
 def _history_record(contents: str, *, reason: str) -> dict[str, Any]:
     return {
         "generation": _generation_for(contents),
@@ -322,12 +338,14 @@ def _history_record(contents: str, *, reason: str) -> dict[str, Any]:
 
 
 def _history_public_record(record: dict[str, Any], *, include_contents: bool) -> dict[str, Any]:
+    if "rule_count" not in record:
+        record["rule_count"] = _rule_count(str(record.get("contents", "")))
     result = {
         "generation": record["generation"],
         "created_at": record.get("created_at", ""),
         "reason": record.get("reason", "unknown"),
         "size": record.get("size", len(str(record.get("contents", "")).encode("utf-8"))),
-        "rule_count": record.get("rule_count", _rule_count(str(record.get("contents", "")))),
+        "rule_count": record["rule_count"],
     }
     if include_contents:
         result["contents"] = record.get("contents", "")

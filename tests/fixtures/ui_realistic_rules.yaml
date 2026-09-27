@@ -1,0 +1,45 @@
+- id: office-soft-light
+  labels:
+  - office
+  - lighting
+  reason: Office occupied outside working hours with warm soft light
+    for comfortable evenings
+  while:
+    binary_sensor.office_occupancy: true
+    schedule.office_working_hours: false
+  hold:
+    until:
+      binary_sensor.office_occupancy: false
+      for: 5m
+  intent:
+    light.office:
+      state: true
+      brightness_pct: 40
+      color_temp_k: 2700
+- id: bedroom-off-at-23
+  when: time_of_day == "23:00" and light.bedroom.state == "on"
+  emit:
+    target: light.bedroom
+    set:
+      state: 'off'
+    transition: 30s
+    ttl: 5m
+- id: garden-person
+  labels:
+  - security
+  reason: A person was detected in the garden during Away or Night without a terrace
+    session
+  while:
+    all:
+    - any:
+      - input_select.posture: Away
+      - input_select.posture: Night
+    - any:
+      - binary_sensor.garden_person: true
+      - binary_sensor.garden_person_2: true
+    - input_boolean.terrace_session: false
+  alert:
+    name: GardenPerson
+    severity: warning
+    annotations:
+      summary: Person detected in the garden

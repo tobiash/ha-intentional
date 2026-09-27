@@ -72,7 +72,15 @@ quota; serialized size depends on the stored content.
 Pruning is persisted even when no new Alert transition occurs. Unchanged
 observations do not cause repeated saves after cleanup. The Alert workspace
 shows current definitions first; resolved history is opt-in and displayed in
-pages of 25, newest first.
+server-side pages of 25, newest first. Opening the panel no longer fetches the
+resolved history. The current Alert workspace refreshes independently from the
+Intent workspace.
+
+`GET /api/intentional/alerts?scope=current` returns current definitions and
+`resolved_total`. Use `scope=resolved&limit=25` for history, then pass the returned
+`next_cursor` as `before` for the next page. Limits are 1–100. A cursor removed
+by retention returns HTTP 409 and the client can refresh from the newest page.
+Omitting `scope` retains the existing combined response for API compatibility.
 
 The Alert workspace shows pending, firing, stale, acknowledged, suppressed, and retained resolved instances. Detail includes lifecycle evidence, definition revision, matching routes, group identity, redacted destination status, acceptance/retry timing, and audit events.
 

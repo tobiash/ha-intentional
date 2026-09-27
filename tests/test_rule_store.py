@@ -200,9 +200,46 @@ async def test_storage_rule_store_records_history_on_write(monkeypatch, fake_has
     assert history[0]["generation"] == original_generation
     assert history[0]["rule_count"] == 0
     assert "contents" not in history[0]
+
+    # Cached counts must not eagerly parse all historical YAML on every read.
+    monkeypatch.setattr("custom_components.intentional.rule_store._rule_count", Mock(side_effect=AssertionError("unnecessary history parse")))
+    assert store.list_history() == history
     snapshot = store.read_history(original_generation)
     assert snapshot is not None
     assert snapshot["contents"] == "[]\n"
+
+
+def test_authoring_projection_is_cached_isolated_and_invalidated(monkeypatch, fake_hass) -> None:
+    from custom_components.intentional import rule_store as module
+
+    monkeypatch.setattr(module, "Store", _FakeStore)
+    store = StorageRuleStore(fake_hass, "authoring-test")
+    store._contents = (Path(__file__).parent / "fixtures/ui_realistic_rules.yaml").read_text()
+    original = store.authoring_rules()
+    assert original[1]["definition"]["emit"]["set"]["state"] == "off"
+    assert "any" in original[2]["definition"]["while"]["all"][0]
+    parser = Mock(wraps=module._raw_rule_items_from_yaml)
+    monkeypatch.setattr(module, "_raw_rule_items_from_yaml", parser)
+    changed = store.authoring_rules()
+    changed[0]["definition"]["labels"].clear()
+    assert store.authoring_rules() == original
+    parser.assert_not_called()
+    store._contents = "[]\n"
+    assert store.authoring_rules() == []
+    parser.assert_called_once()
+
+
+def test_legacy_history_count_is_calculated_only_once(monkeypatch, fake_hass) -> None:
+    from custom_components.intentional import rule_store as module
+
+    monkeypatch.setattr(module, "Store", _FakeStore)
+    store = StorageRuleStore(fake_hass, "legacy-test")
+    store._history = [{"generation": "legacy", "contents": "[]\n"}]
+    count = Mock(return_value=0)
+    monkeypatch.setattr(module, "_rule_count", count)
+    assert store.list_history()[0]["rule_count"] == 0
+    assert store.list_history()[0]["rule_count"] == 0
+    count.assert_called_once()
 
 
 async def test_storage_rule_store_no_ops_do_not_save_or_grow_history(

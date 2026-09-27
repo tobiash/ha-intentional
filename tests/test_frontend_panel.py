@@ -6,6 +6,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import yaml
+
 from intentional.yaml_loader import load_rules_from_string
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -74,6 +76,40 @@ def test_initial_rules_do_not_wait_for_history_or_validation() -> None:
     assert result["rules"] == ["ready"]
     assert result["busy"] is False
     assert "validate" not in result["calls"]
+    assert "rules/history" not in result["calls"]
+
+
+def test_backend_authored_definitions_preserve_condition_logic_and_output_kind() -> None:
+    definitions = yaml.safe_load((REPO_ROOT / "tests/fixtures/ui_realistic_rules.yaml").read_text())
+    result = _run_panel_js(f"{json.dumps(definitions)}.map(rulePresentation)")
+    assert "23:00" in result[1]["condition"]
+    assert result[1]["intents"] == [{"target": "light.bedroom", "requested": "state = off"}]
+    assert "Away OR input_select.posture is Night" in result[2]["condition"]
+    assert "input_boolean.terrace_session is off" in result[2]["condition"]
+    assert result[2]["intents"] == []
+    assert result[2]["output"] == "Alert: GardenPerson"
+
+
+def test_block_labels_and_folded_reason_can_be_edited_without_semantic_changes() -> None:
+    contents = (REPO_ROOT / "tests/fixtures/ui_realistic_rules.yaml").read_text()
+    definition = yaml.safe_load(contents)[0]
+    result = _run_panel_js(f'''(() => {{
+      const block = extractRuleBlock({json.dumps(contents)}, "office-soft-light");
+      const definition = {json.dumps(definition)};
+      return {{error: visualModeError(block, definition), yaml: stringifyRule(parseRuleForm(block, {{definition}}))}};
+    }})()''')
+    assert result["error"] == ""
+    original = load_rules_from_string(contents)[0]
+    edited = load_rules_from_string(result["yaml"])[0]
+    for key in ("id", "when", "set", "labels", "reason", "hold_until_when", "hold_until_for_ms"):
+        assert getattr(edited, key) == getattr(original, key), key
+
+
+def test_nested_conditions_stay_yaml_only_even_with_supported_metadata() -> None:
+    contents = (REPO_ROOT / "tests/fixtures/ui_realistic_rules.yaml").read_text()
+    definition = yaml.safe_load(contents)[2]
+    error = _run_panel_js(f"visualModeError(extractRuleBlock({json.dumps(contents)}, 'garden-person'), {json.dumps(definition)})")
+    assert "nested" in error
 
 
 def test_frequent_ha_updates_do_not_postpone_refresh_forever() -> None:
@@ -87,6 +123,31 @@ def test_frequent_ha_updates_do_not_postpone_refresh_forever() -> None:
       return {scheduled, cancelled};
     })()''')
     assert result == {"scheduled": 1, "cancelled": 0}
+
+
+def test_refresh_targets_only_visible_workspace() -> None:
+    result = _run_panel_js(r'''(() => {
+      const panel = new IntentionalPanel(); panel._loaded = true; panel._hass = {};
+      let scheduled; const calls = [];
+      globalThis.setTimeout = callback => { scheduled = callback; return 1; };
+      globalThis.clearTimeout = () => {};
+      panel._refreshWorld = () => calls.push("world");
+      panel._loadAlerts = () => calls.push("alerts");
+      panel._workspace = "alert"; panel.hass = {}; scheduled();
+      panel._workspace = "policy"; scheduled = null; panel.hass = {};
+      return {calls, policyScheduled: Boolean(scheduled)};
+    })()''')
+    assert result == {"calls": ["alerts"], "policyScheduled": False}
+
+
+def test_ha_api_errors_preserve_actionable_pagination_message() -> None:
+    result = _run_panel_js(r'''(async () => {
+      const panel = new IntentionalPanel(); panel._render = () => {};
+      panel._hass = {callApi: async () => { throw {status_code:409, body:{error:"history_cursor_expired", message:"History changed; refresh to start from the newest records"}}; }};
+      await panel._loadResolvedHistory();
+      return panel._resolvedError;
+    })()''')
+    assert result == "History changed; refresh to start from the newest records"
 
 
 def test_world_refresh_coalesces_requests_and_recovers_from_errors() -> None:
@@ -110,19 +171,31 @@ def test_world_refresh_coalesces_requests_and_recovers_from_errors() -> None:
 
 
 def test_resolved_alerts_are_opt_in_and_batched() -> None:
-    result = _run_panel_js(r'''(() => {
+    result = _run_panel_js(r'''(async () => {
       const panel = new IntentionalPanel(); panel._render = () => {};
-      panel._alerts = Array.from({length: 1000}, (_, index) => ({
+      const history = Array.from({length: 1000}, (_, index) => ({
         state: "resolved", name: `Resolved ${index}`, instance_id: `instance-${index}`, resolved_at_ms: index,
-      }));
-      panel._alerts.push({state: "firing", name: "Current problem"});
+      })).reverse();
+      const calls = [];
+      panel._api = async (_method, path) => {
+        calls.push(path);
+        if (path === "alerts?scope=current") return {alerts: [{state: "firing", name: "Current problem"}], resolved_total: 1000};
+        const query = new URLSearchParams(path.split('?')[1]);
+        const start = query.has('before') ? history.findIndex(item => item.instance_id === query.get('before')) + 1 : 0;
+        return {alerts: history.slice(start, start + 25), resolved_total: 1000, next_cursor: history[start + 24].instance_id};
+      };
+      await panel._loadAlerts();
       const collapsed = panel._renderAlertWorkspace();
+      const initialCalls = [...calls];
       panel._handleAction({dataset: {action: "toggle-resolved"}});
+      await Promise.resolve();
       const first = panel._renderAlertWorkspace();
       panel._handleAction({dataset: {action: "more-resolved"}});
+      await Promise.resolve();
       const second = panel._renderAlertWorkspace();
-      return {collapsed, first, second};
+      return {collapsed, first, second, initialCalls};
     })()''')
+    assert result["initialCalls"] == ["alerts?scope=current"]
     assert "Current problem" in result["collapsed"]
     assert "Resolved history (1000)" in result["collapsed"]
     assert "Resolved 999" not in result["collapsed"]
@@ -164,7 +237,7 @@ def test_alert_frontend_workspaces_use_existing_api_contracts() -> None:
     assert '>Intent</button>' in source
     assert '>Alert</button>' in source
     assert '>Alerting Policy</button>' in source
-    assert 'this._api("GET", "alerts")' in source
+    assert 'this._api("GET", "alerts?scope=current")' in source
     assert 'this._api("GET", "alerting/policy")' in source
     assert 'this._api("POST", "alerting/simulate"' in source
     assert 'this._api("PUT", "alerting/policy"' in source
@@ -244,7 +317,7 @@ def test_alert_controls_use_instance_endpoints_and_refresh_ledger_and_detail() -
       const calls = [];
       panel._api = async (method, path, data) => {
         calls.push({method, path, data});
-        if (path === "alerts") return {alerts: []};
+        if (path === "alerts?scope=current") return {alerts: []};
         if (method === "GET") return {instance: {instance_id: "instance-1", state: "firing"}, audit: []};
         return {};
       };
@@ -261,7 +334,7 @@ def test_alert_controls_use_instance_endpoints_and_refresh_ledger_and_detail() -
         {"method": "POST", "path": "alerts/instance-1/silence", "data": {"reason": "Repair in progress", "duration_ms": 3_600_000}},
         {"method": "DELETE", "path": "alerts/instance-1/acknowledgment"},
     ]
-    assert sum(call["path"] == "alerts" for call in result) == 3
+    assert sum(call["path"] == "alerts?scope=current" for call in result) == 3
     assert sum(call["path"] == "alerts/instance-1" and call["method"] == "GET" for call in result) == 3
 
 
@@ -269,7 +342,7 @@ def test_alert_load_failure_is_isolated_from_rule_load() -> None:
     result = _run_panel_js(r'''(async () => {
       const panel = new IntentionalPanel(); panel._render = () => {};
       panel._api = async (method, path) => {
-        if (path === "alerts") throw new Error("alert store unavailable");
+        if (path === "alerts?scope=current") throw new Error("alert store unavailable");
         if (path === "health") return {version: "test"};
         if (path === "rules/document") return {contents: "", generation: "g1"};
         if (path === "rules/history") return {history: []};
@@ -277,6 +350,7 @@ def test_alert_load_failure_is_isolated_from_rule_load() -> None:
         if (path === "validate") return {valid: true, normalized: []};
       };
       await panel._load();
+      await panel._loadAlerts();
       await Promise.resolve();
       return {ruleError: panel._error, alertsError: panel._alertsError, generation: panel._document.generation};
     })()''')
@@ -393,7 +467,7 @@ def test_frontend_panel_keeps_yaml_escape_hatches() -> None:
 def test_frontend_panel_lists_authored_document_rules() -> None:
     source = PANEL_PATH.read_text()
 
-    assert 'parseDocumentRuleSummaries(contents, validation.normalized || [])' in source
+    assert 'this._ruleSummaries(contents, validation.normalized || [])' in source
     assert 'function extractRuleBlocks(contents)' in source
     assert 'normalized || []' in source
 
@@ -1007,7 +1081,7 @@ def test_rollback_review_fetches_snapshot_before_separate_apply() -> None:
       const panel = new IntentionalPanel(); panel._render = () => {}; const calls = [];
       panel._api = async (method, path) => { calls.push([method, path]); return {generation: "generation-1", contents: "<unsafe>"}; };
       await panel._reviewRollback("generation-1");
-      return {calls, html: panel._renderHistory.call({...panel, _history: [{generation: "generation-1"}]})};
+      return {calls, html: panel._renderHistory.call({...panel, _historyLoaded: true, _history: [{generation: "generation-1"}]})};
     })()''')
     assert result["calls"] == [["GET", "rules/history/generation-1"]]
     assert "&lt;unsafe&gt;" in result["html"]

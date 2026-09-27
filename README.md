@@ -247,7 +247,9 @@ pytest tests/test_frontend_browser.py -q
 ```
 
 These checks cover delayed loading, Visual/YAML draft and scroll preservation
-during background updates, and mobile navigation to the relevant editor section.
+during background updates, stable rule buttons and search focus, and mobile
+navigation to the relevant editor section. Realistic fixtures also cover legacy
+off-at-time rules, nested OR conditions, block labels, and folded descriptions.
 
 This catches syntax, editor contract, rule validation, dry-run, and lifecycle
 simulation issues before installing on a live Home Assistant instance.

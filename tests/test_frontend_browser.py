@@ -4,6 +4,7 @@ from pathlib import Path
 from shutil import which
 
 import pytest
+import yaml
 
 playwright = pytest.importorskip("playwright.sync_api", reason="optional browser tests need Playwright")
 CHROMIUM = which("chromium") or which("google-chrome")
@@ -34,10 +35,10 @@ def page():
             fields: [{field: 'brightness_pct', value: 60, provider: {rule_id: 'occupied', authority: 'automation'}}]
           }]};
           window.api = async (_method, path) => {
-            if (path === 'rules/document') return {contents: rules, generation: 'g1'};
+            if (path === 'rules/document') return {contents: rules, generation: 'g1', authored_rules: [{id: 'occupied', definition: {id: 'occupied', reason: 'Keep the room comfortable', while: {'binary_sensor.motion': 'on'}, intent: {'light.desk': {state: 'on', brightness_pct: 60}}}}]};
             if (path === 'world') return world;
             if (path === 'rules/history') return new Promise(() => {});
-            if (path === 'alerts') return {alerts: []};
+            if (path === 'alerts?scope=current') return {alerts: [], resolved_total: 0};
             if (path === 'validate') return {valid: true, normalized: []};
             return {status: 'ok', version: 'local'};
           };
@@ -108,3 +109,39 @@ def test_change_guidance_opens_correct_editor_section_on_mobile(page):
     page.locator("select[data-field='holdMode']").select_option("after")
     assert page.locator("input[data-field='holdAfter']").is_visible()
     assert page.evaluate("document.body.scrollWidth <= innerWidth")
+
+
+def test_live_refresh_preserves_rule_buttons_and_search_focus(page):
+    page.evaluate("panel.hass = hass")
+    page.wait_for_function("panel._busy === false")
+    page.evaluate("window.originalRule = panel.shadowRoot.querySelector('[data-rule-id]')")
+    search = page.get_by_placeholder("Name, room or target")
+    search.fill("comfortable")
+    page.evaluate("""async () => {
+      window.originalSearch = panel.shadowRoot.querySelector('[data-rule-search]');
+      for (let i = 0; i < 3; i++) await panel._refreshWorld();
+    }""")
+    assert page.evaluate("originalRule.isConnected && originalSearch.isConnected && panel.shadowRoot.activeElement === originalSearch")
+    page.locator("button[data-rule-id='occupied']").click()
+    assert page.evaluate("panel._selectedRuleId") == "occupied"
+
+
+def test_realistic_rule_shapes_have_truthful_details_and_safe_editor_modes(page):
+    contents = (Path(__file__).parent / "fixtures/ui_realistic_rules.yaml").read_text()
+    descriptors = [{"id": rule["id"], "definition": rule} for rule in yaml.safe_load(contents)]
+    page.evaluate("""({contents, descriptors}) => {
+      window.rules = contents;
+      const oldApi = api;
+      window.api = (m, p, d) => p === 'rules/document' ? Promise.resolve({contents, authored_rules: descriptors, generation:'realistic'}) : oldApi(m,p,d);
+      panel.hass = hass;
+    }""", {"contents": contents, "descriptors": descriptors})
+    page.wait_for_function("panel._busy === false")
+    page.locator("button[data-rule-id='bedroom-off-at-23']").click()
+    assert page.get_by_text('time_of_day == "23:00" and light.bedroom.state == "on"', exact=True).is_visible()
+    assert page.get_by_text("state = off", exact=True).is_visible()
+    assert page.get_by_role("button", name="Edit YAML", exact=True).is_visible()
+    page.evaluate("panel._selectRule('office-soft-light')")
+    page.get_by_role("button", name="Edit guided", exact=True).click()
+    assert page.locator("input[data-field='reason']").input_value().endswith("for comfortable evenings")
+    assert page.locator("input[data-field='labels']").input_value() == "office, lighting"
+    assert page.evaluate("panel._dirty") is False

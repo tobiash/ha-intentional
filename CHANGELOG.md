@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.14] - 2026-09-27
+
+### Fixed
+- Rule history reads no longer eagerly reparse every stored YAML snapshot when cached counts exist; legacy missing counts are calculated once.
+- Rule explanations use backend-parsed authored definitions, preserving legacy `when`/`emit` semantics, nested condition grouping, folded descriptions, and Alert-only outputs instead of inventing editor defaults.
+- Guided editing supports backend-parsed block labels and folded descriptions while preserving boolean conditions, outputs, and Keep timing. Unsupported semantic constructs remain explicitly YAML-only.
+- Background updates retain overview/detail controls and editor nodes instead of replacing the entire panel DOM.
+
+### Changed
+- Load rule history only when opened and refresh only the visible workspace, with a five-second throttle. Policy drafts are not refreshed by unrelated HA activity.
+- Fetch current Alerts separately from resolved history. History uses server-side, cursor-based pages of 25 and handles expired cursors explicitly.
+- Add rule search, status/group filters, shorter target summaries, friendly entity names, and neutral labels for inactive Alert checks.
+
 ## [0.12.13] - 2026-09-27
 
 ### Changed

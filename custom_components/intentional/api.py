@@ -132,6 +132,7 @@ from .rule_files import (  # noqa: TID252
     _is_safe_filename,
     _list_rule_files,
     _patch_rule_by_id,
+    _raw_rule_items_from_yaml,
     _read_rule_file,
     _write_rule_file,
 )
@@ -140,7 +141,12 @@ from .rule_mutation import (  # noqa: TID252
     mutate_and_reload,
     mutation_coordinator_key,
 )
-from .rule_store import RULE_STORE_FILENAME, StorageRuleStore, rule_store_key  # noqa: TID252
+from .rule_store import (  # noqa: TID252
+    RULE_STORE_FILENAME,
+    StorageRuleStore,
+    authoring_rules_from_raw,
+    rule_store_key,
+)
 from .validation import validation_warnings as _validation_warnings  # noqa: TID252
 
 _LOGGER = logging.getLogger(__name__)
@@ -1121,6 +1127,7 @@ class IntentionalValidateView(HomeAssistantView):
                     "valid": not findings["errors"],
                     "rule_count": len(rules),
                     "normalized": [_rule_to_api_dict(rule) for rule in rules],
+                    "authored_rules": authoring_rules_from_raw(_raw_rule_items_from_yaml(contents)) if not findings["errors"] else [],
                     "errors": findings["errors"],
                     "warnings": [*findings["warnings"], *_validation_warnings(hass, rules)],
                 }
@@ -1293,7 +1300,32 @@ class IntentionalAlertsView(HomeAssistantView):
         coordinator = _alerting_for(request.app["hass"])
         if coordinator is None:
             return _error("Integration not configured", "not_configured", 503)
+        query = getattr(request, "query", {})
+        scope = query.get("scope", "all")
+        if scope not in {"current", "resolved", "all"}:
+            return _error("scope must be current, resolved, or all", "bad_request", 400)
+        try:
+            limit = int(query.get("limit", "25"))
+            if not 1 <= limit <= 100:
+                raise ValueError
+        except (TypeError, ValueError):
+            return _error("limit must be between 1 and 100", "bad_request", 400)
         current = coordinator.list_alerts()
+        instances = coordinator.list_instances()
+        total = len(instances)
+        next_cursor = None
+        if scope == "current":
+            instances = []
+        elif scope == "resolved":
+            before = query.get("before")
+            if before:
+                index = next((i for i, item in enumerate(instances) if item["instance_id"] == before), None)
+                if index is None:
+                    return _error("History changed; refresh to start from the newest records", "history_cursor_expired", 409)
+                instances = instances[index + 1:]
+            if len(instances) > limit:
+                next_cursor = instances[limit - 1]["instance_id"]
+            instances = instances[:limit]
         definitions = {
             (item.get("rule_id"), item.get("name")): item for item in current
         }
@@ -1302,14 +1334,16 @@ class IntentionalAlertsView(HomeAssistantView):
                 **definitions.get((item.get("rule_id"), item.get("name")), {}),
                 **item,
             }
-            for item in coordinator.list_instances()
+            for item in instances
         ]
         return web.json_response(
             {
                 "alerts": [
                     _public_alert_projection(alert)
-                    for alert in [*current, *retained]
+                    for alert in [*(current if scope != "resolved" else []), *retained]
                 ],
+                "resolved_total": total,
+                "next_cursor": next_cursor,
                 "health": coordinator.health(),
             }
         )
@@ -2428,6 +2462,7 @@ def _rule_document_response(store: StorageRuleStore) -> dict[str, Any]:
         "size": len(store.contents.encode("utf-8")),
         "generation": store.generation,
         "rule_count": len(store.list_rules()),
+        "authored_rules": store.authoring_rules(),
         "source": "storage",
     }
 

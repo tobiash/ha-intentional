@@ -493,6 +493,7 @@ def test_rule_document_response_has_no_file_semantics() -> None:
         contents="- id: one\n  when: sensor.x == 'on'\n  emit:\n    target: light.x\n",
         generation="abc123",
         list_rules=lambda: [{"id": "one"}],
+        authoring_rules=lambda: [{"id": "one", "definition": {"when": "sensor.x == 'on'"}}],
     )
 
     assert _rule_document_response(store) == {
@@ -500,8 +501,43 @@ def test_rule_document_response_has_no_file_semantics() -> None:
         "size": len(store.contents.encode("utf-8")),
         "generation": "abc123",
         "rule_count": 1,
+        "authored_rules": store.authoring_rules(),
         "source": "storage",
     }
+
+
+async def test_alert_history_pages_do_not_download_or_shift_with_current_alerts(monkeypatch):
+    from custom_components.intentional import api
+
+    instances = [
+        {"instance_id": f"instance-{i}", "rule_id": "one", "name": "Problem", "state": "resolved", "resolved_at_ms": i}
+        for i in range(60, 0, -1)
+    ]
+    coordinator = SimpleNamespace(
+        list_alerts=lambda: [{"rule_id": "one", "name": "Problem", "state": "inactive"}],
+        list_instances=lambda: list(instances),
+        health=lambda: {"status": "ok"},
+    )
+    monkeypatch.setattr(api, "_alerting_for", lambda _hass: coordinator)
+
+    async def get(query):
+        response = await api.IntentionalAlertsView().get(SimpleNamespace(app={"hass": None}, query=query))
+        return response.status, json.loads(response.body)
+
+    status, current = await get({"scope": "current"})
+    assert status == 200
+    assert len(current["alerts"]) == 1
+    assert current["resolved_total"] == 60
+    _, first = await get({"scope": "resolved", "limit": "25"})
+    assert len(first["alerts"]) == 25
+    assert first["alerts"][0]["instance_id"] == "instance-60"
+    instances.insert(0, {**instances[0], "instance_id": "newest"})
+    _, second = await get({"scope": "resolved", "limit": "25", "before": first["next_cursor"]})
+    assert second["alerts"][0]["instance_id"] == "instance-35"
+    assert not {a["instance_id"] for a in first["alerts"]} & {a["instance_id"] for a in second["alerts"]}
+    assert (await get({"scope": "resolved", "before": "expired"}))[0] == 409
+    for invalid in ("0", "101", "bad"):
+        assert (await get({"scope": "resolved", "limit": invalid}))[0] == 400
 
 
 def test_diagnostics_view_has_correct_url() -> None:
