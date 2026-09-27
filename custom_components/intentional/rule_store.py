@@ -44,6 +44,9 @@ class StorageRuleStore:
         )
         self._contents = "[]\n"
         self._history: list[dict[str, Any]] = []
+        self._cached_contents: str | None = None
+        self._cached_generation = ""
+        self._cached_rules: list[dict[str, Any]] | None = None
 
     async def async_load_or_import(self, rule_dir: str) -> list[Rule]:
         """Load stored rules, importing YAML files once if storage is empty."""
@@ -91,7 +94,11 @@ class StorageRuleStore:
     @property
     def generation(self) -> str:
         """Return generation hash for optimistic updates."""
-        return sha256(self._contents.encode("utf-8")).hexdigest()
+        if self._cached_contents != self._contents:
+            self._cached_generation = _generation_for(self._contents)
+            self._cached_contents = self._contents
+            self._cached_rules = None
+        return self._cached_generation
 
     def list_files(self) -> list[dict[str, Any]]:
         """Return a synthetic YAML file descriptor for compatibility."""
@@ -219,11 +226,14 @@ class StorageRuleStore:
 
     def list_rules(self) -> list[dict[str, Any]]:
         """Return authored rule IDs with enabled metadata."""
+        generation = self.generation
+        if self._cached_rules is not None:
+            return [rule.copy() for rule in self._cached_rules]
         try:
             load_rules_from_string(self._contents)
             raw_rules = _raw_rule_items_from_yaml(self._contents)
         except (RuleLoadError, yaml.YAMLError):
-            return []
+            raw_rules = []
         rules: list[dict[str, Any]] = []
         for rule in raw_rules:
             rule_id = rule.get("id")
@@ -234,11 +244,12 @@ class StorageRuleStore:
                     "id": rule_id,
                     "filename": RULE_STORE_FILENAME,
                     "enabled": rule.get("enabled", True) is not False,
-                    "generation": self.generation,
+                    "generation": generation,
                     "source": "storage",
                 }
             )
-        return rules
+        self._cached_rules = rules
+        return [rule.copy() for rule in rules]
 
     async def async_set_rule_enabled(self, rule_id: str, enabled: bool) -> dict[str, Any]:
         """Persist one rule's enabled flag."""

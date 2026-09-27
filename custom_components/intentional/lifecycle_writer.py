@@ -10,6 +10,8 @@ from homeassistant.helpers.storage import Store
 
 from ._engine.runtime import monotonic_ms
 
+SAVE_TIMEOUT_SECONDS = 10
+
 
 def lifecycle_writer_key(entry_id: str) -> str:
     """Return the hass.data key for an entry's lifecycle writer."""
@@ -53,9 +55,12 @@ class LifecycleWriter:
         self.next_retry_ms: int | None = None
         self.next_save_ms: int | None = None
         self._save_task: asyncio.Task[None] | None = None
+        self._closed = False
 
     def mutated(self) -> bool:
         """Capture current state and schedule a save when it changed."""
+        if self._closed:
+            return False
         snapshot = self._snapshot()
         if snapshot == self.desired_snapshot:
             return False
@@ -82,7 +87,8 @@ class LifecycleWriter:
         if snapshot is None or generation == self.durable_generation:
             return
         try:
-            await self._store.async_save(snapshot)
+            async with asyncio.timeout(SAVE_TIMEOUT_SECONDS):
+                await self._store.async_save(snapshot)
         except Exception as err:  # noqa: BLE001 - health retains storage failures
             now_ms = self._clock_fn()
             self.consecutive_failures += 1
@@ -91,8 +97,8 @@ class LifecycleWriter:
                 self._retry_base_ms * (2 ** min(self.consecutive_failures - 1, 20)),
             )
             self.last_failure_ms = now_ms
-            self.last_failure_error = str(err)
-            self.current_error = str(err)
+            self.last_failure_error = str(err) or type(err).__name__
+            self.current_error = self.last_failure_error
             self.failure_count += 1
             self.next_retry_ms = now_ms + delay_ms
             return
@@ -121,6 +127,18 @@ class LifecycleWriter:
             and record.get("acknowledged_at_ms") is None
             for record in records.get("effect_outbox", [])
         )
+
+    async def async_close(self) -> None:
+        """Stop scheduling saves and finish or cancel the owned persistence task."""
+        self._closed = True
+        task = self._save_task
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                if asyncio.current_task().cancelling():
+                    raise
 
     def health(self) -> dict[str, Any]:
         """Return persistence health independently from reconciliation health."""

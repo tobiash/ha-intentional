@@ -2180,6 +2180,7 @@ class TestAnimationTick:
         assert resolved is not None
         assert resolved.animation is not None
         assert resolved.value == {"brightness_pct": 0, "color_temp_k": 2700}
+        assert set(resolved.field_providers) == {"brightness_pct", "color_temp_k"}
 
         engine.advance_clock(500)
         resolved = engine.resolve("light.x")

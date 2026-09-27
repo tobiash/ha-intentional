@@ -964,6 +964,63 @@ async def test_irrelevant_stable_state_change_bypasses_runtime_mutation(
     assert not any(key.startswith("sensor.unrelated.") for key in engine.state)
 
 
+async def test_membership_removal_reevaluates_and_advances_revision(
+    hass: HomeAssistant,
+) -> None:
+    """Removing the final owner must fence out reconciliation based on stale state."""
+    from types import SimpleNamespace
+
+    from homeassistant.core import State
+
+    from custom_components.intentional import _on_ha_state_change_factory
+    from custom_components.intentional._engine import Engine
+    from custom_components.intentional._engine.reconciliation import Reconciliation
+    from custom_components.intentional._engine.runtime import TickRuntime
+    from custom_components.intentional._engine.yaml_loader import Rule
+
+    class RemovingPlanner:
+        relevant = {"sensor.dynamic"}
+
+        def state_changed(self, entity_id, *, exists, device_class_changed):
+            self.relevant = set()
+            return SimpleNamespace(added=frozenset(), removed=frozenset({entity_id}))
+
+    engine = Engine()
+    engine.load_rules([
+        Rule(
+            id="dynamic",
+            when="sensor.dynamic == 'on'",
+            target="light.test",
+            set={"state": "on"},
+        )
+    ])
+    engine.update_state("sensor.dynamic", "on")
+    engine.evaluate_all()
+    assert engine.has_active_target("light.test")
+    runtime = TickRuntime(tick_interval_ms=100)
+    revision = runtime.advance_revision()
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=1_500,
+        service_failure_backoff_ms=30_000,
+    )
+    listener = _on_ha_state_change_factory(
+        hass,
+        engine,
+        reconciler,
+        runtime=runtime,
+        selector_planner=RemovingPlanner(),
+    )
+
+    await listener(SimpleNamespace(data={
+        "old_state": State("sensor.dynamic", "on"),
+        "new_state": None,
+    }))
+
+    assert not engine.has_active_target("light.test")
+    assert not runtime.is_revision(revision)
+
+
 async def test_registry_event_burst_is_coalesced(
     hass: HomeAssistant,
     config_entry: MockConfigEntry,
@@ -1213,6 +1270,170 @@ async def test_integration_unload(hass: HomeAssistant, config_entry: MockConfigE
     assert config_entry.entry_id not in hass.data.get(DOMAIN, {})
     assert runtime.tick_task is not None
     assert runtime.tick_task.done()
+    for service in ("fire", "clear", "activate_scene", "reload"):
+        assert not hass.services.has_service(DOMAIN, service)
+
+
+@pytest.mark.parametrize("failure_stage", ["services", "platforms"])
+async def test_failed_setup_leaves_no_workers_or_services_and_can_retry(
+    hass: HomeAssistant, config_entry: MockConfigEntry, monkeypatch, failure_stage,
+) -> None:
+    import custom_components.intentional as intentional
+    from custom_components.intentional._engine.runtime import runtime_key
+    from custom_components.intentional.alerting import AlertDeadlineDriver
+
+    owner = intentional if failure_stage == "services" else hass.config_entries
+    method = "_register_services" if failure_stage == "services" else "async_forward_entry_setups"
+    original = getattr(owner, method)
+    starts = Mock()
+    original_start = AlertDeadlineDriver.start
+    monkeypatch.setattr(AlertDeadlineDriver, "start", starts)
+
+    async def fail_after_register(*args, **kwargs):
+        await original(*args, **kwargs)
+        raise RuntimeError("synthetic late setup failure")
+
+    monkeypatch.setattr(owner, method, fail_after_register)
+    config_entry.add_to_hass(hass)
+    assert not await hass.config_entries.async_setup(config_entry.entry_id)
+    assert config_entry.entry_id not in hass.data[DOMAIN]
+    assert runtime_key(config_entry.entry_id) not in hass.data[DOMAIN]
+    assert not hass.services.has_service(DOMAIN, "fire")
+    starts.assert_not_called()
+    monkeypatch.setattr(AlertDeadlineDriver, "start", original_start)
+    monkeypatch.setattr(owner, method, original)
+    assert await hass.config_entries.async_reload(config_entry.entry_id)
+    runtime = hass.data[DOMAIN][runtime_key(config_entry.entry_id)]
+    assert runtime.tick_task is not None and not runtime.tick_task.done()
+    assert await hass.config_entries.async_unload(config_entry.entry_id)
+
+
+async def test_unload_cancels_stalled_effect_without_acknowledging(
+    hass: HomeAssistant, config_entry: MockConfigEntry, monkeypatch,
+) -> None:
+    import custom_components.intentional as intentional
+    from custom_components.intentional._engine.runtime import runtime_key
+    from custom_components.intentional._engine.yaml_loader import load_rules_from_string
+
+    monkeypatch.setattr(intentional, "SHUTDOWN_TIMEOUT_SECONDS", 0.01)
+    started = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def stalled(_call):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            finished.set()
+
+    hass.services.async_register("notify", "stalled", stalled)
+    config_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    engine = hass.data[DOMAIN][config_entry.entry_id]
+    engine.load_rules(load_rules_from_string(
+        "- id: effect\n  observe: {binary_sensor.door: on}\n  effect: {service: notify.stalled, data: {message: test}}\n"
+    ))
+    engine.update_state("binary_sensor.door", "on")
+    await asyncio.wait_for(started.wait(), timeout=2)
+    runtime = hass.data[DOMAIN][runtime_key(config_entry.entry_id)]
+    assert await asyncio.wait_for(hass.config_entries.async_unload(config_entry.entry_id), timeout=2)
+    assert runtime.tick_task.done()
+    assert finished.is_set()
+    assert engine.list_effect_outbox()
+    assert all(item.acknowledged_at_ms is None for item in engine.list_effect_outbox())
+
+
+async def test_unload_with_stalled_lifecycle_storage(
+    hass: HomeAssistant, config_entry: MockConfigEntry, monkeypatch,
+) -> None:
+    import custom_components.intentional as intentional
+    from custom_components.intentional import lifecycle_writer
+
+    monkeypatch.setattr(intentional, "SHUTDOWN_TIMEOUT_SECONDS", 0.02)
+    monkeypatch.setattr(lifecycle_writer, "SAVE_TIMEOUT_SECONDS", 0.01)
+    config_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    writer = hass.data[DOMAIN][lifecycle_writer.lifecycle_writer_key(config_entry.entry_id)]
+
+    async def stalled_save(_snapshot):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(writer._store, "async_save", stalled_save)
+    await hass.services.async_call(DOMAIN, "fire", {"target": "light.test", "state": "on"}, blocking=True)
+    assert await asyncio.wait_for(hass.config_entries.async_unload(config_entry.entry_id), timeout=2)
+    assert writer._save_task.done()
+    assert writer.health()["dirty"]
+
+
+async def test_adapter_waits_for_handler_failure_and_reconciliation_backs_off(hass):
+    from homeassistant.exceptions import HomeAssistantError
+
+    from custom_components.intentional import _HAAdapter
+    from custom_components.intentional._engine import Engine
+    from custom_components.intentional._engine.reconciliation import Reconciliation
+    from custom_components.intentional._engine.yaml_loader import Rule
+    from custom_components.intentional.runtime_context import IntentionalContextTracker
+
+    calls = 0
+
+    async def fail(_call):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0)
+        raise HomeAssistantError("device refused")
+
+    hass.services.async_register("light", "turn_on", fail)
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules([Rule(id="on", when="true", target="light.test", set={"state": "on"})])
+    engine.evaluate_all()
+    adapter = _HAAdapter(hass, IntentionalContextTracker())
+    reconciler = Reconciliation(drift_override_ttl_ms=1000, drift_confirmation_ms=0, service_failure_backoff_ms=1000)
+    events = await reconciler.apply(engine, adapter, now_ms=0)
+    assert any(event.kind == "service_failed" for event in events)
+    await reconciler.apply(engine, adapter, now_ms=1)
+    assert calls == 1
+
+
+async def test_tick_survives_alert_observation_failure(hass, config_entry, monkeypatch):
+    from custom_components.intentional._engine.runtime import runtime_key
+    from custom_components.intentional.alerting import alerting_coordinator_key
+
+    config_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    coordinator = hass.data[DOMAIN][alerting_coordinator_key(config_entry.entry_id)]
+    runtime = hass.data[DOMAIN][runtime_key(config_entry.entry_id)]
+    monkeypatch.setattr(coordinator, "async_observe", AsyncMock(side_effect=RuntimeError("observation failed")))
+    for _ in range(20):
+        await asyncio.sleep(0.05)
+        if runtime.failure_count and runtime.success_count:
+            break
+    assert runtime.failure_count == 1
+    assert runtime.success_count > 0
+    assert not runtime.tick_task.done()
+    assert await hass.config_entries.async_unload(config_entry.entry_id)
+
+
+async def test_services_reject_mutation_during_unload(hass, config_entry):
+    from homeassistant.exceptions import HomeAssistantError
+
+    from custom_components.intentional._engine.runtime import runtime_key
+
+    config_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    runtime = hass.data[DOMAIN][runtime_key(config_entry.entry_id)]
+    engine = hass.data[DOMAIN][config_entry.entry_id]
+    runtime.unloading = True
+    for service, data in (
+        ("fire", {"target": "light.test", "state": "on"}),
+        ("clear", {}),
+        ("activate_scene", {"rule_id": "test"}),
+        ("reload", {}),
+    ):
+        with pytest.raises(HomeAssistantError, match="unloading"):
+            await hass.services.async_call(DOMAIN, service, data, blocking=True)
+    assert not engine.list_active_intents("light.test")
+    runtime.unloading = False
+    assert await hass.config_entries.async_unload(config_entry.entry_id)
 
 
 async def test_unload_continues_when_final_lifecycle_save_fails(

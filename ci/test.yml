@@ -43,7 +43,7 @@
 #
 # Pinning the HA version
 # ──────────────────────
-# CI covers current and previous HA releases through harness versions
+# CI covers current HA and the existing compatibility baseline through harness versions
 # that strictly pin those Home Assistant versions. Bump this matrix
 # together during each HA compatibility review. The
 # ``test_e2e_config_flow.py`` tests catch the kinds of
@@ -68,10 +68,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - ha-version: "2026.9.4"
+            harness-version: "0.13.367"
           - ha-version: "2026.6.0"
             harness-version: "0.13.336"
-          - ha-version: "2026.5.1"
-            harness-version: "0.13.330"
 
     steps:
       - name: Checkout

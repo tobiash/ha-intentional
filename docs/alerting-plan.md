@@ -441,13 +441,15 @@ Receiver templates render bounded Alert annotations into safe single/group conte
 
 ## Mobile actions
 
-Single-instance mobile Notifications contain:
+Implementation limitation: the actions below are a design goal, not currently delivered functionality. Generic `notify_entity` destinations use Home Assistant's `notify.send_message`, which accepts only message/title content and no arbitrary `data.actions`. Existing `legacy_action` delivery also remains message/title-only. Delivering mobile actions requires a separately supported transport adapter; use the Alert workspace for these operations today.
+
+With a supported mobile-action transport, single-instance mobile Notifications should contain:
 
 - Acknowledge.
 - Silence 1h.
 - Open Alert.
 
-Grouped Notifications contain only Open Alerts. Bulk acknowledgment or Silence requires explicit panel selection.
+Grouped mobile Notifications should contain only Open Alerts. Bulk acknowledgment or Silence requires explicit panel selection.
 
 Each mutating action carries an HMAC-derived single-use token. Persist only a cryptographically random capability record ID plus its config-entry, instance UUID, operation, Receiver destination, expiry, and consumed state. The integration-wide HMAC secret is stored separately from alerting state. Derive the raw token from the record ID and binding, compare in constant time, and never persist, log, diagnose, export, or expose the raw token. Tokens remain valid for at most 24 hours and only while the instance is firing. Repeats issue fresh capability records.
 

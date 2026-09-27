@@ -56,7 +56,6 @@ MANUAL_SET_FIELDS = (
     "humidity",
     "swing_mode",
     "swing_horizontal_mode",
-    "aux_heat",
     "mode",
     "operation_mode",
     "away_mode",
@@ -293,7 +292,7 @@ TTS_SERVICE_TARGETS = frozenset({"speak", "cloud_say", "clear_cache"})
 LIGHT_BRIGHTNESS_FIELDS = ("brightness", "brightness_pct")
 LIGHT_FIELD_ALIASES = {
     "color_temp_k": "color_temp_kelvin",
-    "color_temp_mired": "color_temp",
+    "color_temp_mired": "color_temp_kelvin",
 }
 
 
@@ -323,7 +322,12 @@ def _add_light_turn_fields(service_data: dict[str, Any], value: dict[str, Any]) 
 
     for key in LIGHT_COLOR_FIELDS:
         if key in value and value[key] is not None:
-            service_data[LIGHT_FIELD_ALIASES.get(key, key)] = value[key]
+            color_value = value[key]
+            if key == "color_temp_mired":
+                if isinstance(color_value, bool) or not 0 < float(color_value) < float("inf"):
+                    raise ValueError("color_temp_mired must be a finite positive number")
+                color_value = int(1_000_000 / float(color_value))
+            service_data[LIGHT_FIELD_ALIASES.get(key, key)] = color_value
             break
 
 
@@ -640,11 +644,9 @@ def _service_calls_without_update_entity(
                 },
             ))
         if "aux_heat" in value:
-            calls.append((
-                domain,
-                "set_aux_heat",
-                {"entity_id": target, "aux_heat": value["aux_heat"]},
-            ))
+            raise ValueError(
+                "Home Assistant removed climate aux_heat; use a device-supported preset_mode instead"
+            )
         if state == "off":
             calls.append((domain, "turn_off", dict(service_data)))
         return tuple(calls)

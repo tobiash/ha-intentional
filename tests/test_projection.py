@@ -152,16 +152,7 @@ async def test_simulation_models_rejection_retry_drift_override_expiry_and_resta
         [
             {"actual": {"light.room": {"state": "off"}}, "reject_calls": True},
             {"advance_ms": 500},
-            {
-                "advance_ms": 500,
-                "actual": {
-                    "light.room": {
-                        "state": "on",
-                        "attributes": {"brightness": 50},
-                        "user_id": "user",
-                    }
-                },
-            },
+            {"advance_ms": 500},
             {
                 "advance_ms": 100,
                 "actual": {
@@ -196,10 +187,67 @@ async def test_simulation_models_rejection_retry_drift_override_expiry_and_resta
     assert steps[0]["calls"][0]["rejected"] is True
     assert steps[1]["targets"][0]["reconciliation"]["retry"]["remaining_ms"] == 500
     assert any(event["kind"] == "service_retry_recovered" for event in steps[2]["events"])
-    assert any(event["kind"] == "drift_promoted" for event in steps[4]["events"])
+    assert any(event["kind"] == "drift_promoted" for event in steps[3]["events"])
     assert steps[4]["targets"][0]["manual_override"] is not None
     assert steps[5]["checkpoint"] == "restart"
     assert steps[6]["targets"][0]["manual_override"] is None
+
+
+@pytest.mark.asyncio
+async def test_simulation_user_change_at_retry_deadline_promotes_without_retry() -> None:
+    user_actual = {
+        "light.room": {
+            "state": "on",
+            "attributes": {"brightness": 50},
+            "user_id": "user",
+        }
+    }
+    steps = await simulate_timeline(
+        _engine(),
+        [
+            {"actual": {"light.room": {"state": "off"}}, "reject_calls": True},
+            {"advance_ms": 500},
+            {"advance_ms": 500, "actual": user_actual},
+            {"advance_ms": 100, "actual": user_actual},
+            {"restart": True},
+            {"advance_ms": 4_899},
+            {"advance_ms": 1},
+        ],
+        reconciliation_options={
+            "drift_confirmation_ms": 100,
+            "drift_override_ttl_ms": 5_000,
+            "service_failure_backoff_ms": 1_000,
+            "drift_transition_grace_ms": 0,
+        },
+    )
+
+    assert steps[0]["calls"][0]["rejected"] is True
+    assert steps[1]["calls"] == []
+    assert steps[1]["targets"][0]["reconciliation"]["retry"]["remaining_ms"] == 500
+    assert any(event["kind"] == "drift_promoted" for event in steps[2]["events"])
+    assert steps[2]["targets"][0]["reconciliation"]["retry"] is None
+    assert all(step["calls"] == [] for step in steps[2:6])
+    assert not any(
+        event["kind"] == "service_retry_recovered"
+        for step in steps
+        for event in step["events"]
+    )
+    assert sum(
+        event["kind"] == "drift_promoted"
+        for step in steps
+        for event in step["events"]
+    ) == 1
+    for step in steps[2:6]:
+        override = step["targets"][0]["manual_override"]
+        assert override is not None
+        assert override["expires_at_ms"] == 6_000
+        assert override["remaining_ms"] == 6_000 - step["now_ms"]
+    assert steps[4]["checkpoint"] == "restart"
+    assert steps[5]["targets"][0]["manual_override"]["remaining_ms"] == 1
+    assert steps[6]["targets"][0]["manual_override"] is None
+    assert len(steps[6]["calls"]) == 1
+    assert steps[6]["calls"][0]["rejected"] is False
+    assert steps[6]["calls"][0]["data"]["brightness_pct"] == 40
 
 
 @pytest.mark.asyncio

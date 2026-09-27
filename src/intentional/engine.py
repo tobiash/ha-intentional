@@ -1301,6 +1301,7 @@ class Engine:
             ttl_remaining_ms=resolved.ttl_remaining_ms,
             all_active_intents=resolved.all_active_intents,
             diagnostics=resolved.diagnostics,
+            field_providers=resolved.field_providers,
         )
 
     # ── Animation ticking ─────────────────────────────────────────

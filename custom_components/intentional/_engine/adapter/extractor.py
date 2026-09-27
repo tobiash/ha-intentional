@@ -57,6 +57,8 @@ def manual_set_from_state_object(state: Any) -> dict[str, Any]:
 
     if domain in _STATE_DOMAINS:
         result["state"] = state_value
+    if domain == "automation" and state_value in {"on", "off"}:
+        result["state"] = state_value
     if domain == "alarm_control_panel":
         result["state"] = state_value
     if domain == "cover":
@@ -83,7 +85,6 @@ def manual_set_from_state_object(state: Any) -> dict[str, Any]:
             "humidity",
             "swing_mode",
             "swing_horizontal_mode",
-            "aux_heat",
         ):
             if field in attributes:
                 if field == "target_humidity":

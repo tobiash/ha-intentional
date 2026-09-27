@@ -1126,6 +1126,16 @@ def _intent_fields_to_emit(
             continue
         emit["set"][intent_field] = value
 
+    domain, _sep, _object_id = target.partition(".")
+    if domain == "script":
+        raise RuleLoadError("VNext `script` targets are effects only", file=file, line=line)
+    if domain == "automation" and emit["set"].get("state") not in {"on", "off"}:
+        raise RuleLoadError(
+            "VNext `automation` intents require state: on or state: off",
+            file=file,
+            line=line,
+        )
+
     return {key: value for key, value in emit.items() if key == "target" or value}
 
 

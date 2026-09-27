@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import yaml
@@ -75,6 +76,109 @@ def test_read_rule_dir_as_yaml_imports_yaml_files(tmp_path: Path) -> None:
 
 def test_read_rule_dir_as_yaml_missing_dir_is_empty(tmp_path: Path) -> None:
     assert _read_rule_dir_as_yaml(str(tmp_path / "missing")) == ""
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "[]\n",
+        "[invalid yaml",
+        "- id: first\n  when: 'true'\n"
+        "  emit: {target: light.first, set: {state: on}}\n"
+        "- id: second\n  enabled: false\n  when: 'true'\n"
+        "  emit: {target: light.second, set: {state: on}}\n",
+    ],
+)
+def test_list_rules_caches_parsing_and_generation(monkeypatch, fake_hass, contents) -> None:
+    from custom_components.intentional import rule_store as rule_store_module
+
+    monkeypatch.setattr(rule_store_module, "Store", _FakeStore)
+    store = StorageRuleStore(fake_hass, "entry-1")
+    store._contents = contents
+    expected_generation = rule_store_module._generation_for(contents)
+    parse = Mock(wraps=rule_store_module.load_rules_from_string)
+    raw_parse = Mock(wraps=rule_store_module._raw_rule_items_from_yaml)
+    digest = Mock(wraps=rule_store_module.sha256)
+    monkeypatch.setattr(rule_store_module, "load_rules_from_string", parse)
+    monkeypatch.setattr(rule_store_module, "_raw_rule_items_from_yaml", raw_parse)
+    monkeypatch.setattr(rule_store_module, "sha256", digest)
+
+    expected = store.list_rules()
+    raw_parse_count = raw_parse.call_count
+    for _ in range(3):
+        assert store.list_rules() == expected
+        assert store.generation == expected_generation
+    assert parse.call_count == 1
+    assert raw_parse.call_count == raw_parse_count
+    assert digest.call_count == 1
+
+
+async def test_list_rules_cache_invalidation_and_mutation_isolation(
+    monkeypatch, fake_hass, tmp_path
+) -> None:
+    from custom_components.intentional import rule_store as rule_store_module
+
+    monkeypatch.setattr(rule_store_module, "Store", _FakeStore)
+    store = StorageRuleStore(fake_hass, "entry-1")
+    contents = (
+        "- id: first\n  when: 'true'\n"
+        "  emit: {target: light.first, set: {state: on}}\n"
+    )
+
+    def assert_rules(rule_id, enabled=True):
+        generation = rule_store_module._generation_for(store.contents)
+        expected = [] if rule_id is None else [{
+            "id": rule_id,
+            "filename": RULE_STORE_FILENAME,
+            "enabled": enabled,
+            "generation": generation,
+            "source": "storage",
+        }]
+        assert store.generation == generation
+        result = store.list_rules()
+        assert result == expected
+        if result:
+            result[0]["id"] = "mutated"
+            result[0]["enabled"] = not enabled
+        result.append({"id": "injected"})
+        assert store.list_rules() == expected
+        result = store.list_rules()
+        result.clear()
+        assert store.list_rules() == expected
+
+    assert_rules(None)
+    (tmp_path / "rules.yaml").write_text(contents, encoding="utf-8")
+    await store.async_load_or_import(str(tmp_path))
+    assert_rules("first")
+    snapshot = store.snapshot()
+    original_generation = store.generation
+
+    assert await store.async_write(RULE_STORE_FILENAME, contents.replace("first", "second")) is None
+    assert_rules("second")
+    result = await store.async_rollback(original_generation, expected_generation=store.generation)
+    assert "error" not in result
+    assert_rules("first")
+    result = await store.async_set_rule_enabled("first", False)
+    assert "error" not in result
+    assert_rules("first", False)
+    result = await store.async_patch_rule_by_id(
+        "first", contents, expected_generation=store.generation
+    )
+    assert "error" not in result
+    assert_rules("first")
+    assert await store.async_delete(RULE_STORE_FILENAME) is None
+    assert_rules(None)
+    await store.async_restore(snapshot)
+    assert_rules("first")
+
+    # Even a comment-only change must refresh the generation in cached metadata.
+    previous_generation = store.generation
+    assert await store.async_write(RULE_STORE_FILENAME, store.contents + "# comment\n") is None
+    assert store.generation != previous_generation
+    assert_rules("first")
+    store._store.saved = {"contents": contents.replace("first", "loaded")}
+    await store.async_load_or_import(str(tmp_path))
+    assert_rules("loaded")
 
 
 async def test_storage_rule_store_records_history_on_write(monkeypatch, fake_hass) -> None:

@@ -48,13 +48,15 @@ receivers:
 
 Allowed Receiver destinations are `notify_entity`, allowlisted `legacy_action`, and `persistent_notification`. Unknown fields are rejected. Home Assistant service availability is checked at dispatch, and uncertain failures retry the same durable obligation with bounded exponential backoff before dead-lettering.
 
+`notify_entity` calls `notify.send_message` with only `message` and `title`, targeting the configured entity. The generic Home Assistant notify entity API does not accept arbitrary `data` or mobile actionable buttons. Receiver tests use the same payload contract. `legacy_action` also retains its existing message/title-only delivery; it does not currently attach mobile actions. Use the Alert workspace to acknowledge or Silence an Alert and inspect its details.
+
 Policy preview includes current firing Alerts plus optional synthetic labels. Destination-affecting Receiver edits create cleanup only for replaceable persistent Notifications; removed ordinary destinations do not receive a misleading resolved message.
 
 ## Suppression
 
 Acknowledgments record that an actor has seen one Alert instance. Instance and matcher Silences temporarily suppress Notifications. Mute intervals are recurring policy windows. Inhibition suppresses causally weaker Alerts while a matching, non-stale source Alert is firing.
 
-Suppression never resolves an Alert. Release is re-evaluated after a five-second debounce. Acknowledgments do not suppress a newly stale episode or configured severity escalation. Mobile actions are actor-bound, single-use HMAC capabilities; raw capability tokens are never persisted.
+Suppression never resolves an Alert. Release is re-evaluated after a five-second debounce. Acknowledgments do not suppress a newly stale episode or configured severity escalation. Mobile-action capability validation exists (actor-bound, single-use HMAC capabilities with no persisted raw tokens), but Receiver adapters do not currently deliver mobile action buttons.
 
 ## Operations
 

@@ -11,6 +11,27 @@ require_test_dependency("homeassistant", reason="homeassistant not installed")
 from custom_components.intentional.lifecycle_writer import LifecycleWriter  # noqa: E402
 
 
+async def test_stalled_save_times_out_without_claiming_durability(monkeypatch) -> None:
+    from custom_components.intentional import lifecycle_writer
+
+    monkeypatch.setattr(lifecycle_writer, "SAVE_TIMEOUT_SECONDS", 0.01)
+    store = FakeStore()
+
+    async def stalled_save(_snapshot):
+        await asyncio.Event().wait()
+
+    store.async_save = stalled_save
+    writer = LifecycleWriter(store, lambda: {"enabled": False}, durable_snapshot={"enabled": True})
+    writer.mutated()
+    await asyncio.wait_for(writer.async_flush(), timeout=1)
+    assert writer.durable_snapshot == {"enabled": True}
+    assert writer.health()["dirty"]
+    assert writer.health()["current_error"] == "TimeoutError"
+    await writer.async_close()
+    assert not writer.mutated()
+    assert writer._save_task.done()
+
+
 class FakeStore:
     def __init__(self) -> None:
         self.saved: list[dict] = []

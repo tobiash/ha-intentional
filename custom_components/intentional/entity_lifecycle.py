@@ -11,6 +11,8 @@ from homeassistant.helpers.entity import Entity
 class RegistrationAwareEntity(Entity):
     """Defer state operations until Home Assistant has registered the entity."""
 
+    _attr_should_poll = False
+
     def __init__(self) -> None:
         super().__init__()
         self._lifecycle_desired = True

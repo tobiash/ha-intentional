@@ -349,7 +349,7 @@ async def test_on_state_delta_returns_context_ignored_for_intentional_context() 
     """An Intentional-owned state change produces context_ignored, not drift."""
     engine = _make_engine_with_light_rule()
     adapter = _FakeAdapter()
-    adapter.set_state("light.desk", "on")
+    adapter.set_state("light.desk", "on", {"brightness": 153})
     reconciler = Reconciliation(
         drift_override_ttl_ms=300_000,
         drift_confirmation_ms=0,
@@ -376,7 +376,7 @@ async def test_on_state_delta_promotes_drift_immediately_without_confirmation() 
     """With confirmation_ms=0, drift is promoted on the first observation."""
     engine = _make_engine_with_light_rule()
     adapter = _FakeAdapter()
-    adapter.set_state("light.desk", "on")
+    adapter.set_state("light.desk", "on", {"brightness": 153})
     reconciler = Reconciliation(
         drift_override_ttl_ms=300_000,
         drift_confirmation_ms=0,
@@ -402,7 +402,7 @@ async def test_on_state_delta_promotes_drift_immediately_without_confirmation() 
 async def test_availability_recovery_does_not_become_manual_override() -> None:
     engine = _make_engine_with_light_rule()
     adapter = _FakeAdapter()
-    adapter.set_state("light.desk", "on")
+    adapter.set_state("light.desk", "on", {"brightness": 153})
     reconciler = Reconciliation(
         drift_override_ttl_ms=300_000,
         drift_confirmation_ms=0,
@@ -429,11 +429,41 @@ async def test_availability_recovery_does_not_become_manual_override() -> None:
 
 
 @pytest.mark.asyncio
+async def test_user_change_during_availability_recovery_becomes_override() -> None:
+    engine = _make_engine_with_light_rule()
+    adapter = _FakeAdapter()
+    adapter.set_state("light.desk", "on", {"brightness": 153})
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=0,
+        service_failure_backoff_ms=30_000,
+    )
+    await reconciler.apply(engine, adapter, now_ms=1_000)
+
+    adapter.set_state("light.desk", "unavailable")
+    reconciler.on_state_delta(
+        engine, adapter.get_state("light.desk"), _NoContextTracker(), now_ms=2_000
+    )
+    adapter.set_state(
+        "light.desk",
+        "off",
+        context=SimpleNamespace(id="user-ctx", parent_id=None, user_id="user-1"),
+    )
+    events = reconciler.on_state_delta(
+        engine, adapter.get_state("light.desk"), _NoContextTracker(), now_ms=3_000
+    )
+
+    promoted = _events_of(events, "drift_promoted")
+    assert len(promoted) == 1
+    assert promoted[0].details["set"] == {"state": "off"}
+
+
+@pytest.mark.asyncio
 async def test_on_state_delta_stages_then_promotes_across_confirmation_window() -> None:
     """With confirmation_ms > 0, drift is staged first, promoted after the window."""
     engine = _make_engine_with_light_rule()
     adapter = _FakeAdapter()
-    adapter.set_state("light.desk", "on")
+    adapter.set_state("light.desk", "on", {"brightness": 153})
     reconciler = Reconciliation(
         drift_override_ttl_ms=300_000,
         drift_confirmation_ms=1_500,
@@ -442,7 +472,7 @@ async def test_on_state_delta_stages_then_promotes_across_confirmation_window() 
     await reconciler.apply(engine, adapter, now_ms=1_000)
 
     adapter.set_state(
-        "light.desk", "off", context=SimpleNamespace(id=None, parent_id=None, user_id="user-1")
+        "light.desk", "off", context=SimpleNamespace(id=None, parent_id=None, user_id=None)
     )
     state = adapter.get_state("light.desk")
 
@@ -494,17 +524,37 @@ async def test_explicit_user_drift_bypasses_transition_suppression() -> None:
     events = reconciler.on_state_delta(
         engine, adapter.get_state("light.desk"), _NoContextTracker(), now_ms=2_000
     )
-    assert _events_of(events, "drift_promoted") == []
+    promoted = _events_of(events, "drift_promoted")
+    assert len(promoted) == 1
+    assert promoted[0].details["set"] == {"state": "off"}
+    assert len(adapter.calls) == 1
 
-    events = await reconciler.tick(
-        engine, adapter, _NoContextTracker(), now_ms=4_000
+
+@pytest.mark.asyncio
+async def test_explicit_user_change_before_first_dispatch_becomes_override() -> None:
+    engine = _make_engine_with_light_rule()
+    adapter = _FakeAdapter()
+    adapter.set_state(
+        "light.desk",
+        "off",
+        context=SimpleNamespace(id="user-ctx", parent_id=None, user_id="user-1"),
+    )
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=1_500,
+        service_failure_backoff_ms=30_000,
+    )
+
+    events = reconciler.on_state_delta(
+        engine, adapter.get_state("light.desk"), _NoContextTracker(), now_ms=1_000
     )
 
     promoted = _events_of(events, "drift_promoted")
     assert len(promoted) == 1
-    assert promoted[0].details["set"] == {"state": "off"}
-    assert len(_events_of(events, "service_skipped_drift_promoted")) == 1
-    assert len(adapter.calls) == 1
+    assert reconciler.commit_promotion(promoted[0], now_ms=1_000)
+    engine.emit_user_intent(**promoted[0].details)
+    await reconciler.apply(engine, adapter, now_ms=1_001)
+    assert adapter.calls == []
 
 
 @pytest.mark.asyncio
@@ -553,6 +603,276 @@ async def test_detected_override_uses_longest_contributing_rule_ttl() -> None:
 
 
 @pytest.mark.asyncio
+async def test_repeated_drift_keeps_rule_specific_override_ttl() -> None:
+    engine = Engine(clock_fn=lambda: 1_000)
+    engine.load_rules(
+        [
+            Rule(
+                id="desk-on",
+                when="true",
+                target="light.desk",
+                set={"state": "on"},
+                manual_override_ttl_ms=1_800_000,
+            )
+        ]
+    )
+    engine.evaluate_all()
+    adapter = _FakeAdapter()
+    adapter.set_state("light.desk", "on")
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=0,
+        service_failure_backoff_ms=30_000,
+    )
+    await reconciler.apply(engine, adapter, now_ms=0)
+
+    adapter.set_state(
+        "light.desk",
+        "off",
+        context=SimpleNamespace(id="user-1", parent_id=None, user_id="user-1"),
+    )
+    first = reconciler.on_state_delta(
+        engine, adapter.get_state("light.desk"), _NoContextTracker(), now_ms=1_000
+    )[0]
+    assert reconciler.commit_promotion(first, now_ms=1_000)
+    engine.emit_user_intent(
+        target=first.details["target"],
+        set=first.details["set"],
+        ttl_ms=first.details["ttl_ms"],
+        reason=first.details["reason"],
+    )
+    await reconciler.apply(engine, adapter, now_ms=1_001)
+
+    adapter.set_state(
+        "light.desk",
+        "on",
+        context=SimpleNamespace(id="user-2", parent_id=None, user_id="user-1"),
+    )
+    second = reconciler.on_state_delta(
+        engine, adapter.get_state("light.desk"), _NoContextTracker(), now_ms=2_000
+    )
+
+    assert len(_events_of(second, "drift_promoted")) == 1
+    assert second[0].details["ttl_ms"] == 1_800_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("apply_between_changes", [False, True])
+@pytest.mark.parametrize(
+    ("brightness", "expected"),
+    [(80, {"state": "on", "brightness": 80}), (153, {"state": "on"})],
+)
+async def test_rapid_user_changes_replace_override_before_next_tick(
+    apply_between_changes: bool, brightness: int, expected: dict,
+) -> None:
+    engine = _make_engine_with_light_rule()
+    adapter = _FakeAdapter()
+    adapter.set_state("light.desk", "on", {"brightness": 153})
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=0,
+        service_failure_backoff_ms=30_000,
+    )
+    await reconciler.apply(engine, adapter, now_ms=0)
+
+    adapter.set_state(
+        "light.desk",
+        "off",
+        context=SimpleNamespace(id="user-1", parent_id=None, user_id="user-1"),
+    )
+    first = reconciler.on_state_delta(
+        engine, adapter.get_state("light.desk"), _NoContextTracker(), now_ms=1_000
+    )[0]
+    assert reconciler.commit_promotion(first, now_ms=1_000)
+    engine.emit_user_intent(
+        target=first.details["target"],
+        set=first.details["set"],
+        ttl_ms=first.details["ttl_ms"],
+        reason=first.details["reason"],
+    )
+
+    if apply_between_changes:
+        await reconciler.apply(engine, adapter, now_ms=1_000)
+
+    adapter.set_state(
+        "light.desk",
+        "on",
+        {"brightness": brightness, "color_temp_kelvin": 2700},
+        context=SimpleNamespace(id="user-2", parent_id=None, user_id="user-1"),
+    )
+    second = reconciler.on_state_delta(
+        engine, adapter.get_state("light.desk"), _NoContextTracker(), now_ms=1_001
+    )
+
+    assert len(_events_of(second, "drift_promoted")) == 1
+    assert second[0].details["set"] == expected
+
+
+@pytest.mark.asyncio
+async def test_unattributed_physical_light_off_becomes_override() -> None:
+    engine = _make_engine_with_light_rule()
+    adapter = _FakeAdapter()
+    adapter.set_state("light.desk", "on", {"brightness": 153})
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=1_500,
+        service_failure_backoff_ms=30_000,
+    )
+    await reconciler.apply(engine, adapter, now_ms=1_000)
+
+    adapter.set_state(
+        "light.desk",
+        "off",
+        context=SimpleNamespace(id="device-ctx", parent_id=None, user_id=None),
+    )
+    assert _events_of(
+        reconciler.on_state_delta(
+            engine, adapter.get_state("light.desk"), _NoContextTracker(), now_ms=10_000
+        ),
+        "drift_promoted",
+    ) == []
+
+    events = await reconciler.tick(
+        engine, adapter, _NoContextTracker(), now_ms=12_000
+    )
+
+    promoted = _events_of(events, "drift_promoted")
+    assert len(promoted) == 1
+    assert promoted[0].details["set"] == {"state": "off"}
+    assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_activation_retries_after_transition_grace() -> None:
+    engine = _make_engine_with_light_rule()
+    adapter = _FakeAdapter()
+    adapter.set_state("light.desk", "off")
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=1_500,
+        service_failure_backoff_ms=30_000,
+    )
+    await reconciler.apply(engine, adapter, now_ms=0)
+
+    adapter.set_state(
+        "light.desk",
+        "off",
+        context=SimpleNamespace(id="device-ctx", parent_id=None, user_id=None),
+    )
+    reconciler.on_state_delta(
+        engine, adapter.get_state("light.desk"), _NoContextTracker(), now_ms=1_000
+    )
+
+    events = await reconciler.tick(
+        engine, adapter, _NoContextTracker(), now_ms=4_000
+    )
+
+    assert _events_of(events, "drift_promoted") == []
+    assert len(adapter.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_pending_drift_survives_desired_plan_change() -> None:
+    engine = _make_engine_with_light_rule(brightness_pct=60)
+    adapter = _FakeAdapter()
+    adapter.set_state("light.desk", "on", {"brightness": 153})
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=1_500,
+        service_failure_backoff_ms=30_000,
+    )
+    await reconciler.apply(engine, adapter, now_ms=0)
+
+    adapter.set_state(
+        "light.desk",
+        "off",
+        context=SimpleNamespace(id="device-ctx", parent_id=None, user_id=None),
+    )
+    reconciler.on_state_delta(
+        engine, adapter.get_state("light.desk"), _NoContextTracker(), now_ms=1_000
+    )
+    engine.load_rules(
+        [Rule(id="desk-on", when="true", target="light.desk", set={"state": "on", "brightness_pct": 70})]
+    )
+    engine.evaluate_all()
+
+    pending = await reconciler.tick(
+        engine, adapter, _NoContextTracker(), now_ms=1_500
+    )
+    assert _events_of(pending, "drift_promoted") == []
+    assert adapter.calls == []
+
+    confirmed = await reconciler.tick(
+        engine, adapter, _NoContextTracker(), now_ms=3_000
+    )
+    assert len(_events_of(confirmed, "drift_promoted")) == 1
+    assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_pending_drift_clears_when_actual_matches_new_desired() -> None:
+    engine = _make_engine_with_light_rule(brightness_pct=60)
+    adapter = _FakeAdapter()
+    adapter.set_state("light.desk", "on", {"brightness": 153})
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=1_500,
+        service_failure_backoff_ms=30_000,
+    )
+    await reconciler.apply(engine, adapter, now_ms=0)
+    adapter.set_state("light.desk", "on", {"brightness": 51})
+    reconciler.on_state_delta(
+        engine, adapter.get_state("light.desk"), _NoContextTracker(), now_ms=1_000
+    )
+    engine.load_rules([
+        Rule(
+            id="desk-on",
+            when="true",
+            target="light.desk",
+            set={"state": "on", "brightness_pct": 20},
+        )
+    ])
+    engine.evaluate_all()
+
+    events = await reconciler.tick(
+        engine, adapter, _NoContextTracker(), now_ms=3_000
+    )
+
+    assert _events_of(events, "drift_promoted") == []
+    assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_safety_reducing_plan_supersedes_pending_drift() -> None:
+    engine = _make_engine_with_light_rule(brightness_pct=60)
+    adapter = _FakeAdapter()
+    adapter.set_state("light.desk", "on", {"brightness": 153})
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=1_500,
+        service_failure_backoff_ms=30_000,
+    )
+    await reconciler.apply(engine, adapter, now_ms=0)
+    adapter.set_state("light.desk", "on", {"brightness": 51})
+    reconciler.on_state_delta(
+        engine, adapter.get_state("light.desk"), _NoContextTracker(), now_ms=1_000
+    )
+    engine.load_rules([
+        Rule(id="desk-off", when="true", target="light.desk", set={"state": "off"})
+    ])
+    engine.evaluate_all()
+
+    events = await reconciler.tick(
+        engine, adapter, _NoContextTracker(), now_ms=1_100
+    )
+
+    assert _events_of(events, "drift_promoted") == []
+    assert adapter.calls == [
+        ("light", "turn_off", {"entity_id": "light.desk"})
+    ]
+
+
+@pytest.mark.asyncio
 async def test_on_state_delta_ignores_small_brightness_pct_quantization_echo() -> None:
     """A light echoing 80% as brightness 198 must not become a manual override."""
     engine = _make_engine_with_light_rule(brightness_pct=80)
@@ -587,6 +907,13 @@ async def test_on_state_delta_promotes_brightness_pct_drift_beyond_tolerance() -
         service_failure_backoff_ms=30_000,
     )
     await reconciler.apply(engine, adapter, now_ms=1_000)
+    adapter.set_state("light.desk", "on", attributes={"brightness": 204})
+    reconciler.on_state_delta(
+        engine,
+        adapter.get_state("light.desk"),
+        _NoContextTracker(),
+        now_ms=4_000,
+    )
 
     adapter.set_state("light.desk", "on", attributes={"brightness": 190})
     state = adapter.get_state("light.desk")
@@ -597,7 +924,50 @@ async def test_on_state_delta_promotes_brightness_pct_drift_beyond_tolerance() -
     events = await reconciler.tick(engine, adapter, _NoContextTracker(), now_ms=12_000)
     promoted = _events_of(events, "drift_promoted")
     assert len(promoted) == 1
-    assert promoted[0].details["set"] == {"state": "on", "brightness": 190}
+    assert promoted[0].details["set"] == {"brightness": 190}
+
+
+@pytest.mark.asyncio
+async def test_color_drift_promotes_only_active_color_mode() -> None:
+    engine = Engine(clock_fn=lambda: 1_000)
+    engine.load_rules([
+        Rule(
+            id="desk-color",
+            when="true",
+            target="light.desk",
+            set={"state": "on", "color_temp_k": 2700},
+        )
+    ])
+    engine.evaluate_all()
+    adapter = _FakeAdapter()
+    adapter.set_state(
+        "light.desk",
+        "on",
+        {"color_mode": "color_temp", "color_temp_kelvin": 2700},
+    )
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=0,
+        service_failure_backoff_ms=30_000,
+    )
+    await reconciler.apply(engine, adapter, now_ms=0)
+
+    adapter.set_state(
+        "light.desk",
+        "on",
+        {
+            "color_mode": "rgb",
+            "rgb_color": [255, 0, 0],
+            "color_temp_kelvin": 2700,
+            "hs_color": [0, 100],
+        },
+        context=SimpleNamespace(id="user", parent_id=None, user_id="user-1"),
+    )
+    events = reconciler.on_state_delta(
+        engine, adapter.get_state("light.desk"), _NoContextTracker(), now_ms=1_000
+    )
+
+    assert events[0].details["set"] == {"rgb_color": [255, 0, 0]}
 
 
 @pytest.mark.asyncio
@@ -1381,7 +1751,7 @@ async def test_tick_confirms_pending_drift_candidate() -> None:
     """tick's confirm step promotes a stable drift candidate after the window."""
     engine = _make_engine_with_light_rule()
     adapter = _FakeAdapter()
-    adapter.set_state("light.desk", "on")
+    adapter.set_state("light.desk", "on", {"brightness": 153})
     reconciler = Reconciliation(
         drift_override_ttl_ms=300_000,
         drift_confirmation_ms=1_500,
@@ -1391,7 +1761,7 @@ async def test_tick_confirms_pending_drift_candidate() -> None:
 
     # Stage a drift candidate via on_state_delta.
     adapter.set_state(
-        "light.desk", "off", context=SimpleNamespace(id=None, parent_id=None, user_id="user-1")
+        "light.desk", "off", context=SimpleNamespace(id=None, parent_id=None, user_id=None)
     )
     reconciler.on_state_delta(
         engine, adapter.get_state("light.desk"), _NoContextTracker(), now_ms=2_000
@@ -1406,7 +1776,126 @@ async def test_tick_confirms_pending_drift_candidate() -> None:
     promoted = _events_of(events, "drift_promoted")
     assert len(promoted) == 1
     assert len(_events_of(events, "service_skipped_drift_promoted")) == 1
-    assert len(adapter.calls) == 1
+    assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_restored_applied_plan_classifies_drift_before_dispatch() -> None:
+    engine = _make_engine_with_light_rule()
+    adapter = _FakeAdapter()
+    adapter.set_state("light.desk", "on", {"brightness": 153})
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=1_500,
+        service_failure_backoff_ms=30_000,
+    )
+    await reconciler.apply(engine, adapter, now_ms=1_000)
+    records = reconciler.export_runtime_state(engine)
+
+    restored_engine = _make_engine_with_light_rule()
+    restored = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=1_500,
+        service_failure_backoff_ms=30_000,
+    )
+    restored.restore_pending_withdraws(
+        {"reconciliation": records}, now_ms=10_000
+    )
+    adapter.set_state("light.desk", "off")
+
+    startup = restored.classify_restored_states(
+        restored_engine,
+        adapter,
+        _NoContextTracker(),
+        now_ms=10_000,
+    )
+    assert _events_of(startup, "drift_promoted") == []
+    events = await restored.tick(
+        restored_engine,
+        adapter,
+        _NoContextTracker(),
+        now_ms=12_000,
+    )
+
+    promoted = _events_of(events, "drift_promoted")
+    assert len(promoted) == 1
+    assert adapter.calls == []
+    assert restored.commit_promotion(promoted[0], now_ms=12_000)
+
+
+@pytest.mark.asyncio
+async def test_restored_plan_is_discarded_when_desired_changed() -> None:
+    engine = _make_engine_with_light_rule(brightness_pct=60)
+    adapter = _FakeAdapter()
+    adapter.set_state("light.desk", "on", {"brightness": 153})
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=1_500,
+        service_failure_backoff_ms=30_000,
+    )
+    await reconciler.apply(engine, adapter, now_ms=1_000)
+    records = reconciler.export_runtime_state(engine)
+
+    restored_engine = _make_engine_with_light_rule(brightness_pct=70)
+    restored = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=1_500,
+        service_failure_backoff_ms=30_000,
+    )
+    restored.restore_pending_withdraws(
+        {"reconciliation": records}, now_ms=10_000
+    )
+    adapter.set_state("light.desk", "off")
+
+    assert restored.classify_restored_states(
+        restored_engine,
+        adapter,
+        _NoContextTracker(),
+        now_ms=10_000,
+    ) == []
+    events = await restored.tick(
+        restored_engine,
+        adapter,
+        _NoContextTracker(),
+        now_ms=10_001,
+    )
+
+    assert _events_of(events, "drift_promoted") == []
+    assert adapter.calls[-1] == (
+        "light",
+        "turn_on",
+        {"entity_id": "light.desk", "brightness_pct": 70},
+    )
+
+
+@pytest.mark.asyncio
+async def test_uncommitted_drift_promotion_remains_non_destructive() -> None:
+    engine = _make_engine_with_light_rule()
+    adapter = _FakeAdapter()
+    adapter.set_state("light.desk", "on", {"brightness": 153})
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=1_500,
+        service_failure_backoff_ms=30_000,
+    )
+    await reconciler.apply(engine, adapter, now_ms=0)
+    adapter.set_state("light.desk", "off")
+    reconciler.on_state_delta(
+        engine, adapter.get_state("light.desk"), _NoContextTracker(), now_ms=1_000
+    )
+    events = await reconciler.tick(
+        engine, adapter, _NoContextTracker(), now_ms=3_000
+    )
+    assert len(_events_of(events, "drift_promoted")) == 1
+
+    retried = await reconciler.tick(
+        engine, adapter, _NoContextTracker(), now_ms=3_001
+    )
+
+    assert len(_events_of(retried, "drift_promoted")) == 1
+    assert reconciler.commit_promotion(events[0], now_ms=3_001)
+    assert not reconciler.commit_promotion(retried[0], now_ms=3_001)
+    assert adapter.calls == []
 
 
 @pytest.mark.asyncio

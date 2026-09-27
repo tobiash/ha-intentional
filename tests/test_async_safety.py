@@ -186,10 +186,18 @@ def test_tick_loop_is_background_task() -> None:
     bootstrap wait set. The Intentional tick loop is intentionally long-lived,
     so it must be registered as a background task on HA versions that support it.
     """
-    source = INIT_PY.read_text()
-
-    assert "async_create_background_task(_tick_loop()" in source
-    assert "async_create_task(_tick_loop()" in source
-    assert source.index("async_create_background_task(_tick_loop()") < source.index(
-        "async_create_task(_tick_loop()"
-    )
+    calls = [
+        node for node in ast.walk(ast.parse(INIT_PY.read_text()))
+        if isinstance(node, ast.Call)
+        and any(
+            isinstance(arg, ast.Call)
+            and isinstance(arg.func, ast.Name)
+            and arg.func.id == "_tick_loop"
+            for arg in node.args
+        )
+    ]
+    assert len(calls) == 1
+    assert isinstance(calls[0].func, ast.Attribute)
+    assert calls[0].func.attr == "async_create_background_task"
+    assert isinstance(calls[0].func.value, ast.Name)
+    assert calls[0].func.value.id == "entry"

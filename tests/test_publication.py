@@ -5,7 +5,32 @@ from tests.dependencies import require_test_dependency
 require_test_dependency("homeassistant", reason="homeassistant not installed")
 
 from custom_components.intentional import publication  # noqa: E402
-from custom_components.intentional.switch import _without_volatile_remaining  # noqa: E402
+from custom_components.intentional.sensor import (  # noqa: E402
+    IntentionalAlertAggregateSensor,
+    IntentionalAlertSensor,
+    IntentionalRoomStatusSensor,
+    IntentionalSummarySensor,
+)
+from custom_components.intentional.switch import (  # noqa: E402
+    IntentionalGlobalSwitch,
+    IntentionalRoomPauseSwitch,
+    IntentionalRuleSwitch,
+    _without_volatile_remaining,
+)
+
+
+def test_publication_driven_entities_do_not_poll() -> None:
+    for entity_type in (
+        IntentionalAlertAggregateSensor,
+        IntentionalAlertSensor,
+        IntentionalRoomStatusSensor,
+        IntentionalSummarySensor,
+        IntentionalGlobalSwitch,
+        IntentionalRoomPauseSwitch,
+        IntentionalRuleSwitch,
+    ):
+        entity = entity_type.__new__(entity_type)
+        assert entity.should_poll is False, entity_type.__name__
 
 
 class _Engine:

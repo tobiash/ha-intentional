@@ -26,11 +26,16 @@ from .adapter import FrozenValue, ServicePlanSignature
 from .adapter.extractor import manual_set_from_state_object
 from .adapter.matcher import (
     ServicePlanMatch,
+    service_plan_has_observable_postcondition,
     service_plan_match,
     service_plan_matches_state,
+    service_plan_mismatched_fields,
 )
 from .adapter.signer import _freeze_signature_value, service_plan_signature
 from .adapter.translator import service_calls_for_resolved_target
+from .compositor import resolve_intents
+from .intent import Authority
+from .registry import LIGHT_COLOR_FIELDS
 
 
 def reconciliation_key(entry_id: str) -> str:
@@ -69,12 +74,24 @@ class ContextTracker(Protocol):
 
 
 @dataclass(frozen=True)
+class _DriftPromotionToken:
+    target: str
+    candidate: tuple[int, FrozenValue]
+    applied_plan: ServicePlanSignature | None
+    generation: int
+    details_signature: FrozenValue
+
+
+@dataclass(frozen=True)
 class ReconciliationEvent:
     """A single reconciliation observation the integration translates to diagnostics."""
 
     kind: str
     target: str = ""
     details: dict[str, Any] = field(default_factory=dict)
+    promotion_token: _DriftPromotionToken | None = field(
+        default=None, repr=False, compare=False
+    )
 
 
 @dataclass(frozen=True)
@@ -84,7 +101,15 @@ class _RetryState:
     signature: ServicePlanSignature
 
 
-_RECONCILIATION_STATE_VERSION = 2
+@dataclass(frozen=True)
+class _DriftCandidateMeta:
+    desired_value: dict[str, Any]
+    contested_fields: frozenset[str]
+    ttl_ms: int
+    generation: int
+
+
+_RECONCILIATION_STATE_VERSION = 3
 _MAX_PERSISTED_TARGETS = 256
 
 
@@ -302,8 +327,10 @@ _SAFETY_REDUCING_SERVICES = frozenset(
         "lock",
         "close",
         "close_cover",
+        "close_valve",
         "stop",
         "disarm",
+        "alarm_disarm",
     }
 )
 
@@ -447,6 +474,10 @@ def classify_state_drift(
     drift_suppressed_until: dict[str, int] | None = None,
     drift_candidates: dict[str, tuple[int, FrozenValue]] | None = None,
     confirmation_ms: int = 0,
+    allow_unattributed_override: bool = True,
+    consume_on_promotion: bool = True,
+    explicit_user_change: bool | None = None,
+    candidate_set: dict[str, Any] | None = None,
     reason: str = "Manual HA state change",
 ) -> dict[str, Any] | None:
     """Classify a state change and return the override payload, or None.
@@ -454,17 +485,37 @@ def classify_state_drift(
     Does NOT emit the intent; the caller applies the returned payload.
     """
     entity_id = state.entity_id
+    context = getattr(state, "context", None)
+    explicit_user = (
+        getattr(context, "user_id", None) is not None
+        if explicit_user_change is None
+        else explicit_user_change
+    )
     if drift_suppressed_until is not None:
         suppress_until = drift_suppressed_until.get(entity_id)
         if suppress_until is not None:
             if now_ms is None:
                 raise ValueError("now_ms is required with drift_suppressed_until")
-            context = getattr(state, "context", None)
-            if getattr(context, "user_id", None) is not None:
+            if explicit_user:
                 drift_suppressed_until.pop(entity_id, None)
             elif now_ms < suppress_until:
-                if drift_candidates is not None:
-                    drift_candidates.pop(entity_id, None)
+                if not explicit_user and not allow_unattributed_override:
+                    if drift_candidates is not None:
+                        drift_candidates.pop(entity_id, None)
+                    return None
+                plan = last_applied.get(entity_id)
+                if (
+                    plan is not None
+                    and service_plan_match(plan, state) is ServicePlanMatch.MISMATCH
+                    and engine.has_active_target(entity_id)
+                    and drift_candidates is not None
+                ):
+                    set_dict = manual_set_from_state_object(state)
+                    if set_dict:
+                        signature = _freeze_signature_value(candidate_set or set_dict)
+                        candidate = drift_candidates.get(entity_id)
+                        if candidate is None or candidate[1] != signature:
+                            drift_candidates[entity_id] = (suppress_until, signature)
                 return None
             else:
                 drift_suppressed_until.pop(entity_id, None)
@@ -481,29 +532,34 @@ def classify_state_drift(
         if drift_candidates is not None:
             drift_candidates.pop(entity_id, None)
         return None
-    if _state_change_looks_like_ignored_activation(plan, state):
+    if (
+        not explicit_user
+        and not allow_unattributed_override
+    ):
         if drift_candidates is not None:
             drift_candidates.pop(entity_id, None)
-        last_applied.pop(entity_id, None)
         return None
     set_dict = manual_set_from_state_object(state)
     if not set_dict:
         if drift_candidates is not None:
             drift_candidates.pop(entity_id, None)
         return None
-    if drift_candidates is not None and confirmation_ms > 0:
+    effective_confirmation_ms = 0 if explicit_user else confirmation_ms
+    if drift_candidates is not None and effective_confirmation_ms > 0:
         if now_ms is None:
             raise ValueError("now_ms is required with drift_candidates")
-        candidate_signature = _freeze_signature_value(set_dict)
+        candidate_signature = _freeze_signature_value(candidate_set or set_dict)
         candidate = drift_candidates.get(entity_id)
         if candidate is None or candidate[1] != candidate_signature:
             drift_candidates[entity_id] = (now_ms, candidate_signature)
             return None
         first_seen_ms, _signature = candidate
-        if now_ms - first_seen_ms < confirmation_ms:
+        if now_ms - first_seen_ms < effective_confirmation_ms:
             return None
-        drift_candidates.pop(entity_id, None)
-    last_applied.pop(entity_id, None)
+        if consume_on_promotion:
+            drift_candidates.pop(entity_id, None)
+    if consume_on_promotion:
+        last_applied.pop(entity_id, None)
     return {"target": entity_id, "set": set_dict, "ttl_ms": ttl_ms, "reason": reason}
 
 
@@ -512,6 +568,18 @@ def _detected_override_ttl_ms(engine: Any, target: str, default_ttl_ms: int) -> 
     resolved = engine.resolve(target)
     if resolved is None:
         return default_ttl_ms
+    rule_intents = [
+        intent
+        for intent in getattr(resolved, "all_active_intents", ())
+        if intent.rule_id
+    ]
+    underlying = resolve_intents(
+        target,
+        rule_intents,
+        into_the_future_ms=engine.now_ms(),
+    )
+    if underlying is not None:
+        resolved = underlying
     contributors = {
         id(provider): provider
         for provider in getattr(resolved, "field_providers", {}).values()
@@ -533,6 +601,41 @@ def _detected_override_ttl_ms(engine: Any, target: str, default_ttl_ms: int) -> 
     )
 
 
+def _contested_override_set(
+    state: Any,
+    set_dict: dict[str, Any],
+    contested_fields: frozenset[str],
+) -> dict[str, Any]:
+    result = {
+        field_name: set_dict[field_name]
+        for field_name in contested_fields
+        if field_name in set_dict and field_name not in LIGHT_COLOR_FIELDS
+    }
+    if "brightness_pct" in contested_fields and "brightness" in set_dict:
+        result["brightness"] = set_dict["brightness"]
+    if contested_fields.intersection(LIGHT_COLOR_FIELDS):
+        color_mode = str(getattr(state, "attributes", {}).get("color_mode", ""))
+        preferred = {
+            "color_temp": ("color_temp_k", "color_temp_mired"),
+            "rgb": ("rgb_color",),
+            "rgbw": ("rgbw_color",),
+            "rgbww": ("rgbww_color",),
+            "hs": ("hs_color",),
+            "xy": ("xy_color",),
+        }.get(color_mode, ())
+        color_field = next(
+            (
+                field_name
+                for field_name in (*preferred, *LIGHT_COLOR_FIELDS)
+                if field_name in set_dict
+            ),
+            None,
+        )
+        if color_field is not None:
+            result[color_field] = set_dict[color_field]
+    return result
+
+
 def invalidate_service_plan_for_state_change(
     last_applied: dict[str, ServicePlanSignature],
     state: Any,
@@ -546,19 +649,6 @@ def invalidate_service_plan_for_state_change(
         return False
     last_applied.pop(entity_id, None)
     return True
-
-
-def _state_change_looks_like_ignored_activation(
-    plan: ServicePlanSignature,
-    state: Any,
-) -> bool:
-    """True when HA still reports off after an Intentional turn_on call."""
-    if str(getattr(state, "state", "")) != "off":
-        return False
-    context = getattr(state, "context", None)
-    if getattr(context, "user_id", None) is not None:
-        return False
-    return any(domain == "light" and service == "turn_on" for domain, service, _data in plan)
 
 
 def pending_drift_targets(drift_candidates: dict[str, tuple[int, FrozenValue]]) -> tuple[str, ...]:
@@ -608,9 +698,12 @@ class Reconciliation:
         self._availability_recovery_grace_ms = availability_recovery_grace_ms
 
         self._last_applied: dict[str, ServicePlanSignature] = {}
+        self._observed_satisfied: dict[str, ServicePlanSignature] = {}
         self._last_resolved: dict[str, ResolvedTargetState] = {}
         self._drift_suppressed_until: dict[str, int] = {}
         self._drift_candidates: dict[str, Any] = {}
+        self._drift_candidate_meta: dict[str, _DriftCandidateMeta] = {}
+        self._next_drift_generation = 0
         self._unavailable_targets: set[str] = set()
         self._availability_recovery_until: dict[str, int] = {}
         self._service_failure_backoff: dict[str, _RetryState] = {}
@@ -700,6 +793,37 @@ class Reconciliation:
         """Count one change-driven entity publication dispatch."""
         self._record_churn(now_ms, "publication_dispatch", "", None)
 
+    def validate_promotion(self, event: ReconciliationEvent) -> bool:
+        """Return whether a Drift proposal still identifies the exact candidate."""
+        token = event.promotion_token
+        meta = None if token is None else self._drift_candidate_meta.get(token.target)
+        return not (
+            event.kind != "drift_promoted"
+            or token is None
+            or event.target != token.target
+            or _freeze_signature_value(event.details) != token.details_signature
+            or self._drift_candidates.get(token.target) != token.candidate
+            or self._last_applied.get(token.target) != token.applied_plan
+            or meta is None
+            or meta.generation != token.generation
+        )
+
+    def commit_promotion(self, event: ReconciliationEvent, now_ms: int) -> bool:
+        """Consume one already-applied, still-current Drift proposal."""
+        if not self.validate_promotion(event):
+            return False
+        token = event.promotion_token
+        assert token is not None
+        self._clear_drift_candidate(token.target)
+        self._last_applied.pop(token.target, None)
+        self._observed_satisfied.pop(token.target, None)
+        self._record_events([event], now_ms)
+        return True
+
+    def _clear_drift_candidate(self, target: str) -> None:
+        clear_pending_state_drift(self._drift_candidates, target)
+        self._drift_candidate_meta.pop(target, None)
+
     # ----- drift classification (shared by on_state_delta and tick) -----
 
     def _classify_drift(
@@ -708,12 +832,14 @@ class Reconciliation:
         state: Any,
         context_tracker: ContextTracker,
         now_ms: int,
+        *,
+        allow_explicit_user: bool = True,
     ) -> list[ReconciliationEvent]:
         """Classify one observed state as intentional, staged, or promoted drift."""
         entity_id = state.entity_id
         if _state_is_unavailable(state):
             self._unavailable_targets.add(entity_id)
-            clear_pending_state_drift(self._drift_candidates, entity_id)
+            self._clear_drift_candidate(entity_id)
             return []
         if entity_id in self._unavailable_targets:
             self._unavailable_targets.remove(entity_id)
@@ -721,34 +847,208 @@ class Reconciliation:
                 self._availability_recovery_until.get(entity_id, 0),
                 now_ms + self._availability_recovery_grace_ms,
             )
+        owned_context = context_tracker.owns_state(state)
+        context = getattr(state, "context", None)
+        explicit_user = (
+            allow_explicit_user and getattr(context, "user_id", None) is not None
+        )
+        applied_plan = self._last_applied.get(entity_id)
+        if (
+            applied_plan is not None
+            and service_plan_match(applied_plan, state) is ServicePlanMatch.MATCH
+        ):
+            self._observed_satisfied[entity_id] = applied_plan
+        if owned_context:
+            self._clear_drift_candidate(entity_id)
+            return [ReconciliationEvent("context_ignored", entity_id, {"state": state})]
         recovery_until = self._availability_recovery_until.get(entity_id)
         if recovery_until is not None:
-            if now_ms < recovery_until:
-                clear_pending_state_drift(self._drift_candidates, entity_id)
+            if explicit_user:
+                self._availability_recovery_until.pop(entity_id, None)
+            elif now_ms < recovery_until:
+                self._clear_drift_candidate(entity_id)
                 return []
-            self._availability_recovery_until.pop(entity_id, None)
+            else:
+                self._availability_recovery_until.pop(entity_id, None)
         policy = getattr(engine, "target_policy", lambda _target: None)(entity_id)
         if policy is not None and policy.ownership != "managed":
-            clear_pending_state_drift(self._drift_candidates, entity_id)
+            self._clear_drift_candidate(entity_id)
             return []
-        if context_tracker.owns_state(state):
-            clear_pending_state_drift(self._drift_candidates, entity_id)
-            return [ReconciliationEvent("context_ignored", entity_id, {"state": state})]
+        classification_plans = self._last_applied
+        if entity_id not in classification_plans:
+            resolved = engine.resolve(entity_id)
+            winner = None if resolved is None else resolved.winning_intent
+            if resolved is not None and (
+                explicit_user
+                or (
+                    winner is not None
+                    and winner.authority is Authority.USER
+                    and not winner.rule_id
+                )
+            ):
+                calls = service_calls_for_resolved_target(
+                    entity_id,
+                    dict(resolved.value),
+                    transition_ms=resolved.transition_ms,
+                )
+                if calls:
+                    classification_plans = {
+                        entity_id: service_plan_signature(calls)
+                    }
+        applied_plan = classification_plans.get(entity_id)
+        candidate = self._drift_candidates.get(entity_id)
+        contested_fields = (
+            frozenset()
+            if applied_plan is None
+            else service_plan_mismatched_fields(applied_plan, state)
+        )
+        if (
+            explicit_user
+            and entity_id.startswith("light.")
+            and str(state.state) == "on"
+            and "state" in contested_fields
+        ):
+            resolved = engine.resolve(entity_id)
+            if resolved is not None and resolved.value.get("state") == "off":
+                # An off plan omits brightness/color. Compare the still-resolved
+                # fields too when a user turns the light back on.
+                on_calls = service_calls_for_resolved_target(
+                    entity_id, {**resolved.value, "state": "on"}
+                )
+                contested_fields |= service_plan_mismatched_fields(
+                    service_plan_signature(on_calls), state
+                )
+        extracted_set = manual_set_from_state_object(state)
+        scoped_candidate_set = _contested_override_set(
+            state, extracted_set, contested_fields
+        )
+        candidate_meta = self._drift_candidate_meta.get(entity_id)
+        ttl_ms = (
+            candidate_meta.ttl_ms
+            if candidate_meta is not None
+            else _detected_override_ttl_ms(
+                engine, entity_id, self._drift_override_ttl_ms
+            )
+        )
         promoted = classify_state_drift(
             engine,
-            self._last_applied,
+            classification_plans,
             state,
-            ttl_ms=_detected_override_ttl_ms(
-                engine, entity_id, self._drift_override_ttl_ms
-            ),
+            ttl_ms=ttl_ms,
             now_ms=now_ms,
             drift_suppressed_until=self._drift_suppressed_until,
             drift_candidates=self._drift_candidates,
             confirmation_ms=self._drift_confirmation_ms,
+            consume_on_promotion=False,
+            explicit_user_change=explicit_user,
+            candidate_set=scoped_candidate_set or None,
+            allow_unattributed_override=(
+                explicit_user
+                or (
+                    applied_plan is not None
+                    and self._observed_satisfied.get(entity_id) == applied_plan
+                )
+            ),
         )
+        current_candidate = self._drift_candidates.get(entity_id)
+        if current_candidate is not None and current_candidate != candidate:
+            resolved = engine.resolve(entity_id)
+            self._next_drift_generation += 1
+            self._drift_candidate_meta[entity_id] = _DriftCandidateMeta(
+                desired_value={} if resolved is None else dict(resolved.value),
+                contested_fields=contested_fields,
+                ttl_ms=ttl_ms,
+                generation=self._next_drift_generation,
+            )
+        elif current_candidate is None:
+            self._drift_candidate_meta.pop(entity_id, None)
         if promoted is not None:
-            return [ReconciliationEvent("drift_promoted", entity_id, promoted)]
+            meta = self._drift_candidate_meta.get(entity_id)
+            promotion_fields = (
+                contested_fields if meta is None else meta.contested_fields
+            )
+            promoted["set"] = _contested_override_set(
+                state, promoted["set"], promotion_fields
+            )
+            if not promoted["set"]:
+                self._clear_drift_candidate(entity_id)
+                return []
+            if candidate is None:
+                candidate = (
+                    now_ms,
+                    _freeze_signature_value(promoted["set"]),
+                )
+                self._drift_candidates[entity_id] = candidate
+                resolved = engine.resolve(entity_id)
+                self._next_drift_generation += 1
+                self._drift_candidate_meta[entity_id] = _DriftCandidateMeta(
+                    desired_value={} if resolved is None else dict(resolved.value),
+                    contested_fields=contested_fields,
+                    ttl_ms=ttl_ms,
+                    generation=self._next_drift_generation,
+                )
+            meta = self._drift_candidate_meta.get(entity_id)
+            return [
+                ReconciliationEvent(
+                    "drift_promoted",
+                    entity_id,
+                    promoted,
+                    promotion_token=(
+                        None
+                        if candidate is None
+                        else _DriftPromotionToken(
+                            target=entity_id,
+                            candidate=candidate,
+                            applied_plan=self._last_applied.get(entity_id),
+                            generation=0 if meta is None else meta.generation,
+                            details_signature=_freeze_signature_value(promoted),
+                        )
+                    ),
+                )
+            ]
         return []
+
+    def classify_restored_states(
+        self,
+        engine: Any,
+        adapter: HAAdapter,
+        context_tracker: ContextTracker,
+        now_ms: int,
+    ) -> list[ReconciliationEvent]:
+        """Classify startup evidence before restored Targets may be dispatched."""
+        events: list[ReconciliationEvent] = []
+        for target, applied_plan in list(self._last_applied.items()):
+            resolved = engine.resolve(target)
+            if resolved is None:
+                self._last_applied.pop(target, None)
+                self._observed_satisfied.pop(target, None)
+                continue
+            calls = service_calls_for_resolved_target(
+                target,
+                dict(resolved.value),
+                transition_ms=resolved.transition_ms,
+            )
+            if not calls or service_plan_signature(calls) != applied_plan:
+                self._last_applied.pop(target, None)
+                self._observed_satisfied.pop(target, None)
+                self._drift_suppressed_until.pop(target, None)
+                continue
+            state = adapter.get_state(target)
+            if state is None:
+                continue
+            events.extend(
+                self._classify_drift(
+                    engine,
+                    state,
+                    context_tracker,
+                    now_ms,
+                    allow_explicit_user=False,
+                )
+            )
+        self._record_events(
+            [event for event in events if event.kind != "drift_promoted"], now_ms
+        )
+        return events
 
     # ----- entry point 1: the listener path -----
 
@@ -764,7 +1064,9 @@ class Reconciliation:
         Does not apply service plans; that is :meth:`tick`'s job.
         """
         events = self._classify_drift(engine, new_state, context_tracker, now_ms)
-        self._record_events(events, now_ms)
+        self._record_events(
+            [event for event in events if event.kind != "drift_promoted"], now_ms
+        )
         return events
 
     # ----- entry point 2: the periodic path -----
@@ -783,6 +1085,7 @@ class Reconciliation:
         self._last_reconciliation_now_ms = now_ms
         events: list[ReconciliationEvent] = []
         resolved_targets: dict[str, Any] = {}
+        self._reclassify_pending_drift(engine, adapter)
         events.extend(self._confirm_pending_drift(engine, adapter, context_tracker, now_ms))
         promoted_targets = {event.target for event in events if event.kind == "drift_promoted"}
         events.extend(
@@ -805,8 +1108,50 @@ class Reconciliation:
             )
         )
         events.extend(self._shadowing_transitions(engine, now_ms, resolved_targets))
-        self._record_events(events, now_ms)
+        self._record_events(
+            [event for event in events if event.kind != "drift_promoted"], now_ms
+        )
         return events
+
+    def _reclassify_pending_drift(self, engine: Any, adapter: HAAdapter) -> None:
+        for target in pending_drift_targets(self._drift_candidates):
+            meta = self._drift_candidate_meta.get(target)
+            resolved = engine.resolve(target)
+            state = adapter.get_state(target)
+            if meta is None or resolved is None or state is None:
+                self._clear_drift_candidate(target)
+                continue
+            calls = service_calls_for_resolved_target(
+                target,
+                dict(resolved.value),
+                transition_ms=resolved.transition_ms,
+            )
+            if not calls:
+                self._clear_drift_candidate(target)
+                continue
+            signature = service_plan_signature(calls)
+            if service_plan_match(signature, state) is ServicePlanMatch.MATCH:
+                self._clear_drift_candidate(target)
+                self._last_applied[target] = signature
+                self._observed_satisfied[target] = signature
+                continue
+            current_value = dict(resolved.value)
+            if current_value == meta.desired_value:
+                continue
+            changed_fields = {
+                field_name
+                for field_name in set(meta.desired_value) | set(current_value)
+                if meta.desired_value.get(field_name) != current_value.get(field_name)
+            }
+            if _is_safety_reducing_plan(calls) or changed_fields & meta.contested_fields:
+                self._clear_drift_candidate(target)
+                continue
+            self._drift_candidate_meta[target] = _DriftCandidateMeta(
+                desired_value=current_value,
+                contested_fields=meta.contested_fields,
+                ttl_ms=meta.ttl_ms,
+                generation=meta.generation,
+            )
 
     async def apply(
         self,
@@ -886,9 +1231,10 @@ class Reconciliation:
             if policy is not None and policy.dispatch == "shadow":
                 self._last_resolved.pop(target, None)
                 self._last_applied.pop(target, None)
+                self._observed_satisfied.pop(target, None)
                 self._service_failure_backoff.pop(target, None)
                 self._service_plan_progress.pop(target, None)
-                clear_pending_state_drift(self._drift_candidates, target)
+                self._clear_drift_candidate(target)
                 shadow = {"would_apply": resolved_value, "would_withdraw": {}}
                 if self._shadow_plans.get(target) != shadow:
                     self._shadow_plans[target] = shadow
@@ -1006,16 +1352,16 @@ class Reconciliation:
                 )
                 events.append(ReconciliationEvent("service_skipped_pending_transition", target))
                 continue
+            if target in self._drift_candidates:
+                self._last_resolved[target] = _build_resolved_target_state(
+                    resolved, calls, ownership=ownership, previous=previous, actual=current_state
+                )
+                continue
             if self._last_applied.get(target) == signature:
                 if (
                     current_state is None
                     or service_plan_match(signature, current_state) is not ServicePlanMatch.MISMATCH
                 ):
-                    self._last_resolved[target] = _build_resolved_target_state(
-                        resolved, calls, ownership=ownership, previous=previous, actual=current_state
-                    )
-                    continue
-                if target in pending_drift_targets(self._drift_candidates):
                     self._last_resolved[target] = _build_resolved_target_state(
                         resolved, calls, ownership=ownership, previous=previous, actual=current_state
                     )
@@ -1031,6 +1377,7 @@ class Reconciliation:
                 and service_plan_matches_state(signature, current_state)
             ):
                 self._last_applied[target] = signature
+                self._observed_satisfied[target] = signature
                 self._last_resolved[target] = _build_resolved_target_state(
                     resolved, calls, ownership=ownership, previous=previous, actual=current_state
                 )
@@ -1069,6 +1416,8 @@ class Reconciliation:
                             {"failures": recovered.failures},
                         )
                     )
+                if self._last_applied.get(target) != signature:
+                    self._observed_satisfied.pop(target, None)
                 self._last_applied[target] = signature
                 clear_pending_state_drift(self._drift_candidates, target)
                 self._suppress_drift_during_transition(target, transition_ms, now_ms)
@@ -1218,6 +1567,7 @@ class Reconciliation:
             if previous.dispatch == "shadow" or policy is not None and policy.dispatch == "shadow":
                 self._last_resolved.pop(stale_target, None)
                 self._last_applied.pop(stale_target, None)
+                self._observed_satisfied.pop(stale_target, None)
                 value = explicit_withdraw or _default_withdraw_value(stale_target, previous)
                 shadow = {"would_apply": None, "would_withdraw": value}
                 if self._shadow_plans.get(stale_target) != shadow:
@@ -1231,6 +1581,7 @@ class Reconciliation:
             ):
                 self._last_resolved.pop(stale_target, None)
                 self._last_applied.pop(stale_target, None)
+                self._observed_satisfied.pop(stale_target, None)
                 ownership = policy.ownership if policy is not None else previous.ownership
                 events.append(
                     ReconciliationEvent(
@@ -1295,7 +1646,8 @@ class Reconciliation:
                 if current_state is not None and _state_has_user_context(current_state):
                     self._last_resolved.pop(stale_target, None)
                     self._last_applied.pop(stale_target, None)
-                    clear_pending_state_drift(self._drift_candidates, stale_target)
+                    self._observed_satisfied.pop(stale_target, None)
+                    self._clear_drift_candidate(stale_target)
                     events.append(
                         ReconciliationEvent("withdraw_cancelled_user_change", stale_target)
                     )
@@ -1476,9 +1828,15 @@ class Reconciliation:
         """Return Targets retained for possible withdrawal."""
         return tuple(sorted(self._last_resolved))
 
-    def export_runtime_state(self, engine: Any) -> dict[str, Any]:
+    def export_runtime_state(
+        self, engine: Any, *, now_ms: int | None = None
+    ) -> dict[str, Any]:
         """Return bounded, versioned restart state for ownership and retries."""
-        now_ms = self._last_reconciliation_now_ms or 0
+        snapshot_now_ms = (
+            now_ms
+            if now_ms is not None
+            else (self._last_reconciliation_now_ms or 0)
+        )
         retries = []
         for target, retry in sorted(self._service_failure_backoff.items())[:_MAX_PERSISTED_TARGETS]:
             retries.append({
@@ -1486,7 +1844,10 @@ class Reconciliation:
                 "failures": retry.failures,
                 "remaining_ms": max(
                     0,
-                    min(retry.retry_at_ms - now_ms, self._service_failure_backoff_max_ms),
+                    min(
+                        retry.retry_at_ms - snapshot_now_ms,
+                        self._service_failure_backoff_max_ms,
+                    ),
                 ),
                 "signature": retry.signature,
             })
@@ -1497,11 +1858,26 @@ class Reconciliation:
                 "signature": signature,
                 "next_call_index": next_call_index,
             })
+        applied_targets = []
+        for target, signature in sorted(self._last_applied.items())[:_MAX_PERSISTED_TARGETS]:
+            if not service_plan_has_observable_postcondition(signature):
+                continue
+            applied_targets.append({
+                "target": target,
+                "signature": signature,
+                "observed_satisfied": self._observed_satisfied.get(target) == signature,
+                "transition_remaining_ms": max(
+                    0,
+                    self._drift_suppressed_until.get(target, snapshot_now_ms)
+                    - snapshot_now_ms,
+                ),
+            })
         return {
             "version": _RECONCILIATION_STATE_VERSION,
             "pending_withdraws": self.export_pending_withdraws(engine)[:_MAX_PERSISTED_TARGETS],
             "service_failure_backoff": retries,
             "service_plan_progress": progress,
+            "applied_targets": applied_targets,
         }
 
     def restore_pending_withdraws(
@@ -1510,6 +1886,7 @@ class Reconciliation:
         *,
         linger_rule_ids: set[str] | None = None,
         now_ms: int | None = None,
+        reconciliation_now_ms: int | None = None,
     ) -> None:
         if not isinstance(records, dict):
             return
@@ -1527,15 +1904,19 @@ class Reconciliation:
                 target, state = restored
                 self._last_resolved[target] = state
         version = runtime.get("version")
-        if version in {1, _RECONCILIATION_STATE_VERSION}:
-            restore_now_ms = 0 if now_ms is None else now_ms
+        if version in {1, 2, _RECONCILIATION_STATE_VERSION}:
+            restore_now_ms = (
+                reconciliation_now_ms
+                if reconciliation_now_ms is not None
+                else (0 if now_ms is None else now_ms)
+            )
             for raw in runtime.get("service_failure_backoff", [])[:_MAX_PERSISTED_TARGETS]:
                 try:
                     target = raw["target"]
                     failures = raw["failures"]
                     persisted_delay = (
                         raw["remaining_ms"]
-                        if version == _RECONCILIATION_STATE_VERSION
+                        if version in {2, _RECONCILIATION_STATE_VERSION}
                         else raw["retry_at_ms"]
                     )
                     signature = _freeze_signature_value(raw["signature"])
@@ -1546,6 +1927,34 @@ class Reconciliation:
                     self._service_failure_backoff[target] = _RetryState(failures, retry_at_ms, signature)
                 except (KeyError, TypeError, ValueError):
                     continue
+            if version == _RECONCILIATION_STATE_VERSION:
+                applied_target_records = runtime.get("applied_targets", [])
+                if not isinstance(applied_target_records, list):
+                    applied_target_records = []
+                for raw in applied_target_records[:_MAX_PERSISTED_TARGETS]:
+                    try:
+                        target = raw["target"]
+                        signature = _freeze_signature_value(raw["signature"])
+                        observed_satisfied = raw.get("observed_satisfied", False)
+                        remaining_ms = raw.get("transition_remaining_ms", 0)
+                        if (
+                            not isinstance(target, str)
+                            or not target
+                            or not isinstance(observed_satisfied, bool)
+                            or not isinstance(remaining_ms, int)
+                            or isinstance(remaining_ms, bool)
+                            or remaining_ms < 0
+                        ):
+                            continue
+                        self._last_applied[target] = signature
+                        if observed_satisfied:
+                            self._observed_satisfied[target] = signature
+                        if remaining_ms:
+                            self._drift_suppressed_until[target] = (
+                                restore_now_ms + remaining_ms
+                            )
+                    except (KeyError, TypeError, ValueError):
+                        continue
             for raw in runtime.get("service_plan_progress", [])[:_MAX_PERSISTED_TARGETS]:
                 try:
                     target = raw["target"]
@@ -1594,13 +2003,17 @@ class Reconciliation:
         """Forget applied plans for targets no longer active (after pulse clearing)."""
         for stale_target in set(self._last_applied) - active_targets:
             self._last_applied.pop(stale_target, None)
+            self._observed_satisfied.pop(stale_target, None)
+            self._clear_drift_candidate(stale_target)
 
     def retain_targets(self, targets: set[str]) -> None:
         """Reset transient bookkeeping for targets whose Rule fingerprint changed."""
         for mapping in (
             self._last_applied,
+            self._observed_satisfied,
             self._drift_suppressed_until,
             self._drift_candidates,
+            self._drift_candidate_meta,
             self._availability_recovery_until,
             self._service_failure_backoff,
             self._service_plan_progress,

@@ -9,8 +9,8 @@ import logging
 import secrets
 import time
 from typing import Any
-from urllib.parse import quote
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
@@ -20,6 +20,9 @@ from ._engine.alerting.policy import AlertingPolicyRepository
 ALERTING_STORAGE_VERSION = 1
 ALERTING_POLICY_STORAGE_VERSION = 1
 ALERTING_SECRET_STORAGE_VERSION = 1
+DISPATCH_TIMEOUT_SECONDS = 30
+STOP_TIMEOUT_SECONDS = 5
+REJECTION_TIMEOUT_SECONDS = 10
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -108,15 +111,20 @@ class AlertNotificationDispatcher:
             if obligation is None:
                 continue
             try:
-                await self._async_call(obligation)
+                async with asyncio.timeout(DISPATCH_TIMEOUT_SECONDS):
+                    await self._async_call(obligation)
             except asyncio.CancelledError:
-                await asyncio.shield(
-                    self._coordinator.async_reject_notification(
-                        obligation_id,
-                        now_ms=int(time.time() * 1_000),
-                        error_class="CancelledError",
-                    )
-                )
+                # Leave an unfinished obligation retryable without allowing a
+                # stalled Store to hold shutdown indefinitely.
+                try:
+                    async with asyncio.timeout(REJECTION_TIMEOUT_SECONDS):
+                        await self._coordinator.async_reject_notification(
+                            obligation_id,
+                            now_ms=int(time.time() * 1_000),
+                            error_class="CancelledError",
+                        )
+                except TimeoutError:
+                    _LOGGER.warning("Timed out persisting cancelled Notification")
                 raise
             except Exception as err:  # noqa: BLE001 - durable retry stores error class
                 await self._coordinator.async_reject_notification(
@@ -138,48 +146,13 @@ class AlertNotificationDispatcher:
         if destination_type == "notify_entity":
             if not self._hass.services.has_service("notify", "send_message"):
                 raise ValueError("notify.send_message is unavailable")
-            capabilities = obligation.get("capabilities", [])
-            actions = [
-                {
-                    "action": "|".join(
-                        (
-                            "INTENTIONAL_ALERT",
-                            str(capability["operation"]),
-                            str(capability["record_id"]),
-                            str(capability["token"]),
-                            str(capability["instance_id"]),
-                        )
-                    ),
-                    "title": (
-                        "Acknowledge"
-                        if capability["operation"] == "acknowledge"
-                        else "Silence 1h"
-                    ),
-                }
-                for capability in capabilities
-            ]
-            instance_ids = {
-                str(capability["instance_id"]) for capability in capabilities
-            }
-            singleton_instance = next(iter(instance_ids)) if len(instance_ids) == 1 else None
-            actions.append(
-                {
-                    "action": "URI",
-                    "title": "Open Alert" if singleton_instance else "Open Alerts",
-                    "uri": (
-                        f"/intentional/alerts/{quote(singleton_instance, safe='')}"
-                        if singleton_instance
-                        else "/intentional/alerts"
-                    ),
-                }
-            )
+            # Generic notify entities accept message/title, not mobile-app action data.
             await self._hass.services.async_call(
                 "notify",
                 "send_message",
                 {
                     "message": payload["message"],
                     "title": payload["title"],
-                    "data": {"actions": actions} if actions else {},
                 },
                 target={"entity_id": destination["entity_id"]},
                 blocking=True,
@@ -264,14 +237,14 @@ class AlertDeadlineDriver:
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
 
-    def start(self) -> None:
+    def start(self, entry: ConfigEntry | None = None) -> None:
         if self._task is None:
-            if hasattr(self._hass, "async_create_background_task"):
-                self._task = self._hass.async_create_background_task(
-                    self._run(), name="intentional_alert_deadlines"
+            if entry is not None:
+                self._task = entry.async_create_background_task(
+                    self._hass, self._run(), name="intentional_alert_deadlines"
                 )
             else:
-                self._task = self._hass.async_create_task(
+                self._task = self._hass.async_create_background_task(
                     self._run(), name="intentional_alert_deadlines"
                 )
 
@@ -282,7 +255,11 @@ class AlertDeadlineDriver:
         self._stop.set()
         self._wake.set()
         if self._task is not None:
-            await self._task
+            try:
+                await asyncio.wait_for(self._task, timeout=STOP_TIMEOUT_SECONDS)
+            except (TimeoutError, asyncio.CancelledError):
+                if asyncio.current_task().cancelling():
+                    raise
 
     async def _run(self) -> None:
         while not self._stop.is_set():

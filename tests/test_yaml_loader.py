@@ -80,6 +80,17 @@ def test_manual_override_ttl_is_parsed_from_intent_metadata() -> None:
     assert rules[0].manual_override_ttl_ms == 1_800_000
 
 
+def test_script_targets_are_effects_only() -> None:
+    with pytest.raises(RuleLoadError, match="script.*effects only"):
+        load_rules_from_string("""
+- id: run-script
+  while: {input_boolean.ready: on}
+  intent:
+    script.evening:
+      state: on
+""")
+
+
 # ── Rule schema validation ───────────────────────────────────────────
 
 

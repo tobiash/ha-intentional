@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.12] - 2026-09-27
+
+### Changed
+- Cache authored Rule metadata and generation hashes between document changes, avoiding repeated YAML parsing during publication.
+- Disable Home Assistant polling for publication-driven sensors and switches.
+- VNext script Targets are Effect-only; automation Intents must explicitly enable or disable their Target rather than trigger it.
+- Reject removed climate `aux_heat` controls during document preflight and manual-service validation. Use a device-supported `preset_mode` instead; there is no universal replacement preset.
+
+### Fixed
+- Convert authored light `color_temp_mired` values to Home Assistant's supported `color_temp_kelvin` service argument.
+- Generic notify entities receive only supported message/title fields; mobile action buttons require a separately supported transport.
+- Reconciliation waits for bounded service-handler completion so handler failures activate retry backoff instead of being recorded as successful dispatches.
+- Bound Effect and Notification delivery and lifecycle saves; cancel stalled workers during unload without acknowledging unfinished delivery.
+- Start background workers only after setup completes, tie them to the config-entry lifecycle, clean up failed setup, and remove service handlers on successful unload.
+- Move rule-directory filesystem work off the event loop and refresh observed state after awaited setup work.
+- Keep the Tick runtime alive after Alert-observation failures.
+- Preserve changed light brightness when replacing a manual off override with a manual on override, without capturing unrelated fields.
+- Validate and commit Drift proposals against their exact candidate; persist applied-Target evidence and transition grace for restart reconciliation.
+- Scope Drift overrides to contested fields and fence out reconciliation after selector ownership changes.
+
 ## [0.12.11] - 2026-08-04
 
 ### Added

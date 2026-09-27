@@ -261,10 +261,6 @@
           "name": "Horizontal swing mode",
           "description": "Optional climate horizontal swing mode."
         },
-        "aux_heat": {
-          "name": "Auxiliary heat",
-          "description": "Optional climate auxiliary heat state."
-        },
         "mode": {
           "name": "Mode",
           "description": "Optional humidifier mode such as normal, eco, away, boost, or sleep."

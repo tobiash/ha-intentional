@@ -302,6 +302,7 @@ class IntentionalAlertSensor(RegistrationAwareEntity, SensorEntity):
 class IntentionalAlertAggregateSensor(SensorEntity):
     """One bounded aggregate over durable Alert and Notification state."""
 
+    _attr_should_poll = False
     _attr_icon = "mdi:alert-circle-outline"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 

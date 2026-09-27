@@ -263,7 +263,9 @@ async def simulate_timeline(
             lifecycle = engine.export_lifecycle_records()
             alert_state = alert_lifecycle.export_state()
             notification_state = notifications.export_state()
-            reconciliation_state = reconciler.export_runtime_state(engine)
+            reconciliation_state = reconciler.export_runtime_state(
+                engine, now_ms=engine.now_ms()
+            )
             previous = engine
             engine = Engine(
                 clock_fn=lambda now=previous.now_ms(): now, selector_resolver=resolver
@@ -327,9 +329,9 @@ async def simulate_timeline(
         events = []
         for state in changed_actual:
             events.extend(reconciler.on_state_delta(engine, state, tracker, engine.now_ms()))
-        _promote(engine, events)
+        _promote(engine, reconciler, events)
         tick_events = await reconciler.tick(engine, adapter, tracker, engine.now_ms())
-        _promote(engine, tick_events)
+        _promote(engine, reconciler, tick_events)
         if any(event.kind == "drift_promoted" for event in tick_events):
             engine.evaluate_all()
         events.extend(tick_events)
@@ -498,10 +500,12 @@ def _new_reconciler(options: dict[str, Any]) -> Reconciliation:
     )
 
 
-def _promote(engine: Any, events: list[Any]) -> None:
+def _promote(engine: Any, reconciler: Reconciliation, events: list[Any]) -> None:
     for event in events:
-        if event.kind == "drift_promoted":
+        if event.kind == "drift_promoted" and reconciler.validate_promotion(event):
             engine.emit_user_intent(**event.details)
+            if not reconciler.commit_promotion(event, engine.now_ms()):
+                raise RuntimeError("Drift promotion changed during simulation commit")
 
 
 def _rejections(value: Any) -> bool | set[str]:

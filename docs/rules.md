@@ -735,7 +735,7 @@ payloads: `state`, `brightness_pct`, `brightness`, `color_temp_k`,
 `seek_position`, `group_members`, `position`, `tilt_position`, `percentage`,
 `hvac_mode`, `temperature`, `target_temp_low`, `target_temp_high`,
 `preset_mode`, `fan_mode`, `direction`, `oscillating`, `value`, `option`,
-`cycle`, `humidity`, `swing_mode`, `swing_horizontal_mode`, `aux_heat`,
+`cycle`, `humidity`, `swing_mode`, `swing_horizontal_mode`,
 `code`, `message`, `name`, `title`, `data`, `service`, `service_data`,
 `media_player_entity_id`, `cache`, `language`, `options`, `browser_id`,
 `user_id`, `path`, `action_text`, `action`, `parse_mode`,
@@ -749,6 +749,12 @@ payloads: `state`, `brightness_pct`, `brightness`, `color_temp_k`,
 `update_action`, `version`, `backup`, `mac`, `dev_id`, `host_name`,
 `location_name`, `gps`, `gps_accuracy`, `battery`, `reverse`, and
 `update_entity`.
+
+Light `color_temp_mired` remains supported as an authoring unit and is converted
+to `color_temp_kelvin` for Home Assistant service calls. Prefer `color_temp_k`
+for new rules. Climate `aux_heat` is no longer supported because Home Assistant
+removed its service; use `preset_mode` only if your climate entity exposes an
+appropriate preset. Intentional does not guess a replacement preset.
 
 For example, a dashboard button can force TV settings without creating a YAML
 rule:

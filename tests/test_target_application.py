@@ -97,7 +97,6 @@ def test_manual_set_from_service_data_supports_climate_fields() -> None:
         "oscillating": True,
         "swing_mode": "vertical",
         "swing_horizontal_mode": "wide",
-        "aux_heat": False,
     }
 
 
@@ -292,7 +291,6 @@ def test_manual_set_from_climate_and_helper_state_objects() -> None:
         "humidity": 45,
         "swing_mode": "vertical",
         "swing_horizontal_mode": "wide",
-        "aux_heat": True,
     }
     assert manual_set_from_state_object(
         SimpleNamespace(
@@ -831,7 +829,7 @@ def test_state_drift_requires_stable_confirmation_when_candidates_are_tracked() 
         entity_id="light.desk",
         state="off",
         attributes={},
-        context=SimpleNamespace(user_id="user-1"),
+        context=SimpleNamespace(user_id=None),
     )
 
     first = classify_state_drift(
@@ -906,7 +904,7 @@ def test_state_drift_matching_state_clears_pending_candidate() -> None:
             entity_id="light.desk",
             state="off",
             attributes={},
-            context=SimpleNamespace(user_id="user-1"),
+            context=SimpleNamespace(user_id=None),
         ),
         ttl_ms=7_200_000,
         now_ms=10_000,
@@ -973,7 +971,7 @@ def test_state_drift_changed_candidate_restarts_confirmation_window() -> None:
             entity_id="light.desk",
             state="off",
             attributes={},
-            context=SimpleNamespace(user_id="user-1"),
+            context=SimpleNamespace(user_id=None),
         ),
         ttl_ms=7_200_000,
         now_ms=11_500,
@@ -987,7 +985,7 @@ def test_state_drift_changed_candidate_restarts_confirmation_window() -> None:
             entity_id="light.desk",
             state="off",
             attributes={},
-            context=SimpleNamespace(user_id="user-1"),
+            context=SimpleNamespace(user_id=None),
         ),
         ttl_ms=7_200_000,
         now_ms=13_000,
@@ -1000,14 +998,13 @@ def test_state_drift_changed_candidate_restarts_confirmation_window() -> None:
     assert confirmed["set"] == {"state": "off"}
 
 
-def test_state_drift_retries_ignored_light_turn_on_without_manual_override() -> None:
+def test_stable_unattributed_light_off_is_manual_drift() -> None:
     from intentional.engine import Engine
     from intentional.ha_adapter import (
         classify_state_drift,
         service_calls_for_resolved_target,
         service_plan_signature,
     )
-    from intentional.intent import Authority
     from intentional.yaml_loader import Rule
 
     engine = Engine(clock_fn=lambda: 1000)
@@ -1045,13 +1042,10 @@ def test_state_drift_retries_ignored_light_turn_on_without_manual_override() -> 
         confirmation_ms=1_500,
     )
 
-    assert emitted is None
+    assert emitted is not None
+    assert emitted["set"] == {"state": "off"}
     assert drift_candidates == {}
     assert "light.desk" not in last_applied
-    assert all(
-        intent.authority is not Authority.USER
-        for intent in engine.list_active_intents("light.desk")
-    )
 
 
 def test_state_drift_does_not_emit_manual_override_during_owned_transition() -> None:
@@ -1280,6 +1274,267 @@ def test_service_plan_match_is_mismatch_for_reported_contradictory_attribute() -
         )
         is ServicePlanMatch.MISMATCH
     )
+
+
+@pytest.mark.parametrize(
+    ("target", "desired", "actual_state", "actual_attributes"),
+    [
+        (
+            "media_player.office",
+            {"state": "on", "volume_level": 0.35},
+            "on",
+            {"volume_level": 0.95},
+        ),
+        (
+            "fan.office",
+            {"state": "on", "oscillating": True},
+            "on",
+            {"oscillating": False},
+        ),
+        (
+            "light.office",
+            {"state": "on", "xy_color": [0.1, 0.1]},
+            "on",
+            {"xy_color": [0.9, 0.9]},
+        ),
+    ],
+)
+def test_service_plan_detects_normalized_and_boolean_drift(
+    target: str,
+    desired: dict[str, object],
+    actual_state: str,
+    actual_attributes: dict[str, object],
+) -> None:
+    from intentional.adapter.matcher import ServicePlanMatch, service_plan_match
+    from intentional.ha_adapter import service_calls_for_resolved_target, service_plan_signature
+
+    signature = service_plan_signature(service_calls_for_resolved_target(target, desired))
+    state = SimpleNamespace(
+        entity_id=target,
+        state=actual_state,
+        attributes=actual_attributes,
+    )
+
+    assert service_plan_match(signature, state) is ServicePlanMatch.MISMATCH
+
+
+@pytest.mark.parametrize(
+    ("target", "desired", "actual_state", "actual_attributes"),
+    [
+        ("media_player.office", {"state": "on"}, "off", {}),
+        ("siren.entry", {"state": "off"}, "on", {}),
+        (
+            "climate.office",
+            {"state": "on", "hvac_mode": "heat"},
+            "heat",
+            {},
+        ),
+        (
+            "water_heater.tank",
+            {"state": "on", "operation_mode": "eco"},
+            "eco",
+            {"operation_mode": "eco"},
+        ),
+    ],
+)
+def test_service_plan_matches_domain_specific_power_states(
+    target: str,
+    desired: dict[str, object],
+    actual_state: str,
+    actual_attributes: dict[str, object],
+) -> None:
+    from intentional.adapter.matcher import ServicePlanMatch, service_plan_match
+    from intentional.ha_adapter import service_calls_for_resolved_target, service_plan_signature
+
+    signature = service_plan_signature(service_calls_for_resolved_target(target, desired))
+    state = SimpleNamespace(
+        entity_id=target,
+        state=actual_state,
+        attributes=actual_attributes,
+    )
+
+    expected = (
+        ServicePlanMatch.MISMATCH
+        if actual_state in {"off", "on"} and desired["state"] != actual_state
+        else ServicePlanMatch.MATCH
+    )
+    assert service_plan_match(signature, state) is expected
+
+
+def test_manual_state_extraction_covers_automation_enablement() -> None:
+    from intentional.ha_adapter import manual_set_from_state_object
+
+    actual = SimpleNamespace(entity_id="automation.security", state="off", attributes={})
+
+    assert manual_set_from_state_object(actual) == {"state": "off"}
+
+
+def test_script_execution_state_is_not_manual_override_state() -> None:
+    from intentional.ha_adapter import manual_set_from_state_object
+
+    actual = SimpleNamespace(entity_id="script.evening", state="on", attributes={})
+
+    assert manual_set_from_state_object(actual) == {}
+
+
+@pytest.mark.parametrize(
+    ("target", "desired", "actual_state", "actual_attributes"),
+    [
+        (
+            "cover.blind",
+            {"position": 80},
+            "opening",
+            {"current_position": 35},
+        ),
+        (
+            "valve.radiator",
+            {"position": 20},
+            "closing",
+            {"current_position": 60},
+        ),
+        (
+            "alarm_control_panel.home",
+            {"state": "armed_away"},
+            "arming",
+            {},
+        ),
+    ],
+)
+def test_service_plan_is_unknown_while_target_is_transitioning(
+    target: str,
+    desired: dict[str, object],
+    actual_state: str,
+    actual_attributes: dict[str, object],
+) -> None:
+    from intentional.adapter.matcher import ServicePlanMatch, service_plan_match
+    from intentional.ha_adapter import service_calls_for_resolved_target, service_plan_signature
+
+    signature = service_plan_signature(service_calls_for_resolved_target(target, desired))
+    actual = SimpleNamespace(
+        entity_id=target,
+        state=actual_state,
+        attributes=actual_attributes,
+    )
+
+    assert service_plan_match(signature, actual) is ServicePlanMatch.UNKNOWN
+
+
+@pytest.mark.parametrize("state", ["idle", "streaming", "recording"])
+def test_camera_states_do_not_require_literal_on(state: str) -> None:
+    from intentional.adapter.matcher import ServicePlanMatch, service_plan_match
+    from intentional.ha_adapter import service_calls_for_resolved_target, service_plan_signature
+
+    signature = service_plan_signature(
+        service_calls_for_resolved_target("camera.driveway", {"state": "on"})
+    )
+    actual = SimpleNamespace(entity_id="camera.driveway", state=state, attributes={})
+
+    expected = ServicePlanMatch.UNKNOWN if state == "idle" else ServicePlanMatch.MATCH
+    assert service_plan_match(signature, actual) is expected
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [("idle", "unknown"), ("streaming", "mismatch"), ("recording", "mismatch")],
+)
+def test_camera_turn_off_respects_observable_states(state: str, expected: str) -> None:
+    from intentional.adapter.matcher import ServicePlanMatch, service_plan_match
+    from intentional.ha_adapter import service_calls_for_resolved_target, service_plan_signature
+
+    signature = service_plan_signature(
+        service_calls_for_resolved_target("camera.driveway", {"state": "off"})
+    )
+    actual = SimpleNamespace(entity_id="camera.driveway", state=state, attributes={})
+
+    assert service_plan_match(signature, actual) is ServicePlanMatch(expected)
+
+
+@pytest.mark.parametrize(
+    ("state", "current", "target", "expected"),
+    [
+        ("opening", 35, 80, "unknown"),
+        ("opening", 80, 35, "mismatch"),
+        ("closing", 60, 20, "unknown"),
+        ("closing", 20, 60, "mismatch"),
+    ],
+)
+def test_cover_position_matching_respects_movement_direction(
+    state: str, current: int, target: int, expected: str
+) -> None:
+    from intentional.adapter.matcher import ServicePlanMatch, service_plan_match
+    from intentional.ha_adapter import service_calls_for_resolved_target, service_plan_signature
+
+    signature = service_plan_signature(
+        service_calls_for_resolved_target("cover.blind", {"position": target})
+    )
+    actual = SimpleNamespace(
+        entity_id="cover.blind",
+        state=state,
+        attributes={"current_position": current},
+    )
+
+    assert service_plan_match(signature, actual) is ServicePlanMatch(expected)
+
+
+def test_normalized_numeric_tolerance_includes_decimal_boundary() -> None:
+    from intentional.adapter.matcher import ServicePlanMatch, service_plan_match
+    from intentional.ha_adapter import service_calls_for_resolved_target, service_plan_signature
+
+    signature = service_plan_signature(
+        service_calls_for_resolved_target(
+            "media_player.office", {"volume_level": 0.35}
+        )
+    )
+    actual = SimpleNamespace(
+        entity_id="media_player.office",
+        state="on",
+        attributes={"volume_level": 0.36},
+    )
+
+    assert service_plan_match(signature, actual) is ServicePlanMatch.MATCH
+
+
+def test_unavailable_state_with_stale_attributes_is_unknown() -> None:
+    from intentional.adapter.matcher import (
+        ServicePlanMatch,
+        service_plan_match,
+        service_plan_mismatched_fields,
+    )
+    from intentional.ha_adapter import service_calls_for_resolved_target, service_plan_signature
+
+    signature = service_plan_signature(
+        service_calls_for_resolved_target(
+            "light.office", {"state": "on", "brightness_pct": 80}
+        )
+    )
+    actual = SimpleNamespace(
+        entity_id="light.office",
+        state="unavailable",
+        attributes={"brightness": 0},
+    )
+
+    assert service_plan_match(signature, actual) is ServicePlanMatch.UNKNOWN
+    assert service_plan_mismatched_fields(signature, actual) == frozenset()
+
+
+@pytest.mark.parametrize(
+    ("actual", "expected"),
+    [(21.0, "mismatch"), (20.1, "match"), (float("inf"), "mismatch")],
+)
+def test_temperature_tolerance_and_non_finite_values(actual: float, expected: str) -> None:
+    from intentional.adapter.matcher import ServicePlanMatch, service_plan_match
+    from intentional.ha_adapter import service_calls_for_resolved_target, service_plan_signature
+
+    signature = service_plan_signature(
+        service_calls_for_resolved_target("climate.office", {"temperature": 20.0})
+    )
+    state = SimpleNamespace(
+        entity_id="climate.office",
+        state="heat",
+        attributes={"temperature": actual},
+    )
+
+    assert service_plan_match(signature, state) is ServicePlanMatch(expected)
 
 
 def test_state_drift_does_not_emit_manual_override_for_unmanaged_target() -> None:
@@ -1990,7 +2245,6 @@ def test_climate_resolved_value_maps_to_multiple_services() -> None:
             "humidity": 45,
             "swing_mode": "vertical",
             "swing_horizontal_mode": "wide",
-            "aux_heat": True,
         },
     ) == (
         (
@@ -2030,11 +2284,6 @@ def test_climate_resolved_value_maps_to_multiple_services() -> None:
                 "entity_id": "climate.living_room",
                 "swing_horizontal_mode": "wide",
             },
-        ),
-        (
-            "climate",
-            "set_aux_heat",
-            {"entity_id": "climate.living_room", "aux_heat": True},
         ),
     )
 
@@ -3563,7 +3812,7 @@ async def test_apply_resolved_targets_suppresses_duplicate_calls() -> None:
             "light",
             "turn_on",
             {"entity_id": "light.desk", "brightness_pct": 60},
-            False,
+            True,
         )
     ]
     assert len(services.contexts) == 1
@@ -3691,12 +3940,12 @@ async def test_apply_resolved_targets_reuses_context_for_service_plan() -> None:
     )
 
     assert services.calls == [
-        ("media_player", "turn_on", {"entity_id": "media_player.kitchen"}, False),
+        ("media_player", "turn_on", {"entity_id": "media_player.kitchen"}, True),
         (
             "media_player",
             "volume_set",
             {"entity_id": "media_player.kitchen", "volume_level": 0.35},
-            False,
+            True,
         ),
     ]
     assert len(services.contexts) == 2
@@ -3782,13 +4031,13 @@ async def test_apply_resolved_targets_retries_ignored_activation_after_grace(
             "light",
             "turn_on",
             {"entity_id": "light.desk", "brightness_pct": 60},
-            False,
+            True,
         ),
         (
             "light",
             "turn_on",
             {"entity_id": "light.desk", "brightness_pct": 60},
-            False,
+            True,
         ),
     ]
 
@@ -3909,7 +4158,7 @@ async def test_expired_linger_restores_as_pending_withdraw_after_restart() -> No
             "light",
             "turn_off",
             {"entity_id": "light.desk", "transition": 6.0},
-            False,
+            True,
         ),
     ]
 
@@ -3990,7 +4239,7 @@ async def test_apply_resolved_targets_allows_empty_action_payloads() -> None:
             "input_button",
             "press",
             {"entity_id": "input_button.mark_arrival"},
-            False,
+            True,
         )
     ]
 
@@ -4036,13 +4285,13 @@ async def test_apply_resolved_targets_uses_assert_and_withdraw_transitions() -> 
             "light",
             "turn_on",
             {"entity_id": "light.desk", "brightness_pct": 40, "transition": 2.0},
-            False,
+            True,
         ),
         (
             "light",
             "turn_off",
             {"entity_id": "light.desk", "transition": 6.0},
-            False,
+            True,
         ),
     ]
 
@@ -4122,7 +4371,7 @@ async def test_apply_resolved_targets_does_not_send_change_during_assert_transit
             "light",
             "turn_on",
             {"entity_id": "light.leuchte_sessel_light", "brightness_pct": 100, "transition": 5.0},
-            False,
+            True,
         )
     ]
 
@@ -4166,13 +4415,13 @@ async def test_apply_resolved_targets_withdraws_brightness_only_light_activation
             "light",
             "turn_on",
             {"entity_id": "light.desk", "brightness_pct": 40},
-            False,
+            True,
         ),
         (
             "light",
             "turn_off",
             {"entity_id": "light.desk", "transition": 6.0},
-            False,
+            True,
         ),
     ]
 
@@ -4250,13 +4499,13 @@ async def test_apply_resolved_targets_retries_withdraw_until_state_matches(
             "light",
             "turn_on",
             {"entity_id": "light.desk", "brightness_pct": 40, "transition": 2.0},
-            False,
+            True,
         ),
         (
             "light",
             "turn_off",
             {"entity_id": "light.desk", "transition": 6.0},
-            False,
+            True,
         ),
     ]
     assert "light.desk" in last_resolved
@@ -4274,7 +4523,7 @@ async def test_apply_resolved_targets_retries_withdraw_until_state_matches(
         "light",
         "turn_off",
         {"entity_id": "light.desk", "transition": 6.0},
-        False,
+        True,
     )
     assert len([call for call in services.calls if call[1] == "turn_off"]) == 2
 
@@ -4455,19 +4704,19 @@ async def test_apply_resolved_targets_reasserts_when_rule_reactivates_during_pen
             "light",
             "turn_on",
             {"entity_id": "light.desk", "brightness_pct": 40, "transition": 2.0},
-            False,
+            True,
         ),
         (
             "light",
             "turn_off",
             {"entity_id": "light.desk", "transition": 6.0},
-            False,
+            True,
         ),
         (
             "light",
             "turn_on",
             {"entity_id": "light.desk", "brightness_pct": 40, "transition": 4.0},
-            False,
+            True,
         ),
     ]
 
@@ -4526,13 +4775,13 @@ async def test_apply_resolved_targets_withdraw_reconciles_to_revealed_intent() -
             "light",
             "turn_on",
             {"entity_id": "light.desk", "brightness_pct": 40, "transition": 2.0},
-            False,
+            True,
         ),
         (
             "light",
             "turn_on",
             {"entity_id": "light.desk", "brightness_pct": 10, "transition": 6.0},
-            False,
+            True,
         ),
     ]
 
@@ -4590,12 +4839,12 @@ async def test_apply_resolved_targets_uses_assert_when_stronger_intent_replaces_
             "light",
             "turn_on",
             {"entity_id": "light.desk", "brightness_pct": 10},
-            False,
+            True,
         ),
         (
             "light",
             "turn_on",
             {"entity_id": "light.desk", "brightness_pct": 40, "transition": 2.0},
-            False,
+            True,
         ),
     ]

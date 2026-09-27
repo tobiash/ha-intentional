@@ -101,6 +101,8 @@ DRIFT_OVERRIDE_TTL_SECONDS = 300
 DRIFT_CONFIRMATION_MS = 1_500
 SERVICE_FAILURE_BACKOFF_MS = 30_000
 STABLE_STAGE_INTERVAL_MS = 1_000
+SERVICE_TIMEOUT_SECONDS = 30
+SHUTDOWN_TIMEOUT_SECONDS = 5
 
 
 class _HAAdapter:
@@ -117,7 +119,8 @@ class _HAAdapter:
     async def async_call(
         self, domain: str, service: str, data: dict[str, Any], *, context: Any
     ) -> None:
-        await self._hass.services.async_call(domain, service, data, blocking=False, context=context)
+        async with asyncio.timeout(SERVICE_TIMEOUT_SECONDS):
+            await self._hass.services.async_call(domain, service, data, blocking=True, context=context)
 
     def new_context(self) -> Any:
         return new_intentional_context(self._context_tracker)
@@ -130,6 +133,7 @@ def _apply_reconciliation_events(
     *,
     now_ms: int,
     rate_limiter: DiagnosticRateLimiter | None = None,
+    reconciler: Reconciliation | None = None,
 ) -> None:
     """Apply reconciliation events (overrides) and record diagnostics."""
     for event in events:
@@ -142,12 +146,16 @@ def _apply_reconciliation_events(
                 rate_limiter=rate_limiter,
             )
         elif event.kind == "drift_promoted":
+            if reconciler is not None and not reconciler.validate_promotion(event):
+                continue
             engine.emit_user_intent(
                 target=event.details["target"],
                 set=event.details["set"],
                 ttl_ms=event.details["ttl_ms"],
                 reason=event.details["reason"],
             )
+            if reconciler is not None and not reconciler.commit_promotion(event, now_ms):
+                raise RuntimeError("Drift promotion changed during locked commit")
             record_diagnostic(
                 hass,
                 "drift_promoted",
@@ -243,7 +251,6 @@ FIRE_SERVICE_SCHEMA = vol.Schema(
         vol.Optional("humidity"): vol.All(int, vol.Range(min=0, max=100)),
         vol.Optional("swing_mode"): cv.string,
         vol.Optional("swing_horizontal_mode"): cv.string,
-        vol.Optional("aux_heat"): cv.boolean,
         vol.Optional("mode"): cv.string,
         vol.Optional("operation_mode"): cv.string,
         vol.Optional("away_mode"): cv.boolean,
@@ -345,6 +352,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     ):
         raise ConfigEntryError("Intentional supports only one config entry")
 
+    try:
+        return await _async_setup_entry(hass, entry)
+    except (Exception, asyncio.CancelledError):
+        runtime = domain_data.get(runtime_key(entry.entry_id))
+        if isinstance(runtime, TickRuntime):
+            runtime.unloading = True
+            runtime.stop_event.set()
+            if runtime.registry_task is not None:
+                runtime.registry_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await runtime.registry_task
+        try:
+            async with asyncio.timeout(SHUTDOWN_TIMEOUT_SECONDS):
+                await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+        except Exception:
+            _LOGGER.exception("Could not unload platforms after failed setup")
+        writer = domain_data.get(lifecycle_writer_key(entry.entry_id))
+        if isinstance(writer, LifecycleWriter):
+            await writer.async_close()
+        _remove_entry_data(hass, entry)
+        raise
+
+
+async def _async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Acquire entry resources before starting the long-lived workers."""
+    domain_data = hass.data[DOMAIN]
+
     rule_dir = entry.data.get(CONF_RULE_DIR, DEFAULT_RULE_DIR)
 
     entity_registry = er.async_get(hass)
@@ -375,13 +409,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # On first install, /config/intentional/rules doesn't exist yet —
     # we'd rather create it and start with zero rules than log an error
     # every restart.
-    rule_path = Path(rule_dir)
-    if not rule_path.exists():
-        try:
-            rule_path.mkdir(parents=True, exist_ok=True)
-            _LOGGER.info("Created rule directory %s", rule_dir)
-        except OSError as err:
-            _LOGGER.warning("Could not create rule directory %s: %s", rule_dir, err)
+    def ensure_rule_directory() -> None:
+        Path(rule_dir).mkdir(parents=True, exist_ok=True)
+
+    try:
+        await hass.async_add_executor_job(ensure_rule_directory)
+    except OSError as err:
+        _LOGGER.warning("Could not create rule directory %s: %s", rule_dir, err)
 
     # Initial rule load. Storage is the source of truth; existing YAML files are
     # imported once when the storage document does not exist yet.
@@ -489,9 +523,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     publication.publish_if_changed()
     _LOGGER.info("Loaded %d stored rule(s)", len(initial_rules))
 
-    # Set up platforms (sensors)
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
     # Set up tick loop — runs every 100ms, drives animations + TTL expiry
     tick_interval_ms = 100
     # Runtime owns tick-local state such as scene activations, rule activity,
@@ -512,6 +543,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if rule.linger_ms or rule.dynamic_hold_after is not None
         },
         now_ms=engine.now_ms(),
+        reconciliation_now_ms=_monotonic_ms(),
     )
     selector_planner.configure(initial_rules, referenced_entities(initial_rules))
     selector_planner.update_owned(
@@ -519,11 +551,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     _sync_state_into_engine(hass, engine, entity_ids=set(selector_planner.relevant))
     engine.evaluate_all()
+    startup_events = _reconciler.classify_restored_states(
+        engine,
+        _ha_adapter,
+        _intentional_contexts,
+        _monotonic_ms(),
+    )
+    if startup_events:
+        _apply_reconciliation_events(
+            hass,
+            engine,
+            startup_events,
+            now_ms=_monotonic_ms(),
+            rate_limiter=_diagnostic_rate_limiter,
+            reconciler=_reconciler,
+        )
     if alerting.available:
         await alerting.async_observe(
             engine.alert_observations(), now_ms=engine.now_ms()
         )
-    alerting_deadline_driver.start()
 
     async def _handle_mobile_alert_action(event: Any) -> None:
         action = event.data.get("action") if isinstance(event.data, dict) else None
@@ -552,17 +598,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     _runtime = TickRuntime(tick_interval_ms=tick_interval_ms)
     hass.data[DOMAIN][runtime_key(entry.entry_id)] = _runtime
-    # Event used to signal the tick loop to stop. We use an event rather
-    # than ``while True:`` + ``task.cancel()`` because cancellation only
-    # takes effect at the next ``await``; if a slow tick operation is in
-    # progress, cancellation can be delayed indefinitely and
-    # ``hass.async_block_till_done()`` would hang waiting for it. An
-    # event lets the loop exit cleanly on the next tick.
+    # Prefer graceful shutdown; unload cancels a stalled worker after a
+    # bounded grace period, keeping unfinished durable obligations retryable.
     stop_event = _runtime.stop_event
 
     def _lifecycle_snapshot() -> dict[str, Any]:
         snapshot = engine.export_lifecycle_records()
-        snapshot["reconciliation"] = _reconciler.export_runtime_state(engine)
+        snapshot["reconciliation"] = _reconciler.export_runtime_state(
+            engine, now_ms=_monotonic_ms()
+        )
         return snapshot
 
     lifecycle_writer = LifecycleWriter(
@@ -700,28 +744,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _runtime.tick_idle.set()
                         continue
                 alerting_started_ms = _monotonic_ms()
-                if alerting.available and _runtime.stage_due(
-                    "alert_observation",
-                    now_ms=alerting_started_ms,
-                    interval_ms=STABLE_STAGE_INTERVAL_MS,
-                    force=bool(pulse_drain),
-                ):
-                    await alerting.async_observe(alert_observations, now_ms=engine.now_ms())
-                    alerting_deadline_driver.wake()
-                _runtime.record_timing(
-                    "alerting", _monotonic_ms() - alerting_started_ms
-                )
-                # Effect activation is not dispatchable until its outbox
-                # snapshot has crossed the lifecycle storage boundary.
-                persistence_started_ms = _monotonic_ms()
-                await lifecycle_writer.async_flush()
-                _runtime.record_timing(
-                    "persistence", _monotonic_ms() - persistence_started_ms
-                )
-                if lifecycle_writer.current_error is not None:
-                    _runtime.tick_idle.set()
-                    continue
                 try:
+                    if alerting.available and _runtime.stage_due(
+                        "alert_observation",
+                        now_ms=alerting_started_ms,
+                        interval_ms=STABLE_STAGE_INTERVAL_MS,
+                        force=bool(pulse_drain),
+                    ):
+                        async with asyncio.timeout(SERVICE_TIMEOUT_SECONDS):
+                            await alerting.async_observe(alert_observations, now_ms=engine.now_ms())
+                        alerting_deadline_driver.wake()
+                    _runtime.record_timing(
+                        "alerting", _monotonic_ms() - alerting_started_ms
+                    )
+                    # Effect activation must cross the durable storage boundary.
+                    persistence_started_ms = _monotonic_ms()
+                    await lifecycle_writer.async_flush()
+                    _runtime.record_timing(
+                        "persistence", _monotonic_ms() - persistence_started_ms
+                    )
+                    if lifecycle_writer.current_error is not None:
+                        _runtime.tick_idle.set()
+                        continue
                     reconciliation_started_ms = _monotonic_ms()
                     events = await _reconciler.tick(
                         engine,
@@ -750,6 +794,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             events,
                             now_ms=now_ms,
                             rate_limiter=_diagnostic_rate_limiter,
+                            reconciler=_reconciler,
                         )
                         # Activate any newly-firing scene rules
                         previous_scenes = set(_runtime.active_scenes)
@@ -837,11 +882,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.exception("Could not save final Intentional lifecycle state")
                 record_diagnostic(hass, "lifecycle_save_failed", error=str(err))
 
-    if hasattr(hass, "async_create_background_task"):
-        _runtime.tick_task = hass.async_create_background_task(_tick_loop(), name=f"{DOMAIN}_tick")
-    else:
-        _runtime.tick_task = hass.async_create_task(_tick_loop(), name=f"{DOMAIN}_tick")
-
     # Set up services
     await _register_services(
         hass,
@@ -924,6 +964,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     ):
         entry.async_on_unload(hass.bus.async_listen(registry_event, _registry_changed))
 
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    # Catch changes during awaited setup before any worker can dispatch.
+    _sync_state_into_engine(hass, engine, entity_ids=set(selector_planner.relevant))
+    engine.evaluate_all()
+    alerting_deadline_driver.start(entry)
+    _runtime.tick_task = entry.async_create_background_task(
+        hass, _tick_loop(), name=f"{DOMAIN}_tick"
+    )
     return True
 
 
@@ -937,12 +985,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     alerting_deadline_driver = hass.data[DOMAIN].get(
         alerting_deadline_driver_key(entry.entry_id)
     )
-    async with runtime.mutation_lock:
-        runtime.unloading = True
-        runtime.advance_revision()
-        if isinstance(publication, EntityPublication):
-            publication.pause()
-    await runtime.tick_idle.wait()
+    # These synchronous changes are atomic on HA's event loop. Do not wait
+    # for a mutation lock which a stalled persistence operation may hold.
+    runtime.unloading = True
+    runtime.advance_revision()
+    if isinstance(publication, EntityPublication):
+        publication.pause()
+    try:
+        await asyncio.wait_for(runtime.tick_idle.wait(), timeout=SHUTDOWN_TIMEOUT_SECONDS)
+    except TimeoutError:
+        _LOGGER.warning("Tick did not become idle before unload; cancelling after platform teardown")
     if runtime.registry_task is not None:
         runtime.registry_pending = False
         runtime.registry_task.cancel()
@@ -951,18 +1003,18 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if not unload_ok:
-        async with runtime.mutation_lock:
-            runtime.unloading = False
-            if isinstance(publication, EntityPublication):
-                publication.resume()
+        runtime.unloading = False
+        if isinstance(publication, EntityPublication):
+            publication.resume()
         return False
 
-    async with runtime.mutation_lock:
-        runtime.stop_event.set()
-        runtime.advance_revision()
+    runtime.stop_event.set()
+    runtime.advance_revision()
     if runtime.tick_task is not None:
         try:
-            await runtime.tick_task
+            await asyncio.wait_for(runtime.tick_task, timeout=SHUTDOWN_TIMEOUT_SECONDS)
+        except TimeoutError:
+            _LOGGER.warning("Cancelled stalled Intentional tick during unload")
         except asyncio.CancelledError:
             current_task = asyncio.current_task()
             if current_task is not None and current_task.cancelling():
@@ -974,6 +1026,18 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             record_diagnostic(hass, "tick_task_failed", error=str(err))
     if isinstance(alerting_deadline_driver, AlertDeadlineDriver):
         await alerting_deadline_driver.async_stop()
+    writer = hass.data[DOMAIN].get(lifecycle_writer_key(entry.entry_id))
+    if isinstance(writer, LifecycleWriter):
+        await writer.async_close()
+    _remove_entry_data(hass, entry)
+    return True
+
+
+@callback
+def _remove_entry_data(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Release single-entry service closures and entry-scoped state."""
+    for service in (SERVICE_FIRE, SERVICE_CLEAR, SERVICE_ACTIVATE_SCENE, SERVICE_RELOAD):
+        hass.services.async_remove(DOMAIN, service)
     hass.data[DOMAIN].pop(entry.entry_id, None)
     hass.data[DOMAIN].pop(rule_store_key(entry.entry_id), None)
     hass.data[DOMAIN].pop(runtime_key(entry.entry_id), None)
@@ -986,7 +1050,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN].pop(alerting_dispatcher_key(entry.entry_id), None)
     hass.data[DOMAIN].pop(alerting_deadline_driver_key(entry.entry_id), None)
     hass.data[DOMAIN].pop(alerting_policy_repository_key(entry.entry_id), None)
-    return True
 
 
 async def _register_frontend_panel(hass: HomeAssistant) -> None:
@@ -1159,17 +1222,27 @@ def _on_ha_state_change_factory(
         async with lock:
             if runtime is not None and runtime.unloading:
                 return
+            membership_change = None
             if selector_planner is not None and entity_id is not None:
+                membership_change = selector_planner.state_changed(
+                    entity_id,
+                    exists=new_state is not None,
+                    device_class_changed=old_device_class != new_device_class,
+                )
                 _apply_membership_change(
                     hass,
                     engine,
-                    selector_planner.state_changed(
-                        entity_id,
-                        exists=new_state is not None,
-                        device_class_changed=old_device_class != new_device_class,
-                    ),
+                    membership_change,
                 )
             if selector_planner is not None and entity_id not in selector_planner.relevant:
+                if membership_change is not None and membership_change.removed:
+                    sync_time_context_into_engine(engine, dt_util.now())
+                    engine.evaluate_all()
+                    reconciler.drop_inactive_applied(set(engine.list_active_targets()))
+                    if runtime is not None:
+                        runtime.advance_revision()
+                    if lifecycle_writer is not None:
+                        lifecycle_writer.mutated()
                 return
             if new_state is None:
                 if old_state is not None:
@@ -1197,6 +1270,7 @@ def _on_ha_state_change_factory(
                     events,
                     now_ms=now_ms,
                     rate_limiter=diagnostic_rate_limiter,
+                    reconciler=reconciler,
                 )
             # Re-evaluate immediately for snappy response
             sync_time_context_into_engine(engine, dt_util.now())
@@ -1328,16 +1402,15 @@ async def _dispatch_effect_outbox(
         try:
             if before_dispatch is not None:
                 await before_dispatch()
-            await hass.services.async_call(
-                effect.domain,
-                effect.service,
-                service_data,
-                # Successful return is our acceptance boundary. HA may have
-                # completed the handler or accepted delegated work; either is
-                # sufficient for acknowledgement, but not exactly-once proof.
-                blocking=True,
-                context=context,
-            )
+            async with asyncio.timeout(SERVICE_TIMEOUT_SECONDS):
+                await hass.services.async_call(
+                    effect.domain,
+                    effect.service,
+                    service_data,
+                    # Successful handler return is the acceptance boundary.
+                    blocking=True,
+                    context=context,
+                )
             async with lock:
                 engine.acknowledge_effect(effect.activation_id, effect.effect_index)
                 if lifecycle_writer is not None:
@@ -1421,6 +1494,10 @@ async def _register_services(
 ) -> None:
     """Register the fire and reload services."""
 
+    def require_loaded() -> None:
+        if runtime.unloading:
+            raise HomeAssistantError("Intentional is unloading")
+
     async def _fire_service(call: ServiceCall) -> None:
         """Handle the `intentional.fire` service call.
 
@@ -1434,6 +1511,7 @@ async def _register_services(
         ttl_ms = ttl_seconds * 1000
 
         async with runtime.mutation_lock:
+            require_loaded()
             _apply_membership_change(
                 hass,
                 engine,
@@ -1465,6 +1543,7 @@ async def _register_services(
         ttl_override = call.data.get("ttl", 0)
 
         async with runtime.mutation_lock:
+            require_loaded()
             intent = engine.activate_scene_rule(
                 rule_id, ttl_ms=ttl_override * 1000 if ttl_override else None
             )
@@ -1486,6 +1565,7 @@ async def _register_services(
         """Handle the `intentional.clear` service call."""
         target = call.data.get(ATTR_TARGET)
         async with runtime.mutation_lock:
+            require_loaded()
             removed = engine.clear_user_intents(target=target)
             engine.evaluate_all()
             runtime.advance_revision()
@@ -1503,6 +1583,7 @@ async def _register_services(
         Re-reads stored rules. Same effect as saving through the YAML editor
         or HTTP API.
         """
+        require_loaded()
         await mutation_coordinator.async_reload()
 
     hass.services.async_register(DOMAIN, SERVICE_FIRE, _fire_service, schema=FIRE_SERVICE_SCHEMA)

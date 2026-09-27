@@ -235,7 +235,6 @@ def _representative_manual_set_payload() -> dict[str, object]:
         "humidity": 55,
         "swing_mode": "vertical",
         "swing_horizontal_mode": "wide",
-        "aux_heat": True,
         "mode": "sleep",
         "operation_mode": "eco",
         "away_mode": True,

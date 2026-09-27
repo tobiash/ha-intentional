@@ -128,6 +128,16 @@ def document_policy_findings(rules: list[Any]) -> dict[str, list[dict[str, Any]]
         for rule in target_rules:
             authored_id = _authored_id(rule)
             set_values = getattr(rule, "set", {}) or {}
+            if domain == "climate" and any(
+                "aux_heat" in (getattr(rule, operation, {}) or {})
+                for operation in ("set", "cap", "floor", "offset", "multiply")
+            ):
+                errors.append({
+                    "code": "removed_climate_aux_heat",
+                    "rule_id": authored_id,
+                    "target": target,
+                    "message": "Home Assistant removed aux_heat; use a device-supported preset_mode instead.",
+                })
             color_fields = sorted(set(set_values) & LIGHT_COLOR_FIELDS)
             if domain == "light" and len(color_fields) > 1:
                 warnings.append(_warning(
