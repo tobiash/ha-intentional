@@ -725,6 +725,8 @@ async def test_semantic_selector_prefers_entity_area_and_filters_device(
         suggested_object_id="device_motion",
         device_id=device.id,
         original_device_class="motion",
+        original_name="Motion",
+        has_entity_name=True,
     )
     entity_registry.async_update_entity(entity.entity_id, area_id=entity_area.id)
     hass.states.async_set(entity.entity_id, "on")

@@ -6,8 +6,8 @@ from collections import OrderedDict
 from typing import Any
 
 from homeassistant.auth.permissions.const import POLICY_CONTROL
-from homeassistant.core import ServiceCall, callback
-from homeassistant.helpers.service import async_extract_referenced_entity_ids
+from homeassistant.core import callback
+from homeassistant.helpers.target import TargetSelection, async_extract_referenced_entity_ids
 
 from ._engine.ha_adapter import manual_set_from_service_data
 
@@ -34,8 +34,7 @@ class ManualCommands:
         if domain not in {"light", "homeassistant"} or service not in {"turn_on", "turn_off", "toggle"}:
             return
         data = dict(event.data.get("service_data", {}))
-        call = ServiceCall(self.hass, domain, service, data, context)
-        selected = async_extract_referenced_entity_ids(self.hass, call, expand_group=False)
+        selected = async_extract_referenced_entity_ids(self.hass, TargetSelection(data), expand_group=False)
         roots = selected.referenced | selected.indirectly_referenced
         if data.get("entity_id") == "all":
             roots = set(self.hass.states.async_entity_ids("light"))

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1] - 2026-11-09
+
+### Fixed
+- Use Home Assistant's current target-selection helper; the removed service-module compatibility export prevented 0.13.0 from starting on newer Home Assistant versions.
+- Add a regression for the removed helper and extend CI to Home Assistant 2026.10.4. Validate imports against 2026.11.0 as well.
+
 ## [0.13.0] - 2026-11-09
 
 ### Added

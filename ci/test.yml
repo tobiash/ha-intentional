@@ -68,6 +68,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - ha-version: "2026.10.4"
+            harness-version: "0.13.375"
           - ha-version: "2026.9.4"
             harness-version: "0.13.367"
           - ha-version: "2026.6.0"

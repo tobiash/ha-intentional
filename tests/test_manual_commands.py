@@ -17,6 +17,17 @@ from custom_components.intentional.manual_commands import ManualCommands
 from custom_components.intentional.runtime_context import IntentionalContextTracker
 
 
+def test_command_capture_imports_without_removed_service_helper(monkeypatch):
+    import importlib
+
+    from homeassistant.helpers import service
+
+    from custom_components.intentional import manual_commands
+
+    monkeypatch.delattr(service, "async_extract_referenced_entity_ids", raising=False)
+    importlib.reload(manual_commands)
+
+
 @pytest.mark.asyncio
 async def test_group_toggle_captures_off_and_fences_dispatch_while_lock_is_busy(hass, hass_admin_user):
     engine = Engine(clock_fn=lambda: 1000)
