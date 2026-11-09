@@ -897,6 +897,27 @@ async def test_on_state_delta_ignores_small_brightness_pct_quantization_echo() -
 
 
 @pytest.mark.asyncio
+async def test_null_brightness_does_not_hide_confirmed_power_off_drift() -> None:
+    engine = _make_engine_with_light_rule(brightness_pct=80)
+    adapter = _FakeAdapter()
+    reconciler = Reconciliation(
+        drift_override_ttl_ms=300_000,
+        drift_confirmation_ms=1_500,
+        service_failure_backoff_ms=30_000,
+    )
+    await reconciler.apply(engine, adapter, now_ms=1_000)
+    adapter.set_state("light.desk", "on", attributes={"brightness": 204})
+    reconciler.on_state_delta(engine, adapter.get_state("light.desk"), _NoContextTracker(), 4_000)
+    adapter.set_state("light.desk", "off", attributes={"brightness": None})
+    events = reconciler.on_state_delta(engine, adapter.get_state("light.desk"), _NoContextTracker(), 10_000)
+    assert _events_of(events, "drift_promoted") == []
+    events = await reconciler.tick(engine, adapter, _NoContextTracker(), now_ms=12_000)
+    promoted = _events_of(events, "drift_promoted")
+    assert len(promoted) == 1
+    assert promoted[0].details["set"] == {"state": "off"}
+
+
+@pytest.mark.asyncio
 async def test_on_state_delta_promotes_brightness_pct_drift_beyond_tolerance() -> None:
     """A stable brightness change larger than device quantization is manual drift."""
     engine = _make_engine_with_light_rule(brightness_pct=80)

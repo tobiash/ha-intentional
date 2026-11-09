@@ -361,7 +361,7 @@ def _state_field_value(state: Any, field: str) -> Any:
     for attribute in HA_SERVICE_FIELD_STATE_ATTRIBUTES.get(field, ()):
         if attribute in attributes:
             actual = attributes[attribute]
-            if field == "brightness_pct":
+            if field == "brightness_pct" and actual is not None:
                 return round(float(actual) * 100 / 255)
             return actual
     if field == "hvac_mode":
