@@ -193,6 +193,9 @@ def target_projection(
             if manual is None
             else {
                 "expires_at_ms": manual.expires_at_ms(),
+                "resume": manual.manual_resume or ("timed" if manual.ttl_ms is not None else "until_resumed"),
+                "vacancy_entity": manual.vacancy_entity,
+                "vacancy_for_ms": manual.vacancy_for_ms if manual.vacancy_entity else None,
                 "remaining_ms": None
                 if manual.expires_at_ms() is None
                 else max(0, manual.expires_at_ms() - now_ms),

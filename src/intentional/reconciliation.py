@@ -699,6 +699,9 @@ class Reconciliation:
 
         self._last_applied: dict[str, ServicePlanSignature] = {}
         self._observed_satisfied: dict[str, ServicePlanSignature] = {}
+        self._observed_power_satisfied: dict[str, ServicePlanSignature] = {}
+        self._manual_command_grace_until: dict[str, int] = {}
+        self._manual_command_contexts: OrderedDict[str, None] = OrderedDict()
         self._last_resolved: dict[str, ResolvedTargetState] = {}
         self._drift_suppressed_until: dict[str, int] = {}
         self._drift_candidates: dict[str, Any] = {}
@@ -826,6 +829,27 @@ class Reconciliation:
 
     # ----- drift classification (shared by on_state_delta and tick) -----
 
+    def manual_command_received(self, target: str, now_ms: int, context_id: str | None = None) -> None:
+        """Retire pending telemetry evidence and fence late transition feedback."""
+        self._manual_command_grace_until[target] = max(
+            now_ms + self._drift_transition_grace_ms,
+            self._drift_suppressed_until.pop(target, 0),
+        )
+        self._clear_drift_candidate(target)
+        self._last_applied.pop(target, None)
+        self._observed_satisfied.pop(target, None)
+        self._observed_power_satisfied.pop(target, None)
+        self._service_plan_progress.pop(target, None)
+        if context_id:
+            self._manual_command_contexts[context_id] = None
+            while len(self._manual_command_contexts) > 1024:
+                self._manual_command_contexts.popitem(last=False)
+
+    def manual_override_ttl_ms(self, engine: Any, target: str) -> int:
+        """Use the same lifetime fallback for commands and detected drift."""
+        return _detected_override_ttl_ms(engine, target, self._drift_override_ttl_ms)
+
+
     def _classify_drift(
         self,
         engine: Any,
@@ -839,6 +863,7 @@ class Reconciliation:
         entity_id = state.entity_id
         if _state_is_unavailable(state):
             self._unavailable_targets.add(entity_id)
+            self._observed_power_satisfied.pop(entity_id, None)
             self._clear_drift_candidate(entity_id)
             return []
         if entity_id in self._unavailable_targets:
@@ -849,10 +874,27 @@ class Reconciliation:
             )
         owned_context = context_tracker.owns_state(state)
         context = getattr(state, "context", None)
-        explicit_user = (
-            allow_explicit_user and getattr(context, "user_id", None) is not None
+        captured_command = any(
+            getattr(context, key, None) in self._manual_command_contexts
+            for key in ("id", "parent_id")
         )
+        explicit_user = (
+            allow_explicit_user and not captured_command and getattr(context, "user_id", None) is not None
+        )
+        command_grace = self._manual_command_grace_until.get(entity_id, 0)
+        if now_ms < command_grace and not explicit_user:
+            self._clear_drift_candidate(entity_id)
+            return []
+        if command_grace:
+            self._manual_command_grace_until.pop(entity_id, None)
         applied_plan = self._last_applied.get(entity_id)
+        if (
+            applied_plan is not None
+            and entity_id.startswith("light.")
+            and str(state.state) == "on"
+            and "state" not in service_plan_mismatched_fields(applied_plan, state)
+        ):
+            self._observed_power_satisfied[entity_id] = applied_plan
         if (
             applied_plan is not None
             and service_plan_match(applied_plan, state) is ServicePlanMatch.MATCH
@@ -861,6 +903,9 @@ class Reconciliation:
         if owned_context:
             self._clear_drift_candidate(entity_id)
             return [ReconciliationEvent("context_ignored", entity_id, {"state": state})]
+        if captured_command:
+            self._clear_drift_candidate(entity_id)
+            return []
         recovery_until = self._availability_recovery_until.get(entity_id)
         if recovery_until is not None:
             if explicit_user:
@@ -902,6 +947,10 @@ class Reconciliation:
             if applied_plan is None
             else service_plan_mismatched_fields(applied_plan, state)
         )
+        detection = getattr(policy, "manual_detection", "all")
+        if not explicit_user and (detection == "ignore" or (detection == "power" and "state" not in contested_fields)):
+            self._clear_drift_candidate(entity_id)
+            return []
         if (
             explicit_user
             and entity_id.startswith("light.")
@@ -947,6 +996,12 @@ class Reconciliation:
                 or (
                     applied_plan is not None
                     and self._observed_satisfied.get(entity_id) == applied_plan
+                )
+                or (
+                    applied_plan is not None
+                    and entity_id.startswith("light.")
+                    and str(state.state) == "off"
+                    and self._observed_power_satisfied.get(entity_id) == applied_plan
                 )
             ),
         )

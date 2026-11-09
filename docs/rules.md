@@ -543,7 +543,61 @@ intent:
 Supported metadata:
 
 - `ttl`: expire the intent after a duration.
-- `manual_override_ttl`: keep automatically detected user Drift in control for this duration. When several Rules contribute to the Target, the longest configured duration wins; omitted values use five minutes.
+- `manual_override_ttl`: fallback duration for detected Drift and captured HA light commands. When several Rules contribute to the Target, the longest configured duration wins; omitted values use five minutes. A Target's explicit manual policy takes precedence.
+
+### Manual control and resuming automation
+
+Ordinary HA light `turn_on`, `turn_off`, and `toggle` commands with a direct user
+context are captured for managed Targets, including members of light groups.
+The requested fields become a user-authority Intent without waiting for device
+feedback. Known Intentional contexts and parented automation/script calls are
+excluded. Physical changes without attribution still use confirmed Drift;
+turning a light off does not require its previous brightness/color to have
+converged first.
+
+Configure a Target's manual policy in a document containing `targets` and `rules`:
+
+```yaml
+targets:
+  light.living_room_lamp:
+    manual_override:
+      resume: until_vacant
+      vacancy_entity: binary_sensor.living_room_presence
+      vacancy_for: 30s
+      unattributed: power
+rules:
+  - id: living-room-presence
+    while:
+      binary_sensor.living_room_presence: on
+    intent:
+      light.living_room_lamp:
+        state: on
+```
+
+- `resume: timed` (compatible default): expire after `duration: 15m`, or use
+  the contributing Rules' `manual_override_ttl` fallback.
+- `resume: until_vacant`: require the configured binary sensor to remain `off`
+  for `vacancy_for` (default 30 seconds). Unknown/unavailable resets confirmation.
+  **Manual off also waits for underlying on/brightness demand to end**, so an
+  evening schedule or retained presence Intent cannot immediately relight it.
+  A stuck occupied sensor keeps the override in place.
+- `resume: until_resumed`: no automatic expiration.
+
+The captured policy survives restart and rule reload. Vacancy confirmation
+restarts after restart: downtime is not evidence of vacancy. Policy edits affect
+new overrides. Use `intentional.clear` or **Resume rule control now** in the
+Target explanation to release an override immediately.
+
+`unattributed` controls which unexplained state differences may become overrides:
+`all` preserves existing behavior; `power` accepts power-state differences but
+not brightness/color telemetry; `ignore` requires explicit commands. Choose
+`power` for lights with noisy reporting. Physical dimmers without user attribution
+need `all` or an explicit `intentional.fire` call. These options affect manual
+detection, not device reconciliation tolerances.
+
+`intentional.fire` also accepts `resume` to override the configured mode for one
+request; `until_vacant` still requires a configured vacancy sensor. Its `ttl` is
+used for timed requests. Normal light tiles need no special configuration.
 - `linger`: keep the intent active for a duration after a level observation turns false.
 - `transition`: HA-native transition duration for simple light changes.
 - `easing`: animation easing value.

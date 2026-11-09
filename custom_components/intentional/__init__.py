@@ -148,7 +148,7 @@ def _apply_reconciliation_events(
         elif event.kind == "drift_promoted":
             if reconciler is not None and not reconciler.validate_promotion(event):
                 continue
-            engine.emit_user_intent(
+            engine.emit_manual_intent(
                 target=event.details["target"],
                 set=event.details["set"],
                 ttl_ms=event.details["ttl_ms"],
@@ -204,6 +204,7 @@ FRONTEND_STATIC_REGISTERED = "frontend_static_registered"
 FIRE_SERVICE_SCHEMA = vol.Schema(
     {
         vol.Required(ATTR_TARGET): cv.entity_id,
+        vol.Optional("resume"): vol.In(["timed", "until_vacant", "until_resumed"]),
         vol.Optional("state"): cv.string,
         vol.Optional("brightness_pct"): vol.All(int, vol.Range(min=0, max=100)),
         vol.Optional("brightness"): vol.All(int, vol.Range(min=0, max=255)),
@@ -545,7 +546,7 @@ async def _async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         now_ms=engine.now_ms(),
         reconciliation_now_ms=_monotonic_ms(),
     )
-    selector_planner.configure(initial_rules, referenced_entities(initial_rules))
+    selector_planner.configure(initial_rules, referenced_entities(initial_rules) | engine.manual_observation_entities())
     selector_planner.update_owned(
         set(engine.list_active_targets()) | set(_reconciler.pending_withdraw_targets())
     )
@@ -634,7 +635,7 @@ async def _async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if old_fingerprints.get(rule_id) == fingerprint
             }
             engine.load_rules(new_rules)
-            _apply_membership_change(hass, engine, selector_planner.configure(new_rules, new_referenced))
+            _apply_membership_change(hass, engine, selector_planner.configure(new_rules, new_referenced | engine.manual_observation_entities()))
             sync_time_context_into_engine(engine, dt_util.now())
             engine.evaluate_all()
             _runtime.active_rule_ids.intersection_update(unchanged_ids)
@@ -704,7 +705,7 @@ async def _async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             hass,
                             engine,
                             selector_planner.update_owned(
-                                set(engine.list_active_targets())
+                                set(engine.list_active_targets()) | engine.manual_observation_entities()
                                 | set(_reconciler.pending_withdraw_targets())
                             ),
                         )
@@ -908,6 +909,14 @@ async def _async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         register_api(hass)
         await _register_frontend_panel(hass)
         entry.async_on_unload(lambda: _remove_frontend_panel(hass))
+
+    from .manual_commands import ManualCommands
+
+    manual_commands = ManualCommands(
+        hass, engine, _runtime, _intentional_contexts, lifecycle_writer, _reconciler,
+        lambda target: record_diagnostic(hass, "manual_command_captured", target=target),
+    )
+    entry.async_on_unload(hass.bus.async_listen("call_service", manual_commands.receive))
 
     # Subscribe to state changes to keep engine in sync
     entry.async_on_unload(
@@ -1521,10 +1530,11 @@ async def _register_services(
                     | {target}
                 ),
             )
-            engine.emit_user_intent(
+            engine.emit_manual_intent(
                 target=target,
                 set=set_dict,
                 ttl_ms=ttl_ms,
+                resume=call.data.get("resume"),
                 reason=f"Manual fire service at {call.service}",
             )
             # Force a re-evaluation cycle

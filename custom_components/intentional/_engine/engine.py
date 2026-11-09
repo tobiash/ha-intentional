@@ -163,6 +163,7 @@ class Engine:
         self._target_policies: dict[str, TargetPolicy] = {}
         self.state: dict[str, Any] = {}
         self._active_intents: list[Intent] = []
+        self._manual_vacant_since: dict[str, int] = {}
         self._time_of_day: str | TimeOfDay | None = None
         self._clock_fn = clock_fn or (lambda: int(time.time() * 1000))
         self._selector_resolver = selector_resolver or (lambda _selector: [])
@@ -614,6 +615,56 @@ class Engine:
 
     # ── Manual intent injection ────────────────────────────────────
 
+    def emit_manual_intent(
+        self, target: str, set: dict[str, Any], *, ttl_ms: int | None = 300_000,
+        reason: str = "Manual user action", resume: str | None = None,
+    ) -> Intent:
+        """Capture a manual request and freeze its configured resume policy."""
+        policy = self.target_policy(target) or TargetPolicy()
+        mode = resume or policy.manual_resume
+        if mode not in {"timed", "until_vacant", "until_resumed"}:
+            raise ValueError("Unknown manual resume policy")
+        if mode == "until_vacant" and not policy.vacancy_entity:
+            raise ValueError("until_vacant requires a configured vacancy_entity")
+        duration = policy.manual_duration_ms if resume is None and policy.manual_duration_ms is not None else ttl_ms
+        if mode == "timed" and (duration is None or duration < 0):
+            raise ValueError("Timed manual overrides require a non-negative duration")
+        return self.emit_user_intent(
+            target, set, ttl_ms=duration if mode == "timed" else None, reason=reason,
+            manual_resume=mode, vacancy_entity=policy.vacancy_entity if mode == "until_vacant" else None,
+            vacancy_for_ms=policy.vacancy_for_ms,
+        )
+
+    def manual_observation_entities(self) -> set[str]:
+        """Sensors needed by configured and already captured resume policies."""
+        return {p.vacancy_entity for p in self._target_policies.values() if p.vacancy_entity} | {
+            i.vacancy_entity for i in self._active_intents if i.vacancy_entity
+        }
+
+    def _manual_released(self, intent: Intent, now: int) -> bool:
+        if intent.manual_resume != "until_vacant":
+            return False
+        value = self.state.get(f"{intent.vacancy_entity}.state")
+        if value not in ("off", False):
+            self._manual_vacant_since.pop(intent.target, None)
+            return False
+        since = self._manual_vacant_since.setdefault(intent.target, now)
+        if now - since < intent.vacancy_for_ms:
+            return False
+        # Ending an off override must not reveal an on intent still retained
+        # by hold.after or by an independent evening schedule.
+        if intent.set.get("state") == "off":
+            underlying = resolve_intents(
+                intent.target,
+                [i for i in self._active_intents if i.target == intent.target and i.rule_id],
+                into_the_future_ms=now,
+            )
+            if underlying is not None:
+                value = underlying.value
+                if value.get("state") == "on" or (value.get("state") != "off" and any(k in value for k in ("brightness", "brightness_pct"))):
+                    return False
+        return True
+
     def emit_user_intent(
         self,
         target: str,
@@ -623,6 +674,9 @@ class Engine:
         floor: dict[str, Any] | None = None,
         ttl_ms: int | None = None,
         reason: str = "Manual user action",
+        manual_resume: str | None = None,
+        vacancy_entity: str | None = None,
+        vacancy_for_ms: int = 30_000,
     ) -> Intent:
         """Inject a user-authority intent. Used for manual overrides."""
         self.clear_user_intents(target=target)
@@ -634,6 +688,9 @@ class Engine:
             ttl_ms=ttl_ms,
             authority=Authority.USER,
             reason=reason,
+            manual_resume=manual_resume,
+            vacancy_entity=vacancy_entity,
+            vacancy_for_ms=vacancy_for_ms,
             created_at_ms=self.now_ms(),
         )
         self._active_intents.append(intent)
@@ -642,6 +699,10 @@ class Engine:
     def clear_user_intents(self, target: str | None = None) -> int:
         """Remove active manual/user intents, optionally for one target."""
         before = len(self._active_intents)
+        if target is None:
+            self._manual_vacant_since.clear()
+        else:
+            self._manual_vacant_since.pop(target, None)
         self._active_intents = [
             intent
             for intent in self._active_intents
@@ -724,8 +785,10 @@ class Engine:
                 continue
             if not intent.rule_id:
                 # Manual user intent — keep until TTL expires
-                if not intent.is_expired(into_the_future_ms=now):
+                if not intent.is_expired(into_the_future_ms=now) and not self._manual_released(intent, now):
                     new_active.append(intent)
+                else:
+                    self._manual_vacant_since.pop(intent.target, None)
                 continue
             if intent.rule_id in firing:
                 # Rule still fires — keep

@@ -2183,7 +2183,7 @@ def _merge_time_windows(result: dict[str, tuple[str, str]], value: Any, *, file:
 
 _TARGET_POLICY_FIELDS = {
     "default", "ownership", "dispatch", "allowed_fields", "forbidden_automatic_states",
-    "unavailable", "max_retries", "user_authority",
+    "unavailable", "max_retries", "user_authority", "manual_override",
 }
 
 
@@ -2219,6 +2219,28 @@ def _target_policies_from_document(raw_targets: Any, *, file: Path | None) -> di
         if not isinstance(user, dict) or set(user) - {"fields", "states"}:
             raise RuleLoadError(f"Target {target!r}: `user_authority` must contain only fields and states", file=file)
         max_retries = raw.get("max_retries")
+        manual = raw.get("manual_override", {})
+        if not isinstance(manual, dict) or set(manual) - {"resume", "duration", "vacancy_entity", "vacancy_for", "unattributed"}:
+            raise RuleLoadError(f"Target {target!r}: invalid manual_override fields", file=file)
+        resume = manual.get("resume", "timed")
+        detection = manual.get("unattributed", "all")
+        if detection not in {"all", "power", "ignore"}:
+            raise RuleLoadError(f"Target {target!r}: unattributed must be all, power, or ignore", file=file)
+        if resume not in {"timed", "until_vacant", "until_resumed"}:
+            raise RuleLoadError(f"Target {target!r}: manual_override.resume must be timed, until_vacant, or until_resumed", file=file)
+        vacancy = manual.get("vacancy_entity")
+        if resume == "until_vacant" and (not isinstance(vacancy, str) or not vacancy.startswith("binary_sensor.") or len(vacancy.split(".")) != 2 or not vacancy.split(".")[1]):
+            raise RuleLoadError(f"Target {target!r}: until_vacant requires a binary_sensor vacancy_entity", file=file)
+        if resume != "until_vacant" and ("vacancy_entity" in manual or "vacancy_for" in manual):
+            raise RuleLoadError(f"Target {target!r}: vacancy settings require until_vacant", file=file)
+        if resume != "timed" and "duration" in manual:
+            raise RuleLoadError(f"Target {target!r}: duration requires timed", file=file)
+        if any(isinstance(manual.get(key), bool) for key in ("duration", "vacancy_for")):
+            raise RuleLoadError(f"Target {target!r}: durations cannot be booleans", file=file)
+        duration = _parse_optional_duration(manual.get("duration"), "manual_override.duration", file, None, default=None)
+        vacancy_for = _parse_optional_duration(manual.get("vacancy_for", "30s"), "manual_override.vacancy_for", file, None)
+        if duration is not None and duration <= 0 or vacancy_for is None or vacancy_for <= 0:
+            raise RuleLoadError(f"Target {target!r}: manual override durations must be positive", file=file)
         if max_retries is not None and (not isinstance(max_retries, int) or isinstance(max_retries, bool) or max_retries < 0):
             raise RuleLoadError(f"Target {target!r}: `max_retries` must be a non-negative integer", file=file)
         result[target] = TargetPolicy(
@@ -2228,6 +2250,11 @@ def _target_policies_from_document(raw_targets: Any, *, file: Path | None) -> di
             forbidden_automatic_states=forbidden or frozenset(),
             unavailable=unavailable,
             max_retries=max_retries,
+            manual_resume=resume,
+            manual_detection=detection,
+            manual_duration_ms=duration,
+            vacancy_entity=vacancy,
+            vacancy_for_ms=vacancy_for,
             user_authority_fields=_string_set(user.get("fields", []), target, "user_authority.fields", file) or frozenset(),
             user_authority_states=_string_set(user.get("states", []), target, "user_authority.states", file) or frozenset(),
         )

@@ -105,6 +105,7 @@ class TickRuntime:
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
     mutation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     revision: int = 0
+    pending_manual_commands: int = 0
     tick_task: asyncio.Task[None] | None = None
     registry_task: asyncio.Task[None] | None = None
     registry_pending: bool = False
@@ -125,7 +126,7 @@ class TickRuntime:
 
     def is_revision(self, revision: int) -> bool:
         """Return whether no newer mutation has occurred."""
-        return self.revision == revision
+        return self.revision == revision and self.pending_manual_commands == 0
 
     def mark_success(self, *, now_ms: int | None = None) -> None:
         self.last_success_ms = monotonic_ms() if now_ms is None else now_ms

@@ -73,8 +73,12 @@ Observed divergence between a **Target**'s actual Home Assistant state and the *
 _Avoid_: mismatch, deviation.
 
 **Manual override**:
-A `user`-authority **Intent** created from confirmed **Drift** (or from the `intentional.fire` service), with a TTL.
+A `user`-authority **Intent** created from a direct user command, confirmed **Drift**, or the `intentional.fire` service, with a captured **Resume policy**.
 _Avoid_: user intent (too broad — any user-authority intent qualifies).
+
+**Resume policy**:
+The condition that ends a **Manual override**: elapsed duration, stable vacancy, or explicit resumption. A vacancy-based manual off also waits for underlying lighting demand to end.
+_Avoid_: timeout (only one policy is timed).
 
 **Reconciliation**:
 The loop that compares resolved **Intent**s against actual state, decides which **Service plan**s to call, what to suppress, and what **Drift** to promote as a **Manual override**.
@@ -102,7 +106,7 @@ _Avoid_: trigger (overlaps HA automation language), event (too broad).
 - An **Intent** addresses one or more **Target**s with field-level values.
 - A **Service plan** is derived from a resolved **Intent** for a single **Target**.
 - **Drift** on a managed **Target** may become a **Manual override** through **Reconciliation**.
-- A **Manual override** is an **Intent** at `user` authority and overrides all `automation`/`sensor` intents on its **Target** until its TTL expires.
+- A **Manual override** is an **Intent** at `user` authority and overrides lower-authority values on its contested fields until its **Resume policy** releases it or the user clears it.
 - **Reconciliation** reads resolved **Intent**s and emits **Service plan**s and **Manual override** promotions; it does not evaluate **Rule**s.
 - The **Tick runtime** owns the cadence and liveness of **Rule** evaluation plus **Reconciliation**; it does not decide **Service plan** policy.
 

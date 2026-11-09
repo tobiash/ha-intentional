@@ -2351,7 +2351,12 @@ function targetExplanation(projection) {
   if (projection.policy_denial || runtime.policy_denial) return `A target policy prevents applying this state: ${formatValue(projection.policy_denial || runtime.policy_denial)}. Review the document Target policy.`;
   if (runtime.shadow) return "This target is in shadow mode. Intentional explains the plan but does not send it to Home Assistant.";
   if (runtime.retry) return `The last service attempt failed (${runtime.retry.failures} failure${runtime.retry.failures === 1 ? "" : "s"}). Retrying ${formatRemaining(runtime.retry.remaining_ms)}. Check the device in Home Assistant if this continues.`;
-  if (projection.manual_override) return `A manual override is active, expiring ${formatRemaining(projection.manual_override.remaining_ms)}. Wait for expiry or resume rule control below.`;
+  if (projection.manual_override) {
+    const manual = projection.manual_override;
+    if (manual.resume === "until_vacant") return `Manual control is active until ${manual.vacancy_entity} reports vacant continuously for ${manual.vacancy_for_ms / 1000}s. Manual off also waits for retained lighting demand to end. You can resume rule control below.`;
+    if (manual.resume === "until_resumed") return "Manual control is active until you resume rule control below.";
+    return `A manual override is active, expiring ${formatRemaining(manual.remaining_ms)}. Wait for expiry or resume rule control below.`;
+  }
   if (runtime.pending_drift) return "The device differs from the last applied plan. Intentional is waiting to confirm whether this is a manual change.";
   if (runtime.transition_suppressed) return "A transition is in progress. Intentional is giving the device time to reach the desired state.";
   if (projection.plan_match === "match") return "Home Assistant confirms the resolved desired state.";

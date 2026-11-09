@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-11-09
+
+### Added
+- Capture direct user light commands, including group toggles, as manual overrides before device feedback loses user attribution. Pending commands fence stale reconciliation dispatch and respect entity control permissions.
+- Target-level manual resume policies: timed, until stable vacancy, and until explicitly resumed. Captured policies survive restart; vacancy confirmation starts fresh after restart.
+- Configurable unattributed change detection (`all`, `power`, `ignore`), resume-policy explanations, and a `resume` option on `intentional.fire`.
+
+### Fixed
+- An unattributed light-off change can become an override even when the previous brightness/color never fully converged. Power evidence is no longer gated on whole-plan satisfaction.
+- Late feedback from captured commands cannot replace their requested state; pending transition feedback receives a grace period.
+- Vacancy-based manual off waits for retained lighting demand to end, avoiding immediate reactivation when the override releases.
+
 ## [0.12.14] - 2026-09-27
 
 ### Fixed

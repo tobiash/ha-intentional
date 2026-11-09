@@ -16,11 +16,19 @@ def dsl_schema() -> dict[str, Any]:
         "top_level_document_fields": ["rules", "scenes", "targets", "retention_profiles", "time_windows"],
         "target_policy_fields": [
             "default", "ownership", "dispatch", "allowed_fields", "forbidden_automatic_states",
-            "unavailable", "max_retries", "user_authority",
+            "unavailable", "max_retries", "user_authority", "manual_override",
         ],
         "target_ownership": ["managed", "opportunistic", "observe_only"],
         "target_unavailable_policy": ["allow", "skip"],
         "target_dispatch": ["apply", "shadow"],
+        "manual_override_policy": {
+            "path": "targets.<target>.manual_override",
+            "resume": ["timed", "until_vacant", "until_resumed"],
+            "fields": ["resume", "duration", "vacancy_entity", "vacancy_for", "unattributed"],
+            "unattributed": ["all", "power", "ignore"],
+            "default_resume": "timed",
+            "default_vacancy_for": "30s",
+        },
         "observe_operators": [
             "is", "is_not", "lt", "lte", "gt", "gte", "all", "any",
             "not", "none", "changed", "happened", "for", "stable_for",
@@ -151,7 +159,7 @@ def dsl_schema() -> dict[str, Any]:
             "value_type": "duration",
             "default_ms": 300000,
             "composition": "longest duration among current contributing Rules",
-            "scope": "automatically detected Manual overrides only",
+            "scope": "detected Manual overrides and explicit HA light commands; Target policy takes precedence",
         },
         "shadow_target_policy": {
             "path": "targets.<target>.dispatch",

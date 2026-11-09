@@ -503,7 +503,7 @@ def _new_reconciler(options: dict[str, Any]) -> Reconciliation:
 def _promote(engine: Any, reconciler: Reconciliation, events: list[Any]) -> None:
     for event in events:
         if event.kind == "drift_promoted" and reconciler.validate_promotion(event):
-            engine.emit_user_intent(**event.details)
+            engine.emit_manual_intent(**event.details)
             if not reconciler.commit_promotion(event, engine.now_ms()):
                 raise RuntimeError("Drift promotion changed during simulation commit")
 

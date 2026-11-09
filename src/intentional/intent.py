@@ -143,6 +143,9 @@ class Intent:
     confidence: float = 1.0
     ttl_ms: int | None = None
     manual_override_ttl_ms: int | None = None
+    manual_resume: str | None = None
+    vacancy_entity: str | None = None
+    vacancy_for_ms: int = 30_000
     reason: str = ""
     rule_id: str = ""
     ignore_when: bool = False

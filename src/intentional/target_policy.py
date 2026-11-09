@@ -18,6 +18,11 @@ class TargetPolicy:
     max_retries: int | None = None
     user_authority_fields: frozenset[str] = frozenset()
     user_authority_states: frozenset[str] = frozenset()
+    manual_resume: str = "timed"
+    manual_detection: str = "all"
+    manual_duration_ms: int | None = None
+    vacancy_entity: str | None = None
+    vacancy_for_ms: int = 30_000
 
     def as_dict(self) -> dict[str, Any]:
         """Return a stable JSON-friendly representation."""
@@ -30,4 +35,11 @@ class TargetPolicy:
             "max_retries": self.max_retries,
             "user_authority_fields": sorted(self.user_authority_fields),
             "user_authority_states": sorted(self.user_authority_states),
+            "manual_override": {
+                "resume": self.manual_resume,
+                "unattributed": self.manual_detection,
+                "duration_ms": self.manual_duration_ms,
+                "vacancy_entity": self.vacancy_entity,
+                "vacancy_for_ms": self.vacancy_for_ms,
+            },
         }
