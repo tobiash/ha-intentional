@@ -57,6 +57,34 @@ require_test_dependency("aiohttp", reason="aiohttp not installed")
 # ── View class structure ───────────────────────────────────────────
 
 
+@pytest.mark.asyncio
+async def test_presentation_view_filters_validates_and_reports_missing_integration(monkeypatch):
+    from custom_components.intentional import api
+    from intentional.engine import Engine
+    from intentional.yaml_loader import Rule
+
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules([Rule(id="room", when="true", target="light.room", set={"state": "on"})])
+    engine.evaluate_all()
+    hass = SimpleNamespace(states=SimpleNamespace(get=lambda _: None))
+    monkeypatch.setattr(api, "_engine_for", lambda _: engine)
+    monkeypatch.setattr(api, "_reconciliation_for", lambda _: None)
+    monkeypatch.setattr(api, "_runtime_health", lambda _: {"status": "ok"})
+    monkeypatch.setattr(api, "_entry_for_view", lambda _: None)
+    monkeypatch.setattr(api, "area_for_target", lambda *_: SimpleNamespace(id="living", name="Living"))
+    view = api.IntentionalPresentationView()
+    assert view.requires_auth
+    request = SimpleNamespace(app={"hass": hass}, query={"area": "living", "domain": "light"})
+    response = await view.get(request)
+    assert response.status == 200
+    assert json.loads(response.body)["rules"][0]["scope"]["targets"] == ["light.room"]
+    for query in ({"area": ""}, {"domains": "light"}):
+        request.query = query
+        assert (await view.get(request)).status == 400
+    monkeypatch.setattr(api, "_engine_for", lambda _: None)
+    assert (await view.get(request)).status == 503
+
+
 def test_health_view_has_correct_url() -> None:
     from custom_components.intentional.api import IntentionalHealthView
 

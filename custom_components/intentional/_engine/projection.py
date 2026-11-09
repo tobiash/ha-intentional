@@ -84,6 +84,7 @@ def target_projection(
     *,
     actual_state: Any | None = None,
     reconciliation: Any | None = None,
+    rule_statuses: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Project compositor, Rule, actual-state, and reconciliation facts."""
     now_ms = engine.now_ms()
@@ -95,7 +96,7 @@ def target_projection(
     if resolved is not None:
         for field, value in sorted(resolved.value.items()):
             setters = [intent for intent in intents if field in intent.set]
-            provider = max(setters, key=lambda item: item.priority) if setters else None
+            provider = resolved.field_providers.get(field)
             modifiers = []
             for operation in ("cap", "floor", "offset", "multiply"):
                 for intent in intents:
@@ -131,7 +132,7 @@ def target_projection(
     match = "unknown"
     if calls and actual_state is not None:
         match = service_plan_match(service_plan_signature(calls), actual_state).value
-    statuses = engine.list_rule_statuses()  # type: ignore[attr-defined]
+    statuses = rule_statuses if rule_statuses is not None else engine.list_rule_statuses()  # type: ignore[attr-defined]
     rules = []
     active_rule_ids = {intent.rule_id for intent in intents if intent.rule_id}
     for rule_id, status in statuses.items():
@@ -192,6 +193,11 @@ def target_projection(
             "manual_override": None
             if manual is None
             else {
+                "owner": _intent_ref(manual),
+                "fields": [
+                    name for name, provider in (resolved.field_providers.items() if resolved else [])
+                    if provider is manual
+                ],
                 "expires_at_ms": manual.expires_at_ms(),
                 "resume": manual.manual_resume or ("timed" if manual.ttl_ms is not None else "until_resumed"),
                 "vacancy_entity": manual.vacancy_entity,

@@ -51,6 +51,21 @@ def test_frontend_panel_asset_is_bundled() -> None:
     assert '"rules/rollback"' in source
 
 
+def test_rule_deep_link_opens_detail_after_document_load() -> None:
+    result = _run_panel_js(r'''(async () => {
+      globalThis.location = {search: '?rule=ready'};
+      const panel = new IntentionalPanel(); panel._render = () => {};
+      panel._api = async (_method, path) => {
+        if (path === 'rules/document') return {contents: '- id: ready\n  while: {binary_sensor.ready: on}\n  intent: {light.one: {state: on}}\n', generation:'g1'};
+        if (path === 'world') return {authored_rules:[],targets:[]};
+        return {status:'ok'};
+      };
+      await panel._load();
+      return {selected:panel._selectedRuleId,screen:panel._screen,dirty:panel._dirty};
+    })()''')
+    assert result == {"selected": "ready", "screen": "detail", "dirty": False}
+
+
 def test_overview_does_not_claim_alignment_before_world_arrives() -> None:
     html = _run_panel_js("new IntentionalPanel()._renderOverview()")
     assert "Your home is aligned" not in html

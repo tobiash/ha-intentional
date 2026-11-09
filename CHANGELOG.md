@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-11-10
+
+### Added
+- Bundled **Intentional Automation** Lovelace card with a visual editor, compact room launcher, browser-local dialog, inline/popup content mode, English/German labels, and bounded refresh. Rule descriptions and friendly names reuse canonical Rule and Home Assistant metadata.
+- Authenticated, versioned `/api/intentional/presentation` contract with intersecting area/domain/group filters, current selector membership, room-local Intent counts, shared Rule impact, lifecycle facets, per-field contributions, observed state, dispatch evidence, and manual recovery.
+- Deliberate settings disclosure for Rule enablement and scoped manual recovery. Resume operates only on explicitly listed Targets; whole-Rule enablement discloses out-of-scope Targets and additional effects. Existing room controls retain their semantics.
+- Rule detail deep links in the Intentional panel (`/intentional?rule=<id>`), documented card configuration, and browser regressions for mobile layout, local dialogs, stale responses, scope changes, focus, editor configuration, permissions, and action failures.
+
+### Fixed
+- Target explanations use authoritative compositor field provenance, including animation overlays, rather than reconstructing providers independently. Modifier participation, counterfactual output impact, desired state, observed agreement, and service attempts remain distinct facts.
+
 ## [0.13.4] - 2026-11-10
 
 ### Changed

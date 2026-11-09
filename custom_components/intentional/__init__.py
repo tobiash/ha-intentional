@@ -886,6 +886,10 @@ async def _register_frontend_panel(hass: HomeAssistant) -> None:
         )
         domain_data[FRONTEND_STATIC_REGISTERED] = True
 
+    frontend.add_extra_js_url(
+        hass, f"{FRONTEND_URL_PATH}/intentional-card.js?v={__version__}"
+    )
+
     if frontend.async_panel_exists(hass, PANEL_URL_PATH):
         frontend.async_remove_panel(hass, PANEL_URL_PATH, warn_if_unknown=False)
 

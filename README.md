@@ -187,6 +187,7 @@ Generated values are held until the next interval, persisted across restarts, an
 Intentional exposes entities for common control tasks:
 
 - `Intentional` sidebar panel edits the storage-backed rule document with validation, dry-run preview, save, and rollback history.
+- **Intentional Automation** dashboard card provides a compact room launcher, browser-local status dialog, scoped explanations and settings. Configure it in the Lovelace card picker; see [dashboard card and contract](docs/dashboard-presentation.md).
 - `switch.intentional_automation_enabled` globally enables or disables rule evaluation and automation effects.
 - `switch.intentional_rule_<rule_id>` toggles an authored rule and persists `enabled: true/false` in HA storage.
 - `button.intentional_reload_rules` reloads the stored rule document.

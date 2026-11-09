@@ -12,6 +12,7 @@ MODULES = (
     "animation.py",
     "capabilities.py",
     "compositor.py",
+    "dashboard_presentation.py",
     "durations.py",
     "engine.py",
     "generation.py",

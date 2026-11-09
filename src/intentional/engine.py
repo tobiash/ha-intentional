@@ -1204,12 +1204,8 @@ class Engine:
 
     def _spawn_intents_from_selectors(self, rule: Rule, now: int) -> list[Intent]:
         intents: list[Intent] = []
-        matched_targets: set[str] = set()
-        for selector in rule.intent_selectors:
-            for target in self._selector_resolver(selector):
-                if target in selector.exclude or target in matched_targets:
-                    continue
-                matched_targets.add(target)
+        for selector, targets in self._intent_selector_targets(rule):
+            for target in targets:
                 intents.append(
                     Intent(
                         target=target,
@@ -1235,6 +1231,42 @@ class Engine:
                     )
                 )
         return intents
+
+    def _intent_selector_targets(self, rule: Rule):
+        """Share selector precedence/exclusion with read-only scope inspection."""
+        matched: set[str] = set()
+        for selector in rule.intent_selectors:
+            targets = []
+            for target in self._selector_resolver(selector):
+                if target in selector.exclude or target in matched:
+                    continue
+                matched.add(target)
+                targets.append(target)
+            yield selector, targets
+
+    def rule_target_requests(self) -> dict[str, list[dict[str, Any]]]:
+        """Concrete current membership and authored requests, even for idle Rules.
+
+        Requests are declarations (templates are not rendered here). Active
+        Intent values and composed output remain separate projection facts.
+        """
+        result = {}
+        for rule_id, parsed in self._rules.items():
+            rule = parsed.rule
+            requests = []
+            sources = [(rule, [rule.target])] if rule.target else []
+            sources.extend(self._intent_selector_targets(rule))
+            for source, targets in sources:
+                desired = {
+                    operation: dict(getattr(source, operation))
+                    for operation in ("set", "cap", "floor", "offset", "multiply")
+                    if getattr(source, operation)
+                }
+                requests.extend({"target": target, "desired": desired} for target in targets)
+            if rule.scene:
+                requests.append({"target": rule.scene, "desired": {"scene": rule.scene}})
+            result[rule_id] = requests
+        return result
 
     # ── Resolution ─────────────────────────────────────────────────
 
@@ -1373,7 +1405,7 @@ class Engine:
             ttl_remaining_ms=resolved.ttl_remaining_ms,
             all_active_intents=resolved.all_active_intents,
             diagnostics=resolved.diagnostics,
-            field_providers=resolved.field_providers,
+            field_providers={**resolved.field_providers, intent.animation.parameter: intent},
         )
 
     # ── Animation ticking ─────────────────────────────────────────
@@ -1792,6 +1824,8 @@ class Engine:
 
         status = {
             "rule_id": rule_id,
+            "authored_rule_id": rule.authored_rule_id or rule_id,
+            "non_target_effects": bool(rule.effects or rule.alerts or rule.scene),
             "enabled": rule.enabled,
             "paused": self._rule_is_paused(rule_id),
             "active": rule_id in firing or active_counts.get(rule_id, 0) > 0,

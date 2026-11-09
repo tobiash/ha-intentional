@@ -239,6 +239,10 @@ class IntentionalPanel extends HTMLElement {
       this._dirty = false;
       this._stage = "Draft";
       this._reviewedFingerprint = "";
+      const linkedRule = new URLSearchParams(globalThis.location?.search || "").get("rule");
+      if (linkedRule && this._uniqueRules().some(rule => rule.id === linkedRule)) {
+        this._selectRule(linkedRule, {render:false, screen:"detail"});
+      }
       this._render();
       await worldRequest;
     } catch (err) {

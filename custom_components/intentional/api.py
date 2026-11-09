@@ -77,6 +77,7 @@ from typing import Any
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView, require_admin
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 
 from ._engine import __version__  # noqa: TID252
 from ._engine.alerting import (  # noqa: TID252
@@ -1255,6 +1256,55 @@ class IntentionalPreviewView(HomeAssistantView):
                 for horizon, step in zip(horizons, steps, strict=True)
             ]
         return web.json_response(redact_sensitive(response))
+
+
+class IntentionalPresentationView(HomeAssistantView):
+    """GET scoped, read-only dashboard presentation facts."""
+
+    url = "/api/intentional/presentation"
+    name = "api:intentional:presentation"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        from ._engine.dashboard_presentation import dashboard_presentation
+
+        hass = request.app["hass"]
+        engine = _engine_for(hass)
+        if engine is None:
+            return _error("Integration not configured", "not_configured", 503)
+        if set(request.query) - {"area", "domain", "group"} or any(
+            not value.strip() for value in request.query.values()
+        ):
+            return _error("Expected nonempty area, domain, or group filters", "invalid_scope", 400)
+
+        def target_area(target: str) -> str | None:
+            result = area_for_target(hass, target)
+            return result.id if result else None
+
+        result = dashboard_presentation(
+            engine, area=request.query.get("area"), domain=request.query.get("domain"),
+            group=request.query.get("group"), area_for_target=target_area,
+            actual_for_target=hass.states.get, reconciliation=_reconciliation_for(hass),
+        )
+        result["runtime_status"] = _runtime_health(hass)["status"]
+        result["generated_at"] = datetime.now(UTC).isoformat()
+        user = request.get("hass_user") if hasattr(request, "get") else None
+        result["capabilities"]["configure"] = bool(user and user.is_admin)
+        entry = _entry_for_view(hass)
+        registry = er.async_get(hass) if entry else None
+        for row in result["rules"]:
+            entity_id = registry.async_get_entity_id(
+                "switch", DOMAIN, f"{entry.entry_id}_rule_{row['rule_id']}"
+            ) if registry else None
+            state = hass.states.get(entity_id) if entity_id else None
+            row["name"] = state.attributes.get("friendly_name", row["rule_id"]) if state else row["rule_id"]
+            row["enable_entity_id"] = entity_id
+        for target in result["targets"]:
+            state = hass.states.get(target["target"])
+            target["name"] = state.attributes.get("friendly_name", target["target"]) if state else target["target"]
+            area_info = area_for_target(hass, target["target"])
+            target["area"] = {"id": area_info.id, "name": area_info.name} if area_info else None
+        return web.json_response(result)
 
 
 class IntentionalCardView(HomeAssistantView):
@@ -2578,6 +2628,7 @@ def register_api(hass: HomeAssistant) -> None:
         return
 
     views = [
+        IntentionalPresentationView,
         IntentionalHealthView,
         IntentionalRulesView,
         IntentionalRuleDocumentView,
