@@ -153,6 +153,44 @@ def test_rule_fingerprint_is_shared_and_stable_under_dict_insertion_order() -> N
     assert restored.resolve("light.room").value == {"state": "on", "brightness_pct": 40}
 
 
+def test_compiled_identity_is_reused_and_replaced_transactionally(monkeypatch) -> None:
+    import intentional.engine as engine_module
+
+    rules = load_rules_from_string("""
+- id: stable
+  while: {binary_sensor.room: "on"}
+  intent: {light.room: {state: "on", brightness_pct: 40}}
+""")
+    engine = Engine(clock_fn=lambda: 1_000)
+    engine.load_rules(rules)
+    engine.update_state("binary_sensor.room", "on")
+    engine.evaluate_all()
+    records = engine.export_lifecycle_records()
+    original = engine.rule_fingerprints()
+    fingerprint = engine_module._rule_fingerprint
+
+    def unexpected_hash(rule):
+        raise AssertionError("Steady-state lifecycle work must not rehash rules")
+
+    monkeypatch.setattr(engine_module, "_rule_fingerprint", unexpected_hash)
+    engine.evaluate_all()
+    assert engine.export_lifecycle_records() == records
+    engine.import_lifecycle_records(records)
+    assert engine.rule_fingerprints() == original
+    monkeypatch.setattr(engine_module, "_rule_fingerprint", fingerprint)
+
+    changed = replace(rules[0], set={"state": "on", "brightness_pct": 80})
+    engine.load_rules([changed])
+    assert engine.rule_fingerprints() != original
+    engine.import_lifecycle_records(records)
+    engine.evaluate_all()
+    assert engine.resolve("light.room").value["brightness_pct"] == 80
+    current = engine.rule_fingerprints()
+    with pytest.raises(ValueError):
+        engine.load_rules([rules[0], replace(changed, id="broken", when="(")])
+    assert engine.rule_fingerprints() == current
+
+
 def test_alert_declaration_does_not_invalidate_intent_lifecycle() -> None:
     without_alert = load_rules_from_string("""
 - id: stable

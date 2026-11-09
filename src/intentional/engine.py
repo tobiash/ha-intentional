@@ -97,10 +97,11 @@ EFFECT_DEAD_LETTER_LIMIT = 100
 
 @dataclass
 class _ParsedRule:
-    """Internal: a Rule plus its parsed when-AST."""
+    """Load-time compilation of a Rule, including its semantic identity."""
 
     rule: Rule
     when_ast: WhenAST
+    fingerprint: str
     hold_when_ast: WhenAST | None = None
     hold_until_ast: WhenAST | None = None
 
@@ -196,7 +197,7 @@ class Engine:
             self._generated_fields,
             self._effect_outbox,
             rule_fingerprints={
-                rule_id: _rule_fingerprint(parsed.rule)
+                rule_id: parsed.fingerprint
                 for rule_id, parsed in self._rules.items()
             },
             now_ms=self.now_ms(),
@@ -207,7 +208,7 @@ class Engine:
         records["rule_activations"] = [
             {
                 "rule_id": rule_id,
-                "rule_fingerprint": _rule_fingerprint(self._rules[rule_id].rule),
+                "rule_fingerprint": self._rules[rule_id].fingerprint,
                 "active_since_ms": active_since,
                 "frozen_hold_after": _frozen_hold_to_record(self._frozen_hold_after.get(rule_id)),
             }
@@ -221,7 +222,7 @@ class Engine:
                 "condition_true_since_ms": self._condition_true_since.get(rule_id),
             }
             for rule_id, parsed in sorted(self._rules.items())
-            for fingerprint in (_rule_fingerprint(parsed.rule),)
+            for fingerprint in (parsed.fingerprint,)
             for latched in (self._hysteresis_latches.get(fingerprint, False),)
             if latched
         ]
@@ -236,7 +237,7 @@ class Engine:
             now_ms=self.now_ms(),
             known_rule_ids=set(self._rules),
             rule_fingerprints={
-                rule_id: _rule_fingerprint(parsed.rule)
+                rule_id: parsed.fingerprint
                 for rule_id, parsed in self._rules.items()
             },
         )
@@ -261,7 +262,7 @@ class Engine:
         if enabled:
             self._restore_rule_activations(records)
         valid_fingerprints = {
-            _rule_fingerprint(parsed.rule)
+            parsed.fingerprint
             for parsed in self._rules.values()
             if parsed.rule.hysteresis is not None
         }
@@ -275,7 +276,7 @@ class Engine:
                 and raw.get("rule_fingerprint") in valid_fingerprints
             }
             by_fingerprint = {
-                _rule_fingerprint(parsed.rule): rule_id
+                parsed.fingerprint: rule_id
                 for rule_id, parsed in self._rules.items()
                 if parsed.rule.hysteresis is not None
             }
@@ -304,7 +305,7 @@ class Engine:
             parsed = self._rules.get(rule_id) if isinstance(rule_id, str) else None
             if parsed is None or parsed.rule.dynamic_hold_after is None:
                 continue
-            if raw.get("rule_fingerprint") != _rule_fingerprint(parsed.rule):
+            if raw.get("rule_fingerprint") != parsed.fingerprint:
                 continue
             active_since = raw.get("active_since_ms")
             if not _is_nonnegative_int(active_since):
@@ -498,7 +499,11 @@ class Engine:
         *,
         target_policies: dict[str, TargetPolicy] | None = None,
     ) -> None:
-        """Transactionally replace rules and preserve only identical-rule memory."""
+        """Transactionally compile rules and preserve identical-rule memory.
+
+        Loaded Rule definitions (including nested payloads) are read-only;
+        changes must be applied through load_rules to recompile their identity.
+        """
         policies = target_policies
         if policies is None:
             policies = getattr(rules, "target_policies", {})
@@ -513,6 +518,7 @@ class Engine:
             parsed_rules[rule.id] = _ParsedRule(
                 rule=rule,
                 when_ast=when_ast,
+                fingerprint=_rule_fingerprint(rule),
                 hold_when_ast=hold_when_ast,
                 hold_until_ast=hold_until_ast,
             )
@@ -520,7 +526,7 @@ class Engine:
             rule_id
             for rule_id, parsed in parsed_rules.items()
             if rule_id in self._rules
-            and _rule_fingerprint(self._rules[rule_id].rule) == _rule_fingerprint(parsed.rule)
+            and self._rules[rule_id].fingerprint == parsed.fingerprint
         }
         self._rules = parsed_rules
         self._target_policies = dict(policies)
@@ -599,9 +605,9 @@ class Engine:
             for alert in rule.alerts:
                 renderer.validate_value(alert.annotations)
 
-    def rule_fingerprints(self) -> dict[str, tuple[Any, ...]]:
+    def rule_fingerprints(self) -> dict[str, str]:
         """Return current semantic fingerprints keyed by expanded rule id."""
-        return {rule_id: _rule_fingerprint(parsed.rule) for rule_id, parsed in self._rules.items()}
+        return {rule_id: parsed.fingerprint for rule_id, parsed in self._rules.items()}
 
     def loaded_rules(self) -> list[Rule]:
         """Return the currently loaded expanded Rules for isolated tooling."""
@@ -847,7 +853,7 @@ class Engine:
             parsed = self._rules[rule_id]
             if parsed.rule.effects and rule_id not in self._active_effect_rule_ids:
                 activation_id = str(uuid.uuid4())
-                fingerprint = _rule_fingerprint(parsed.rule)
+                fingerprint = parsed.fingerprint
                 for effect_index, effect in enumerate(parsed.rule.effects):
                     rendered = self._template_renderer.render_effect(effect, self.state)
                     self._effect_outbox.append(
@@ -1057,7 +1063,7 @@ class Engine:
         observation = parsed.rule.hysteresis
         if observation is None:
             return self._eval_when(parsed.when_ast)
-        fingerprint = _rule_fingerprint(parsed.rule)
+        fingerprint = parsed.fingerprint
         latched = self._hysteresis_latches.get(fingerprint, False)
         raw = self.state.get(f"{observation.entity}.state")
         try:

@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2] - 2026-11-09
+
+### Changed
+- Compile semantic Rule fingerprints once per load instead of repeatedly serializing every Rule during lifecycle snapshots, hysteresis evaluation, and Effect activation. Reloads still recompute identities transactionally and persisted identity semantics are unchanged.
+- Add a local lifecycle CPU benchmark accepting captured rules and state snapshots. A 72-Rule replay reduced evaluation plus two snapshots from 5.80 ms to 0.11 ms locally; this measures engine work, not total Home Assistant CPU.
+
+### Tests
+- Verify cached identities survive restart, invalidate on semantic edits, and remain intact after failed reloads; verify hysteresis latches survive identical reloads but not changed thresholds.
+
 ## [0.13.1] - 2026-11-09
 
 ### Fixed

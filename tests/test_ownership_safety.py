@@ -179,6 +179,31 @@ def test_hysteresis_boundaries_dwell_and_restart() -> None:
     assert not restored.has_active_target("light.test")
 
 
+def test_hysteresis_reload_preserves_only_semantically_identical_latches() -> None:
+    document = """
+- id: warm
+  while:
+    sensor.temperature:
+      enter: {gte: 25}
+      exit: {lt: 20}
+  intent: {light.test: {state: on}}
+"""
+    engine = Engine(clock_fn=lambda: 0)
+    engine.load_rules(load_rules_from_string(document))
+    engine.update_state("sensor.temperature", 26)
+    engine.evaluate_all()
+    records = engine.export_lifecycle_records()
+    engine.update_state("sensor.temperature", 22)
+    engine.load_rules(load_rules_from_string(document))
+    engine.evaluate_all()
+    assert engine.has_active_target("light.test")
+
+    engine.load_rules(load_rules_from_string(document.replace("gte: 25", "gte: 30")))
+    engine.import_lifecycle_records(records)
+    engine.evaluate_all()
+    assert not engine.has_active_target("light.test")
+
+
 def test_disabled_restore_preserves_hysteresis_latch_through_deadband() -> None:
     rules = load_rules_from_string("""
 - id: warm
