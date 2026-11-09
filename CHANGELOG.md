@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.4] - 2026-11-10
+
+### Changed
+- Centralize Tick runtime cycle ordering, revision fences, persistence gating, pulse acknowledgment, and failure recovery in a dedicated driver with directly testable single-cycle execution.
+- Reuse the Engine's transactional unchanged-Rule result during reload rather than independently computing Rule fingerprints in the integration.
+
+### Fixed
+- Restore the tick idle signal on cancellation as well as ordinary and failed cycle exits, keeping shutdown coordination reliable.
+
+### Tests
+- Cover interrupted and stale cycles, same-entity pulse arrival during dispatch, persistence failure/retry, rollback lock safety, final shutdown checkpoints, and stable-stage throttling through the driver.
+
 ## [0.13.3] - 2026-11-09
 
 ### Fixed

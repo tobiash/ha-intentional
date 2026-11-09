@@ -191,8 +191,10 @@ def test_tick_loop_is_background_task() -> None:
         if isinstance(node, ast.Call)
         and any(
             isinstance(arg, ast.Call)
-            and isinstance(arg.func, ast.Name)
-            and arg.func.id == "_tick_loop"
+            and isinstance(arg.func, ast.Attribute)
+            and arg.func.attr == "async_run"
+            and isinstance(arg.func.value, ast.Name)
+            and arg.func.value.id == "tick_driver"
             for arg in node.args
         )
     ]

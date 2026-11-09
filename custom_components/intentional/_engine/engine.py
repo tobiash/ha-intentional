@@ -498,11 +498,13 @@ class Engine:
         rules: list[Rule],
         *,
         target_policies: dict[str, TargetPolicy] | None = None,
-    ) -> None:
+    ) -> frozenset[str]:
         """Transactionally compile rules and preserve identical-rule memory.
 
         Loaded Rule definitions (including nested payloads) are read-only;
         changes must be applied through load_rules to recompile their identity.
+        Return the unchanged expanded Rule IDs from this same compilation so
+        runtime consumers preserve exactly the memory that the Engine preserves.
         """
         policies = target_policies
         if policies is None:
@@ -572,6 +574,7 @@ class Engine:
         self._generated_fields = {
             key: value for key, value in self._generated_fields.items() if key[0] in unchanged
         }
+        return frozenset(unchanged)
 
     @staticmethod
     def rule_fingerprint(rule: Rule) -> str:

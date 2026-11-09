@@ -39,7 +39,6 @@ from ._engine import Engine, RuleLoadError, __version__
 from ._engine.alerting import AlertCoordinator, AlertStateUnavailableError
 from ._engine.alerting.policy import AlertingPolicyRepository
 from ._engine.ha_adapter import (
-    clear_state_change_pulses,
     manual_set_from_service_data,
     pulse_state_change,
     scene_activation_plan,
@@ -92,6 +91,7 @@ from .rule_store import StorageRuleStore, rule_store_key
 from .runtime_context import IntentionalContextTracker, new_intentional_context
 from .selector_ingest import MembershipChange, SelectorMembershipPlanner
 from .sensor import IntentionalSummarySensor, IntentionalTargetSensor
+from .tick_driver import TickDriver
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -100,7 +100,6 @@ MANUAL_OVERRIDE_TTL_SECONDS = 7200
 DRIFT_OVERRIDE_TTL_SECONDS = 300
 DRIFT_CONFIRMATION_MS = 1_500
 SERVICE_FAILURE_BACKOFF_MS = 30_000
-STABLE_STAGE_INTERVAL_MS = 1_000
 SERVICE_TIMEOUT_SECONDS = 30
 SHUTDOWN_TIMEOUT_SECONDS = 5
 
@@ -601,7 +600,6 @@ async def _async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN][runtime_key(entry.entry_id)] = _runtime
     # Prefer graceful shutdown; unload cancels a stalled worker after a
     # bounded grace period, keeping unfinished durable obligations retryable.
-    stop_event = _runtime.stop_event
 
     def _lifecycle_snapshot() -> dict[str, Any]:
         snapshot = engine.export_lifecycle_records()
@@ -628,13 +626,7 @@ async def _async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def _commit_rules(prepared: tuple[list[Rule], set[str]]) -> None:
         new_rules, new_referenced = prepared
         async with _runtime.mutation_lock:
-            old_fingerprints = engine.rule_fingerprints()
-            new_fingerprints = {rule.id: engine.rule_fingerprint(rule) for rule in new_rules}
-            unchanged_ids = {
-                rule_id for rule_id, fingerprint in new_fingerprints.items()
-                if old_fingerprints.get(rule_id) == fingerprint
-            }
-            engine.load_rules(new_rules)
+            unchanged_ids = engine.load_rules(new_rules)
             _apply_membership_change(hass, engine, selector_planner.configure(new_rules, new_referenced | engine.manual_observation_entities()))
             sync_time_context_into_engine(engine, dt_util.now())
             engine.evaluate_all()
@@ -670,218 +662,33 @@ async def _async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     automatic_rollback.set_coordinator(mutation_coordinator)
     hass.data[DOMAIN][mutation_coordinator_key(entry.entry_id)] = mutation_coordinator
 
-    async def _tick_loop() -> None:
-        try:
-            while not stop_event.is_set():
-                # Sleep with a timeout so we can react to stop_event promptly.
-                try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=tick_interval_ms / 1000)
-                    # If wait() returned normally, stop was requested.
-                    break
-                except TimeoutError:
-                    pass  # normal tick interval
-                if _runtime.unloading:
-                    continue
-                cycle_revision = _runtime.revision
-                cycle_started_ms = _monotonic_ms()
-                lock_wait_started_ms = cycle_started_ms
-                async with _runtime.mutation_lock:
-                    _runtime.record_timing(
-                        "mutation_lock_wait", _monotonic_ms() - lock_wait_started_ms
-                    )
-                    if stop_event.is_set():
-                        _runtime.tick_idle.set()
-                        break
-                    if _runtime.unloading:
-                        _runtime.tick_idle.set()
-                        continue
-                    _runtime.tick_idle.clear()
-                    pulse_drain = _runtime.pulses.begin_drain()
-                    evaluation_started_ms = _monotonic_ms()
-                    try:
-                        # Drive the engine's evaluation cycle
-                        sync_time_context_into_engine(engine, dt_util.now())
-                        _apply_membership_change(
-                            hass,
-                            engine,
-                            selector_planner.update_owned(
-                                set(engine.list_active_targets()) | engine.manual_observation_entities()
-                                | set(_reconciler.pending_withdraw_targets())
-                            ),
-                        )
-                        engine.evaluate_all()
-                        alert_observations = engine.alert_observations(
-                            pulse_drain.tokens,
-                            pulse_drain.source_timestamps_ms,
-                        )
-                        now_ms = _monotonic_ms()
-                        _runtime.active_rule_ids = _record_rule_activity_changes(
-                            hass,
-                            engine,
-                            _runtime.active_rule_ids,
-                        )
-                        engine.tick(tick_interval_ms)
-                        tick_revision = _runtime.advance_revision()
-                        lifecycle_writer.mutated()
-                        _runtime.record_timing(
-                            "evaluation", _monotonic_ms() - evaluation_started_ms
-                        )
-                    except Exception as err:  # noqa: BLE001
-                        now_ms = _monotonic_ms()
-                        _runtime.mark_failure(err, now_ms=now_ms)
-                        # Rollback commits acquire mutation_lock; run after this
-                        # failed cycle releases it rather than deadlocking here.
-                        hass.async_create_task(
-                            automatic_rollback.async_failure(
-                                err,
-                                stage="evaluation",
-                                generation=rule_store.generation,
-                                revision=cycle_revision,
-                            )
-                        )
-                        if _runtime.should_report_failure(now_ms=now_ms):
-                            _LOGGER.exception("Intentional tick failed; continuing")
-                            record_diagnostic(hass, "tick_failed", error=str(err))
-                        _runtime.tick_idle.set()
-                        continue
-                alerting_started_ms = _monotonic_ms()
-                try:
-                    if alerting.available and _runtime.stage_due(
-                        "alert_observation",
-                        now_ms=alerting_started_ms,
-                        interval_ms=STABLE_STAGE_INTERVAL_MS,
-                        force=bool(pulse_drain),
-                    ):
-                        async with asyncio.timeout(SERVICE_TIMEOUT_SECONDS):
-                            await alerting.async_observe(alert_observations, now_ms=engine.now_ms())
-                        alerting_deadline_driver.wake()
-                    _runtime.record_timing(
-                        "alerting", _monotonic_ms() - alerting_started_ms
-                    )
-                    # Effect activation must cross the durable storage boundary.
-                    persistence_started_ms = _monotonic_ms()
-                    await lifecycle_writer.async_flush()
-                    _runtime.record_timing(
-                        "persistence", _monotonic_ms() - persistence_started_ms
-                    )
-                    if lifecycle_writer.current_error is not None:
-                        _runtime.tick_idle.set()
-                        continue
-                    reconciliation_started_ms = _monotonic_ms()
-                    events = await _reconciler.tick(
-                        engine,
-                        _ha_adapter,
-                        _intentional_contexts,
-                        now_ms,
-                        revision_is_current=lambda revision=tick_revision: _runtime.is_revision(
-                            revision
-                        ),
-                        before_dispatch=lambda: automatic_rollback.async_disqualify(
-                            "service_call_attempted"
-                        ),
-                    )
-                    _runtime.record_timing(
-                        "reconciliation", _monotonic_ms() - reconciliation_started_ms
-                    )
-                    dispatch_started_ms = _monotonic_ms()
-                    reconciliation_commit_started_ms = _monotonic_ms()
-                    async with _runtime.mutation_lock:
-                        if not _runtime.is_revision(tick_revision):
-                            _runtime.tick_idle.set()
-                            continue
-                        _apply_reconciliation_events(
-                            hass,
-                            engine,
-                            events,
-                            now_ms=now_ms,
-                            rate_limiter=_diagnostic_rate_limiter,
-                            reconciler=_reconciler,
-                        )
-                        # Activate any newly-firing scene rules
-                        previous_scenes = set(_runtime.active_scenes)
-                    _runtime.record_timing(
-                        "reconciliation_commit",
-                        _monotonic_ms() - reconciliation_commit_started_ms,
-                    )
-                    effect_dispatch_started_ms = _monotonic_ms()
-                    active_scenes = await _activate_scenes_and_dispatch_effects(
-                        hass,
-                        engine,
-                        _intentional_contexts,
-                        _runtime,
-                        lifecycle_writer,
-                        previous_scenes,
-                        tick_revision,
-                        before_dispatch=lambda: automatic_rollback.async_disqualify(
-                            "effect_or_scene_call_attempted"
-                        ),
-                    )
-                    _runtime.record_timing(
-                        "effect_dispatch", _monotonic_ms() - effect_dispatch_started_ms
-                    )
-                    if active_scenes is None:
-                        _runtime.tick_idle.set()
-                        continue
-                    finalization_started_ms = _monotonic_ms()
-                    async with _runtime.mutation_lock:
-                        if not _runtime.is_revision(tick_revision):
-                            _runtime.tick_idle.set()
-                            continue
-                        _runtime.active_scenes = active_scenes
-                        pulses_to_clear = _runtime.pulses.current_entity_ids(pulse_drain)
-                        if pulses_to_clear:
-                            clear_state_change_pulses(engine, set(pulses_to_clear))
-                            _runtime.pulses.finish_drain(pulse_drain)
-                            engine.evaluate_all()
-                            _reconciler.drop_inactive_applied(set(engine.list_active_targets()))
-                        _runtime.mark_success(now_ms=_monotonic_ms())
-                        await automatic_rollback.async_success(
-                            generation=rule_store.generation,
-                            revision=cycle_revision,
-                            next_revision=_runtime.revision,
-                        )
-                        lifecycle_writer.mutated()
-                    _runtime.record_timing(
-                        "finalization", _monotonic_ms() - finalization_started_ms
-                    )
-                    publication_started_ms = _monotonic_ms()
-                    if _runtime.stage_due(
-                        "publication",
-                        now_ms=publication_started_ms,
-                        interval_ms=STABLE_STAGE_INTERVAL_MS,
-                    ) and publication.publish_if_changed():
-                        _reconciler.record_publication_dispatch(engine.now_ms())
-                    _runtime.record_timing(
-                        "publication", _monotonic_ms() - publication_started_ms
-                    )
-                    _runtime.record_timing(
-                        "dispatch", _monotonic_ms() - dispatch_started_ms
-                    )
-                    _runtime.record_timing(
-                        "cycle", _monotonic_ms() - cycle_started_ms
-                    )
-                    _runtime.tick_idle.set()
-                except Exception as err:  # noqa: BLE001
-                    now_ms = _monotonic_ms()
-                    _runtime.mark_failure(err, now_ms=now_ms)
-                    if _runtime.should_report_failure(now_ms=now_ms):
-                        _LOGGER.exception("Intentional tick failed; continuing")
-                        record_diagnostic(hass, "tick_failed", error=str(err))
-                    _runtime.tick_idle.set()
-        finally:
-            _runtime.tick_idle.set()
-            try:
-                lifecycle_writer.mutated()
-                await lifecycle_writer.async_flush(force=True)
-                if lifecycle_writer.current_error is not None:
-                    record_diagnostic(
-                        hass,
-                        "lifecycle_save_failed",
-                        error=lifecycle_writer.current_error,
-                    )
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.exception("Could not save final Intentional lifecycle state")
-                record_diagnostic(hass, "lifecycle_save_failed", error=str(err))
+    def _prepare_tick_inputs() -> None:
+        sync_time_context_into_engine(engine, dt_util.now())
+        _apply_membership_change(
+            hass, engine,
+            selector_planner.update_owned(
+                set(engine.list_active_targets()) | engine.manual_observation_entities()
+                | set(_reconciler.pending_withdraw_targets())
+            ),
+        )
+
+    tick_driver = TickDriver(
+        hass=hass, engine=engine, runtime=_runtime, reconciler=_reconciler,
+        ha_adapter=_ha_adapter, contexts=_intentional_contexts, writer=lifecycle_writer,
+        alerting=alerting, alert_deadlines=alerting_deadline_driver,
+        rollback=automatic_rollback, rules=rule_store, publication=publication,
+        prepare_inputs=_prepare_tick_inputs,
+        record_activity=lambda previous: _record_rule_activity_changes(hass, engine, previous),
+        commit_events=lambda events, now_ms: _apply_reconciliation_events(
+            hass, engine, events, now_ms=now_ms,
+            rate_limiter=_diagnostic_rate_limiter, reconciler=_reconciler,
+        ),
+        dispatch_effects=lambda previous, revision, before_dispatch: _activate_scenes_and_dispatch_effects(
+            hass, engine, _intentional_contexts, _runtime, lifecycle_writer,
+            previous, revision, before_dispatch=before_dispatch,
+        ),
+        clock=_monotonic_ms,
+    )
 
     # Set up services
     await _register_services(
@@ -979,7 +786,7 @@ async def _async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     engine.evaluate_all()
     alerting_deadline_driver.start(entry)
     _runtime.tick_task = entry.async_create_background_task(
-        hass, _tick_loop(), name=f"{DOMAIN}_tick"
+        hass, tick_driver.async_run(), name=f"{DOMAIN}_tick"
     )
     return True
 

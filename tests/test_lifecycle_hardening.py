@@ -191,6 +191,34 @@ def test_compiled_identity_is_reused_and_replaced_transactionally(monkeypatch) -
     assert engine.rule_fingerprints() == current
 
 
+def test_reload_returns_the_same_unchanged_ids_used_to_preserve_engine_memory() -> None:
+    rules = load_rules_from_string("""
+- id: stable
+  while: {binary_sensor.room: "on"}
+  after: 10s
+  intent: {light.room: {state: "on"}}
+- id: changed
+  while: {binary_sensor.room: "on"}
+  after: 10s
+  intent: {light.other: {state: "on"}}
+""")
+    engine = Engine(clock_fn=lambda: 0)
+    assert engine.load_rules(rules) == frozenset()
+    engine.update_state("binary_sensor.room", "on")
+    engine.evaluate_all()
+    engine.advance_clock(5000)
+    unchanged = engine.load_rules([
+        replace(rules[0], source_line=99),
+        replace(rules[1], set={"state": "off"}),
+    ])
+    assert unchanged == frozenset({"stable"})
+    engine.evaluate_all()
+    engine.advance_clock(5000)
+    engine.evaluate_all()
+    assert engine.has_active_target("light.room")
+    assert not engine.has_active_target("light.other")
+
+
 def test_alert_declaration_does_not_invalidate_intent_lifecycle() -> None:
     without_alert = load_rules_from_string("""
 - id: stable
