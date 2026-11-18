@@ -95,7 +95,7 @@ from .tick_driver import TickDriver
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH, Platform.BUTTON]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH, Platform.BUTTON, Platform.SELECT]
 MANUAL_OVERRIDE_TTL_SECONDS = 7200
 DRIFT_OVERRIDE_TTL_SECONDS = 300
 DRIFT_CONFIRMATION_MS = 1_500
@@ -203,7 +203,8 @@ FRONTEND_STATIC_REGISTERED = "frontend_static_registered"
 FIRE_SERVICE_SCHEMA = vol.Schema(
     {
         vol.Required(ATTR_TARGET): cv.entity_id,
-        vol.Optional("resume"): vol.In(["timed", "until_vacant", "until_resumed"]),
+        vol.Optional("resume"): vol.In(["timed", "until_vacant", "until_resumed", "activation"]),
+        vol.Optional("hold", default=False): cv.boolean,
         vol.Optional("state"): cv.string,
         vol.Optional("brightness_pct"): vol.All(int, vol.Range(min=0, max=100)),
         vol.Optional("brightness"): vol.All(int, vol.Range(min=0, max=255)),
@@ -1346,6 +1347,7 @@ async def _register_services(
                 set=set_dict,
                 ttl_ms=ttl_ms,
                 resume=call.data.get("resume"),
+                hold=call.data.get("hold", False),
                 reason=f"Manual fire service at {call.service}",
             )
             # Force a re-evaluation cycle

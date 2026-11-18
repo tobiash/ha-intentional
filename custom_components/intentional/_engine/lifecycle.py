@@ -40,7 +40,7 @@ def export_lifecycle_records(
                 intent.rule_id
                 or intent.ttl_ms is not None
                 or intent.ignore_when
-                or intent.authority is Authority.USER
+                or intent.authority in {Authority.USER, Authority.HOLD}
             )
         ],
         "active_effect_rule_ids": sorted(active_effect_rule_ids),

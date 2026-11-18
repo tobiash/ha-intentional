@@ -61,7 +61,7 @@ A Home Assistant entity whose state a **Rule**'s **Intent** aims to control.
 _Avoid_: device, entity (too broad — every HA entity is an entity).
 
 **Authority**:
-The precedence tier of an **Intent**: `sensor < automation < user`. Within a tier, confidence then recency break ties.
+The precedence tier of an **Intent**: `sensor < automation < user < important < hold < protected`. Within a tier, confidence then recency break ties. Important Rules can interrupt ordinary manual control; explicit holds outrank them; protected Rules require explicit pause.
 _Avoid_: priority (overloaded).
 
 **Service plan**:
@@ -73,11 +73,11 @@ Observed divergence between a **Target**'s actual Home Assistant state and the *
 _Avoid_: mismatch, deviation.
 
 **Manual override**:
-A `user`-authority **Intent** created from a direct user command, confirmed **Drift**, or the `intentional.fire` service, with a captured **Resume policy**.
+A `user`-authority **Intent** created from a direct user command, confirmed **Drift**, or the `intentional.fire` service, with a captured **Resume policy**. An explicit hold uses `hold` Authority and covers future activations as well.
 _Avoid_: user intent (too broad — any user-authority intent qualifies).
 
 **Resume policy**:
-The condition that ends a **Manual override**: elapsed duration, stable vacancy, or explicit resumption. A vacancy-based manual off also waits for underlying lighting demand to end.
+The condition that ends a **Manual override**: elapsed duration, stable vacancy, activation boundaries, or explicit resumption. A vacancy-based manual off also waits for underlying lighting demand to end. Activation-scoped control dismisses current Rule contributions per Target until each retained contribution ends; a fresh ordinary activation may take over without reviving other dismissed contributions.
 _Avoid_: timeout (only one policy is timed).
 
 **Reconciliation**:

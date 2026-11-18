@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .animation import AnimationSpec
-from .intent import Intent
+from .intent import Authority, Intent
 from .registry import LIGHT_COLOR_FIELDS as COLOR_FIELDS
 
 # Device-specific physical bounds applied after modifiers.
@@ -93,6 +93,16 @@ class ResolvedIntent:
     field_providers: dict[str, Intent] = field(default_factory=dict)
 
 
+def explicitly_held_fields(intents: list[Intent]) -> set[str]:
+    """Return fields protected from lower-authority modifiers, including aliases."""
+    names = {name for i in intents if not i.rule_id and i.authority is Authority.HOLD for name in i.set}
+    if names & {"brightness", "brightness_pct"}:
+        names.update({"brightness", "brightness_pct"})
+    if names.intersection(COLOR_FIELDS):
+        names.update(COLOR_FIELDS)
+    return names
+
+
 def resolve_intents(
     target: str,
     intents: list[Intent],
@@ -121,6 +131,16 @@ def resolve_intents(
     ]
     if not active:
         return None
+
+    # Explicit holds protect their fields from lower-authority modifiers too.
+    # Ordinary manual control retains the existing accumulating-bound behavior.
+    held_fields = explicitly_held_fields(active)
+
+    def modifiers(intent: Intent, kind: str) -> dict[str, Any]:
+        return {
+            name: value for name, value in getattr(intent, kind).items()
+            if intent.authority >= Authority.HOLD or name not in held_fields
+        }
 
     # Pick the winner: highest authority → highest confidence → newest → id.
     # This is used for transition/easing/animation metadata.
@@ -154,12 +174,18 @@ def resolve_intents(
             if any(field in COLOR_FIELDS for field in intent.set)
         ]
         color_winner = max(color_providers, key=lambda i: i.priority) if color_providers else None
+        brightness_providers = [i for i in set_providers if "brightness" in i.set or "brightness_pct" in i.set]
+        brightness_winner = max(brightness_providers, key=lambda i: i.priority) if brightness_providers else None
 
         # For each field, find the highest-priority provider
         baseline = {}
         field_providers: dict[str, Intent] = {}
         for field_name in all_fields:
             providers = [i for i in set_providers if field_name in i.set]
+            if field_name in {"brightness", "brightness_pct"} and brightness_winner is not None:
+                if field_name not in brightness_winner.set:
+                    continue
+                providers = [brightness_winner]
             if field_name in COLOR_FIELDS and color_winner is not None:
                 if field_name not in color_winner.set:
                     continue
@@ -174,25 +200,25 @@ def resolve_intents(
     # Apply cap: smallest cap wins
     result = dict(baseline)
     for intent in active:
-        for field_name, cap_value in intent.cap.items():
+        for field_name, cap_value in modifiers(intent, "cap").items():
             if field_name in result:
                 result[field_name] = _min_clamp(result[field_name], cap_value)
 
     # Apply floor: largest floor wins
     for intent in active:
-        for field_name, floor_value in intent.floor.items():
+        for field_name, floor_value in modifiers(intent, "floor").items():
             if field_name in result:
                 result[field_name] = _max_clamp(result[field_name], floor_value)
 
     # Apply offset: all offsets sum
     for intent in active:
-        for field_name, delta in intent.offset.items():
+        for field_name, delta in modifiers(intent, "offset").items():
             if field_name in result:
                 result[field_name] = _add(result[field_name], delta)
 
     # Apply multiply: each multiply applies once to the post-offset value
     for intent in active:
-        for field_name, factor in intent.multiply.items():
+        for field_name, factor in modifiers(intent, "multiply").items():
             if field_name in result:
                 result[field_name] = _multiply(result[field_name], factor)
 
@@ -207,12 +233,12 @@ def resolve_intents(
     caps: dict[str, Any] = {}
     floors: dict[str, Any] = {}
     for intent in active:
-        for field_name, floor_value in intent.floor.items():
+        for field_name, floor_value in modifiers(intent, "floor").items():
             floors[field_name] = _max_clamp(floors.get(field_name, floor_value), floor_value)
             if field_name in result:
                 result[field_name] = _max_clamp(result[field_name], floor_value)
     for intent in active:
-        for field_name, cap_value in intent.cap.items():
+        for field_name, cap_value in modifiers(intent, "cap").items():
             caps[field_name] = _min_clamp(caps.get(field_name, cap_value), cap_value)
             if field_name in result:
                 result[field_name] = _min_clamp(result[field_name], cap_value)

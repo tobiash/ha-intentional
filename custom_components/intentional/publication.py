@@ -87,6 +87,16 @@ class EntityPublication:
             "global": self._engine.is_enabled(),
         }
         infos = {str(info["id"]): info for info in self._rule_store.list_rules()}
+        for target in getattr(self._engine, "hold_control_targets", lambda: ())():
+            resolved = self._engine.resolve(target)
+            winner = resolved.winning_intent if resolved else None
+            projection[f"hold:{target}"] = (
+                self._engine.target_policy(target).as_dict(),
+                tuple(self._engine.dismissed_rule_ids(target)),
+                tuple((i.authority.value, i.manual_resume, i.expires_at_ms(), _freeze(i.set))
+                      for i in self._engine.list_active_user_intents(target)),
+                (winner.rule_id, winner.authority.value) if winner else None,
+            )
         for rule_id, status in statuses.items():
             projection[f"rule:{rule_id}"] = (
                 str(infos.get(rule_id, {}).get("filename", "")),

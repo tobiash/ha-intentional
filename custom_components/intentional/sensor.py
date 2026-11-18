@@ -40,6 +40,7 @@ from .const import (
     DOMAIN,
 )
 from .entity_lifecycle import RegistrationAwareEntity
+from .hold_controls import HoldStatus, setup_hold_entities
 from .publication import publication_signal
 from .room_controls import area_for_target, room_controls_for_engine, slugify_area_id
 
@@ -53,6 +54,7 @@ async def async_setup_entry(
 ) -> None:
     """Set up the Intentional sensor entities."""
     engine = hass.data[DOMAIN][entry.entry_id]
+    await setup_hold_entities(hass, entry, async_add_entities, lambda target: [HoldStatus(hass, entry, target)])
 
     # Summary sensor — always present
     summary = IntentionalSummarySensor(hass, engine, entry)
@@ -180,6 +182,7 @@ def _cleanup_legacy_target_sensors(hass: HomeAssistant, entry: ConfigEntry) -> N
             unique_id.startswith(prefix)
             and not unique_id.startswith(f"{prefix}area_")
             and not unique_id.startswith(f"{prefix}alert_")
+            and not unique_id.startswith(f"{prefix}hold_")
         ):
             registry.async_remove(entity_id)
 

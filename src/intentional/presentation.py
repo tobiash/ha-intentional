@@ -11,7 +11,7 @@ def intent_sensor_state(resolved: Any | None) -> str:
         return "idle"
     winner = getattr(resolved, "winning_intent", None)
     authority = getattr(getattr(winner, "authority", None), "value", None)
-    if authority == "user":
+    if authority in {"user", "hold"}:
         return "manual_override"
     return "active"
 

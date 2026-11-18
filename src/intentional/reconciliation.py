@@ -927,7 +927,7 @@ class Reconciliation:
                 explicit_user
                 or (
                     winner is not None
-                    and winner.authority is Authority.USER
+                    and winner.authority in {Authority.USER, Authority.HOLD}
                     and not winner.rule_id
                 )
             ):
@@ -2139,7 +2139,7 @@ def target_policy_denial(
 def _field_has_user_authority(intents: list[Any], field: str) -> bool:
     providers = [intent for intent in intents if field in intent.set]
     return bool(
-        providers and max(providers, key=lambda intent: intent.priority).authority.value == "user"
+        providers and max(providers, key=lambda intent: intent.priority).authority.value in {"user", "hold"}
     )
 
 

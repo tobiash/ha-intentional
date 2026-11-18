@@ -126,6 +126,7 @@ Rollback records the pre-rollback document in history, so it can be undone.
 
 ## Rule Authoring Notes
 
+- When authoring lighting manual-control behavior, read `docs/rules.md` → **Manual control and resuming automation**. Propose an explicit yielding policy and explain its reset boundary before saving. Use activation dismissal for current sessions, important authority for temporary interruptions, and explicit holds for future activations. Named `hold_controls` scopes expose native dashboard entities. Reserve protected authority for explicitly requested protection.
 - Prefer `while -> intent` rules. Use `after` for dwell and `hold` for retention after the original situation changes.
 - Reuse document-level `retention_profiles` with `hold: {use: NAME}` and strict `HH:MM` `time_windows` with `time_window: {in: NAME}` or `{not_in: NAME}`. Semantic `power` matches only `sensor` entities with device class `power` and compares raw native numeric state values.
 - Use `hold.until` with `for` for noisy false-off presence sensors, e.g. “hold until presence has been off for 15m”.

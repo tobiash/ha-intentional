@@ -2220,14 +2220,19 @@ def _target_policies_from_document(raw_targets: Any, *, file: Path | None) -> di
             raise RuleLoadError(f"Target {target!r}: `user_authority` must contain only fields and states", file=file)
         max_retries = raw.get("max_retries")
         manual = raw.get("manual_override", {})
-        if not isinstance(manual, dict) or set(manual) - {"resume", "duration", "vacancy_entity", "vacancy_for", "unattributed"}:
+        if not isinstance(manual, dict) or set(manual) - {"resume", "duration", "vacancy_entity", "vacancy_for", "unattributed", "hold_controls"}:
             raise RuleLoadError(f"Target {target!r}: invalid manual_override fields", file=file)
         resume = manual.get("resume", "timed")
         detection = manual.get("unattributed", "all")
         if detection not in {"all", "power", "ignore"}:
             raise RuleLoadError(f"Target {target!r}: unattributed must be all, power, or ignore", file=file)
-        if resume not in {"timed", "until_vacant", "until_resumed"}:
-            raise RuleLoadError(f"Target {target!r}: manual_override.resume must be timed, until_vacant, or until_resumed", file=file)
+        if resume not in {"timed", "until_vacant", "until_resumed", "activation"}:
+            raise RuleLoadError(f"Target {target!r}: manual_override.resume must be timed, until_vacant, until_resumed, or activation", file=file)
+        controls = manual.get("hold_controls", False)
+        if not isinstance(controls, (bool, str)) or (isinstance(controls, str) and (not controls.strip() or len(controls) > 80)) or (controls and not target.startswith("light.")):
+            raise RuleLoadError(f"Target {target!r}: hold_controls must be boolean or a nonempty scope name (up to 80 characters), and is supported only for lights", file=file)
+        if controls and (ownership != "managed" or dispatch != "apply"):
+            raise RuleLoadError(f"Target {target!r}: hold_controls requires managed ownership and apply dispatch", file=file)
         vacancy = manual.get("vacancy_entity")
         if resume == "until_vacant" and (not isinstance(vacancy, str) or not vacancy.startswith("binary_sensor.") or len(vacancy.split(".")) != 2 or not vacancy.split(".")[1]):
             raise RuleLoadError(f"Target {target!r}: until_vacant requires a binary_sensor vacancy_entity", file=file)
@@ -2255,6 +2260,7 @@ def _target_policies_from_document(raw_targets: Any, *, file: Path | None) -> di
             manual_duration_ms=duration,
             vacancy_entity=vacancy,
             vacancy_for_ms=vacancy_for,
+            hold_controls=controls,
             user_authority_fields=_string_set(user.get("fields", []), target, "user_authority.fields", file) or frozenset(),
             user_authority_states=_string_set(user.get("states", []), target, "user_authority.states", file) or frozenset(),
         )

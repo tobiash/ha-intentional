@@ -37,23 +37,29 @@ def _copy_field_dict(value: dict[str, Any] | None) -> dict[str, Any]:
 class Authority(Enum):
     """Priority tier of an intent. Higher value = higher priority.
 
-    The three tiers map to common sources of intent in home automation:
+    The tiers map to common sources of intent in home automation:
     - SENSOR: raw sensor readings (light level, temperature, time of day)
     - AUTOMATION: rules and scripts reacting to sensor or device state
     - USER: explicit user action (button press, voice command, dashboard toggle)
+    - IMPORTANT: a rule that may interrupt ordinary manual preferences
+    - HOLD: an explicit user hold, including future rule activations
+    - PROTECTED: a rule requiring explicit pause/dismissal, not ordinary controls
 
-    Authorities are ordered: SENSOR < AUTOMATION < USER. This ordering is
+    Authorities are ordered: SENSOR < AUTOMATION < USER < IMPORTANT < HOLD < PROTECTED. This ordering is
     baked into the enum and used directly for intent comparison.
     """
 
     SENSOR = "sensor"
     AUTOMATION = "automation"
     USER = "user"
+    IMPORTANT = "important"
+    HOLD = "hold"
+    PROTECTED = "protected"
 
     @property
     def value_index(self) -> int:
         """Integer value suitable for comparison. Higher = more authority."""
-        order = {"sensor": 10, "automation": 50, "user": 100}
+        order = {"sensor": 10, "automation": 50, "user": 100, "important": 150, "hold": 200, "protected": 250}
         return order[self.value]
 
     def __lt__(self, other: Authority) -> bool:

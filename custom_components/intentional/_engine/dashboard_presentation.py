@@ -103,7 +103,7 @@ def dashboard_presentation(
         "global_enabled": engine.is_enabled(),
         "rules": rows,
         "targets": targets,
-        "capabilities": {"resume_targets": [t["target"] for t in targets if t["manual_override"]]},
+        "capabilities": {"resume_targets": [t["target"] for t in targets if t["manual_override"] or t.get("dismissed_rule_ids")]},
     })
 
 
@@ -132,7 +132,7 @@ def _contribution(engine, target, rule_ids, intents, projection) -> dict[str, An
     })
     manual_fields = [
         f["field"] for f in projection["fields"]
-        if f["provider"] and f["provider"]["authority"] == "user"
+        if f["provider"] and f["provider"]["authority"] in {"user", "hold"}
         and not f["provider"]["rule_id"] and any(f["field"] in i.set for i in own)
     ]
     impact_known = not any(i.animation is not None for i in intents)
@@ -154,6 +154,7 @@ def _contribution(engine, target, rule_ids, intents, projection) -> dict[str, An
         "impact_known": impact_known,
         "manual_precedence_fields": manual_fields,
         "state": (
+            "dismissed" if rule_ids.intersection(projection.get("dismissed_rule_ids", [])) else
             "inactive" if not own else "contributing" if baseline or changed else
             ("modifier_no_change" if impact_known else "modifier_unknown") if modifiers else "competing"
         ),

@@ -21,13 +21,15 @@ def dsl_schema() -> dict[str, Any]:
         "target_ownership": ["managed", "opportunistic", "observe_only"],
         "target_unavailable_policy": ["allow", "skip"],
         "target_dispatch": ["apply", "shadow"],
+        "authority": ["sensor", "automation", "user", "important", "hold", "protected"],
         "manual_override_policy": {
             "path": "targets.<target>.manual_override",
-            "resume": ["timed", "until_vacant", "until_resumed"],
-            "fields": ["resume", "duration", "vacancy_entity", "vacancy_for", "unattributed"],
+            "resume": ["timed", "until_vacant", "until_resumed", "activation"],
+            "fields": ["resume", "duration", "vacancy_entity", "vacancy_for", "unattributed", "hold_controls"],
             "unattributed": ["all", "power", "ignore"],
             "default_resume": "timed",
             "default_vacancy_for": "30s",
+            "hold_controls": {"type": "boolean_or_scope_name", "default": False, "scope_name_max_length": 80, "domains": ["light"]},
         },
         "observe_operators": [
             "is", "is_not", "lt", "lte", "gt", "gte", "all", "any",

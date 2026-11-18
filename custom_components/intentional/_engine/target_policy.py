@@ -23,6 +23,7 @@ class TargetPolicy:
     manual_duration_ms: int | None = None
     vacancy_entity: str | None = None
     vacancy_for_ms: int = 30_000
+    hold_controls: bool | str = False
 
     def as_dict(self) -> dict[str, Any]:
         """Return a stable JSON-friendly representation."""
@@ -41,5 +42,6 @@ class TargetPolicy:
                 "duration_ms": self.manual_duration_ms,
                 "vacancy_entity": self.vacancy_entity,
                 "vacancy_for_ms": self.vacancy_for_ms,
+                "hold_controls": self.hold_controls,
             },
         }

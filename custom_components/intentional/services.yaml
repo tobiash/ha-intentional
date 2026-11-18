@@ -10,6 +10,11 @@ fire:
     Manually emit a user-authority intent for a target entity. Useful
     for triggering a light state from an automation, script, or button.
   fields:
+    hold:
+      name: Explicit hold
+      description: Protect the requested fields against future ordinary and important rule activations. Protected authority still wins. Use timed or until_resumed.
+      selector:
+        boolean:
     resume:
       name: Resume policy
       description: When rule control resumes. Until vacant requires a vacancy sensor configured in the target policy. Omit to use that policy.
@@ -19,6 +24,7 @@ fire:
             - timed
             - until_vacant
             - until_resumed
+            - activation
     target:
       name: Target
       description: The entity_id to apply the intent to (e.g. light.kitchen).

@@ -15,6 +15,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from ._engine.runtime import TickRuntime, runtime_key
 from .const import DEFAULT_NAME, DOMAIN
+from .hold_controls import HoldButton, setup_hold_entities
 from .lifecycle_writer import mark_lifecycle_mutated
 from .publication import publication_key, publication_signal
 from .room_controls import area_for_target, room_controls_for_engine, slugify_area_id
@@ -27,6 +28,9 @@ async def async_setup_entry(
 ) -> None:
     """Set up Intentional button entities."""
     engine = hass.data[DOMAIN][entry.entry_id]
+    await setup_hold_entities(hass, entry, async_add_entities, lambda target: [
+        HoldButton(hass, entry, target, action) for action in ("off", "current", "resume")
+    ])
     _cleanup_legacy_target_buttons(hass, entry)
     entities: list[ButtonEntity] = [
         IntentionalReloadButton(hass, entry),

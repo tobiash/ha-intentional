@@ -165,6 +165,7 @@ class Engine:
         self.state: dict[str, Any] = {}
         self._active_intents: list[Intent] = []
         self._manual_vacant_since: dict[str, int] = {}
+        self._manual_dismissals: dict[str, dict[str, str]] = {}
         self._time_of_day: str | TimeOfDay | None = None
         self._clock_fn = clock_fn or (lambda: int(time.time() * 1000))
         self._selector_resolver = selector_resolver or (lambda _selector: [])
@@ -203,6 +204,7 @@ class Engine:
             now_ms=self.now_ms(),
         )
         records["enabled"] = self._enabled
+        records["manual_dismissals"] = {target: dict(rules) for target, rules in self._manual_dismissals.items()}
         records["paused_labels"] = sorted(self._paused_labels)
         records["paused_rule_ids"] = sorted(self._paused_rule_ids)
         records["rule_activations"] = [
@@ -246,6 +248,17 @@ class Engine:
         self._generated_fields.update(generated_fields)
         self._effect_outbox = restore_effect_outbox(records)
         assert records is not None
+        dismissals = records.get("manual_dismissals", {})
+        if isinstance(dismissals, dict):
+            self._manual_dismissals = {
+                target: {
+                    rule_id: fingerprint for rule_id, fingerprint in rules.items()
+                    if isinstance(rule_id, str) and rule_id in self._rules
+                    and self._rules[rule_id].fingerprint == fingerprint
+                }
+                for target, rules in dismissals.items()
+                if isinstance(target, str) and isinstance(rules, dict)
+            }
         paused_labels = records.get("paused_labels")
         if isinstance(paused_labels, list):
             self._paused_labels = {
@@ -326,6 +339,7 @@ class Engine:
         self._enabled = enabled
         if not enabled:
             self._active_intents = []
+            self._manual_dismissals.clear()
             self._active_effect_rule_ids.clear()
             self._terminate_rule_lifecycle(set(self._rules))
 
@@ -619,30 +633,97 @@ class Engine:
     def add_rule(self, rule: Rule) -> None:
         """Add or replace a single rule."""
         self.load_rules(
-            [r for r in (pr.rule for pr in self._rules.values()) if r.id != rule.id] + [rule]
+            [r for r in (pr.rule for pr in self._rules.values()) if r.id != rule.id] + [rule],
+            target_policies=self._target_policies,
         )
 
     # ── Manual intent injection ────────────────────────────────────
 
     def emit_manual_intent(
         self, target: str, set: dict[str, Any], *, ttl_ms: int | None = 300_000,
-        reason: str = "Manual user action", resume: str | None = None,
+        reason: str = "Manual user action", resume: str | None = None, hold: bool = False,
     ) -> Intent:
         """Capture a manual request and freeze its configured resume policy."""
         policy = self.target_policy(target) or TargetPolicy()
         mode = resume or policy.manual_resume
-        if mode not in {"timed", "until_vacant", "until_resumed"}:
+        if hold:
+            mode = resume or ("timed" if ttl_ms is not None else "until_resumed")
+        if mode not in {"timed", "until_vacant", "until_resumed", "activation"}:
             raise ValueError("Unknown manual resume policy")
+        if hold and mode not in {"timed", "until_resumed"}:
+            raise ValueError("Explicit holds require timed or until_resumed")
         if mode == "until_vacant" and not policy.vacancy_entity:
             raise ValueError("until_vacant requires a configured vacancy_entity")
-        duration = policy.manual_duration_ms if resume is None and policy.manual_duration_ms is not None else ttl_ms
+        duration = policy.manual_duration_ms if not hold and resume is None and policy.manual_duration_ms is not None else ttl_ms
         if mode == "timed" and (duration is None or duration < 0):
             raise ValueError("Timed manual overrides require a non-negative duration")
-        return self.emit_user_intent(
+        dismissed = dict(self._manual_dismissals.get(target, {})) if mode == "activation" else {}
+        if mode == "activation":
+            dismissed.update({
+                i.rule_id: self._rules[i.rule_id].fingerprint
+                for i in self._active_intents
+                if i.target == target and i.rule_id in self._rules
+                and i.authority < Authority.IMPORTANT
+                and not i.rule_id.startswith("__target_default__:")
+                and not i.is_expired(into_the_future_ms=self.now_ms())
+            })
+            # With no current activation to dismiss, retain the familiar timed
+            # fallback rather than immediately undoing an ordinary light action.
+            if not dismissed:
+                mode = "timed" if duration is not None else "until_resumed"
+        intent = self.emit_user_intent(
             target, set, ttl_ms=duration if mode == "timed" else None, reason=reason,
             manual_resume=mode, vacancy_entity=policy.vacancy_entity if mode == "until_vacant" else None,
             vacancy_for_ms=policy.vacancy_for_ms,
+            authority=Authority.HOLD if hold else Authority.USER,
         )
+        if dismissed:
+            self._manual_dismissals[target] = dismissed
+        return intent
+
+    def dismissed_rule_ids(self, target: str) -> list[str]:
+        """Return current target-scoped activation dismissals."""
+        return sorted(self._manual_dismissals.get(target, {}))
+
+    def hold_control_targets(self) -> tuple[str, ...]:
+        """Return opt-in light targets that expose explicit hold controls."""
+        return tuple(sorted(t for t, p in self._target_policies.items() if p.hold_controls))
+
+    def hold_control_scopes(self) -> dict[str, tuple[str, ...]]:
+        """Group opted-in targets into explicit dashboard control scopes."""
+        scopes: dict[str, list[str]] = {}
+        for target in self.hold_control_targets():
+            setting = self._target_policies[target].hold_controls
+            key = f"scope:{setting}" if isinstance(setting, str) else target
+            scopes.setdefault(key, []).append(target)
+        return {key: tuple(targets) for key, targets in scopes.items()}
+
+    def _update_manual_sessions(self, now: int, waiting: set[str]) -> None:
+        """End dismissals only after their raw, retained contribution ends."""
+        live = {(i.target, i.rule_id) for i in self._active_intents if i.rule_id and not i.is_expired(into_the_future_ms=now)}
+        for target, rules in list(self._manual_dismissals.items()):
+            remaining = {
+                rule_id: fingerprint for rule_id, fingerprint in rules.items()
+                if ((target, rule_id) in live or rule_id in waiting) and rule_id in self._rules
+                and self._rules[rule_id].fingerprint == fingerprint
+            }
+            if remaining:
+                self._manual_dismissals[target] = remaining
+            else:
+                self._manual_dismissals.pop(target, None)
+        # Important interruptions must not consume the manual preference.
+        fresh_targets = {
+            i.target for i in self._active_intents
+            if i.rule_id and i.authority < Authority.IMPORTANT
+            and not i.rule_id.startswith("__target_default__:")
+            and i.rule_id not in self._manual_dismissals.get(i.target, {})
+            and not i.is_expired(into_the_future_ms=now)
+        }
+        self._active_intents = [
+            i for i in self._active_intents
+            if i.manual_resume != "activation" or i.rule_id
+            or (i.target in self._manual_dismissals and i.target not in fresh_targets)
+        ]
 
     def manual_observation_entities(self) -> set[str]:
         """Sensors needed by configured and already captured resume policies."""
@@ -686,6 +767,7 @@ class Engine:
         manual_resume: str | None = None,
         vacancy_entity: str | None = None,
         vacancy_for_ms: int = 30_000,
+        authority: Authority = Authority.USER,
     ) -> Intent:
         """Inject a user-authority intent. Used for manual overrides."""
         self.clear_user_intents(target=target)
@@ -695,7 +777,7 @@ class Engine:
             cap=cap or {},
             floor=floor or {},
             ttl_ms=ttl_ms,
-            authority=Authority.USER,
+            authority=authority,
             reason=reason,
             manual_resume=manual_resume,
             vacancy_entity=vacancy_entity,
@@ -710,13 +792,15 @@ class Engine:
         before = len(self._active_intents)
         if target is None:
             self._manual_vacant_since.clear()
+            self._manual_dismissals.clear()
         else:
             self._manual_vacant_since.pop(target, None)
+            self._manual_dismissals.pop(target, None)
         self._active_intents = [
             intent
             for intent in self._active_intents
             if not (
-                intent.authority is Authority.USER
+                intent.authority in {Authority.USER, Authority.HOLD}
                 and not intent.rule_id
                 and (target is None or intent.target == target)
             )
@@ -885,6 +969,7 @@ class Engine:
                 self._animation_started_at[rule_id] = now
 
         self._active_intents = new_active
+        self._update_manual_sessions(now, set(_for_remaining))
         active_rule_ids = {intent.rule_id for intent in new_active if intent.rule_id}
         for rule_id in active_rule_ids:
             parsed = self._rules.get(rule_id)
@@ -1305,6 +1390,7 @@ class Engine:
             i
             for i in self._active_intents
             if i.target == target and not i.is_expired(into_the_future_ms=now)
+            and i.rule_id not in self._manual_dismissals.get(target, {})
         ]
 
     def list_active_user_intents(self, target: str | None = None) -> list[Intent]:
@@ -1313,7 +1399,7 @@ class Engine:
         return [
             intent
             for intent in self._active_intents
-            if intent.authority is Authority.USER
+            if intent.authority in {Authority.USER, Authority.HOLD}
             and not intent.rule_id
             and (target is None or intent.target == target)
             and not intent.is_expired(into_the_future_ms=now)
@@ -1454,6 +1540,7 @@ class Engine:
             rules_for_target.append(
                 {
                     "rule_id": rule_id,
+                    **({"dismissed": True} if rule_id in self._manual_dismissals.get(target, {}) else {}),
                     "firing": rule_id in firing,
                     "condition_firing": rule_id in condition_firing,
                     "blocked_by": sorted(blocked_by.get(rule_id, [])),
@@ -1472,6 +1559,7 @@ class Engine:
 
         return {
             "target": target,
+            "dismissed_rule_ids": self.dismissed_rule_ids(target),
             "target_policy": None
             if self.target_policy(target) is None
             else self.target_policy(target).as_dict(),

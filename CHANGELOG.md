@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-11-18
+
+### Added
+- Opt-in activation-scoped manual control: dismiss current Rule contributions per Target until their retained activation ends. Fresh presence activations can take over without reviving a dismissed evening schedule. Dismissals survive unchanged reloads and restart, including restart dwell.
+- Important and protected Rule Authority tiers, plus explicit hold Authority. Important indications interrupt ordinary manual preferences temporarily; explicit holds protect selected fields against future ordinary/important activations, while protected Rules still win.
+- Native Hold duration, Hold off, Hold current settings, Resume automation, and Manual control status entities for opt-in light Targets or named multi-light scopes. Timed holds preserve their original expiry across restart; controls use standard HA dashboards without a custom card.
+- Agent-facing policy documentation, machine-readable capabilities, dismissed-contribution explanations, and hold-aware manual recovery.
+
+### Fixed
+- Treat native and percentage brightness as mutually exclusive competing fields, so a captured native-brightness hold cannot leak a lower-priority percentage request.
+- Preserve Target policies when adding an individual Rule.
+
 ## [0.14.0] - 2026-11-10
 
 ### Added

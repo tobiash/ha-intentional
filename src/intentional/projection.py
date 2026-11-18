@@ -8,7 +8,8 @@ from typing import Any, Protocol
 from .adapter.matcher import service_plan_match
 from .adapter.signer import service_plan_signature
 from .adapter.translator import service_calls_for_resolved_target
-from .compositor import resolve_intents
+from .compositor import explicitly_held_fields, resolve_intents
+from .intent import Authority
 from .reconciliation import target_policy_denial
 
 REDACTED = "[redacted]"
@@ -93,6 +94,7 @@ def target_projection(
         engine.list_active_intents(target), key=lambda item: item.priority, reverse=True
     )  # type: ignore[attr-defined]
     fields: list[dict[str, Any]] = []
+    held_fields = explicitly_held_fields(intents)
     if resolved is not None:
         for field, value in sorted(resolved.value.items()):
             setters = [intent for intent in intents if field in intent.set]
@@ -101,7 +103,7 @@ def target_projection(
             for operation in ("cap", "floor", "offset", "multiply"):
                 for intent in intents:
                     values = getattr(intent, operation)
-                    if field in values:
+                    if field in values and (field not in held_fields or intent.authority >= Authority.HOLD):
                         modifiers.append(
                             {
                                 "operation": operation,
@@ -143,7 +145,9 @@ def target_projection(
             if resolved and resolved.winning_intent and rule_id == resolved.winning_intent.rule_id
             else "losing"
         )
-        if status.get("blocked_by"):
+        if rule_id in getattr(engine, "dismissed_rule_ids", lambda _target: [])(target):
+            state = "dismissed"
+        elif status.get("blocked_by"):
             state = "blocked"
         elif status.get("phase") == "waiting":
             state = "waiting"
@@ -152,7 +156,7 @@ def target_projection(
         rules.append({"rule_id": rule_id, "state": state, **status})
 
     manual = next(
-        (intent for intent in intents if intent.authority.value == "user" and not intent.rule_id),
+        (intent for intent in intents if intent.authority.value in {"user", "hold"} and not intent.rule_id),
         None,
     )
     revealed = None
@@ -176,6 +180,7 @@ def target_projection(
     return redact_sensitive(
         {
             "target": target,
+            "dismissed_rule_ids": getattr(engine, "dismissed_rule_ids", lambda _target: [])(target),
             "desired": None if resolved is None else dict(resolved.value),
             "fields": fields,
             "rules": rules,

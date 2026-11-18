@@ -582,11 +582,78 @@ rules:
   evening schedule or retained presence Intent cannot immediately relight it.
   A stuck occupied sensor keeps the override in place.
 - `resume: until_resumed`: no automatic expiration.
+- `resume: activation` (opt-in): ordinary manual control dismisses all currently
+  active, non-important Rule contributions to this Target, including shadowed
+  contributions. Each dismissal ends when that contribution becomes inactive,
+  including its retention. A fresh ordinary activation can take control without
+  reviving other dismissed contributions. Generated value changes are not fresh
+  activations. Target defaults are never dismissed. If there are no current
+  contributions to dismiss, the existing timed fallback is used.
 
 The captured policy survives restart and rule reload. Vacancy confirmation
 restarts after restart: downtime is not evidence of vacancy. Policy edits affect
 new overrides. Use `intentional.clear` or **Resume rule control now** in the
 Target explanation to release an override immediately.
+
+Activation dismissals survive restart and unchanged Rule reloads. A semantic
+edit to a dismissed Rule ends that Rule's dismissal. Configure Rule retention
+(`hold.until` with vacancy confirmation, for example) to avoid treating presence
+flicker as a new session. A restart's initial dwell does not itself end a dismissal.
+
+#### Authority and explicit holds
+
+Authority is ordered `sensor < automation < user < important < hold < protected`.
+Ordinary manual commands use `user`. Author a short-lived indication with
+`authority: important` to interrupt ordinary manual control without consuming
+the manual preference. When the indication ends, that preference is visible
+again, unless its own Resume policy ended meanwhile.
+
+An explicit `intentional.fire` request with `hold: true` uses `hold` authority.
+It protects requested fields from current **and future** lower-authority claims,
+including lower-authority modifiers. Use `resume: timed` plus `ttl` (seconds), or
+`resume: until_resumed`. For example, holding only `rgb_color` does not hold power
+or brightness. `authority: protected` remains above explicit holds; explicitly
+pause that Rule to stop it. These tiers are configured, not inferred at runtime.
+
+#### Native dashboard hold controls
+
+Opt in selected light Targets to five normal HA entities: **Hold duration**
+(select), **Hold off**, **Hold current settings**, **Resume automation** (buttons),
+and **Manual control status** (sensor). No custom card is required.
+
+```yaml
+targets:
+  light.office:
+    manual_override:
+      resume: activation
+      hold_controls: true
+  light.living_room_lamp:
+    manual_override:
+      resume: activation
+      hold_controls: Living room lights
+  light.living_room_cabinet:
+    manual_override:
+      resume: activation
+      hold_controls: Living room lights
+rules: []  # Add your existing Rules here.
+```
+
+`hold_controls: true` creates a control scope for that Target. The same string
+on multiple Targets creates **one named scope** controlling exactly those Targets,
+not everything in their HA area. Controls require managed/apply light Targets.
+
+Duration choices are 15 minutes, 30 minutes, 1, 2, or 4 hours, and Until resumed.
+Choosing a duration does not start a hold or change an existing hold; pressing a
+Hold button uses the selection (default: 1 hour). Pressing Hold again replaces
+the hold and starts a new duration. Hold off actually requests off; it does not
+merely disable Rules. Hold current settings captures each light independently,
+including lights that are off; unavailable states are rejected before capture.
+
+Holds survive restart with the original expiry. Resume removes manual preferences
+and activation dismissals for the scope and reveals **current** Rule demand.
+Status reports `automatic`, `manual`, `dismissed`, `held`, `held_off`, or `mixed`,
+with `ends_at` and per-Target expiry, held fields, dismissed Rule IDs, and winning
+authority in attributes. Protected Rules can still interrupt an explicit hold.
 
 `unattributed` controls which unexplained state differences may become overrides:
 `all` preserves existing behavior; `power` accepts power-state differences but

@@ -2358,9 +2358,12 @@ function targetExplanation(projection) {
   if (projection.manual_override) {
     const manual = projection.manual_override;
     if (manual.resume === "until_vacant") return `Manual control is active until ${manual.vacancy_entity} reports vacant continuously for ${manual.vacancy_for_ms / 1000}s. Manual off also waits for retained lighting demand to end. You can resume rule control below.`;
+    if (manual.resume === "activation") return "Current rule contributions are dismissed until each activation ends. A fresh ordinary activation can take over without reviving the other dismissed contributions. Resume rule control below to clear all dismissals now.";
+    if (manual.owner?.authority === "hold") return `An explicit hold protects the requested fields against current and future ordinary or important rules${manual.remaining_ms == null ? " until you resume" : `, expiring ${formatRemaining(manual.remaining_ms)}`}. Protected rules can still interrupt it.`;
     if (manual.resume === "until_resumed") return "Manual control is active until you resume rule control below.";
     return `A manual override is active, expiring ${formatRemaining(manual.remaining_ms)}. Wait for expiry or resume rule control below.`;
   }
+  if (projection.dismissed_rule_ids?.length) return `Some current rule contributions remain manually dismissed: ${projection.dismissed_rule_ids.join(", ")}. Fresh activations can still contribute. Use the scope's Resume automation control to clear dismissals.`;
   if (runtime.pending_drift) return "The device differs from the last applied plan. Intentional is waiting to confirm whether this is a manual change.";
   if (runtime.transition_suppressed) return "A transition is in progress. Intentional is giving the device time to reach the desired state.";
   if (projection.plan_match === "match") return "Home Assistant confirms the resolved desired state.";
